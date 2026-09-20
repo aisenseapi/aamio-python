@@ -25,6 +25,7 @@ from types import SimpleNamespace
 sys.path.insert(0, "src")
 
 from aamio.mcp_server import TOOLS, dispatch
+from aamio import mcp_server
 from aamio.runtime import Channel, Runtime, SendFailed
 from signing import keypair, stored
 
@@ -84,10 +85,32 @@ def test_verified_and_unknown_are_separate_facts():
 
 def test_the_public_key_survives_the_read_tool():
     runtime, _ = runtime_holding([message(1, "stranger-one", "hello")])
-    runtime.read = lambda wait: runtime.poll(runtime.channels["inbox"])[1]
+    # The stub takes what Runtime.read takes: wait and a limit. It has had both
+    # since AAM-011; only the tool could not pass the second one.
+    runtime.read = lambda wait, limit=50: runtime.poll(runtime.channels["inbox"])[1]
     out = dispatch(runtime, "aamio_read", {})
 
     assert out["structuredContent"]["messages"][0]["from_key"] == KEYS["stranger-one"].public
+
+
+def test_a_model_can_say_how_much_comes_back():
+    """A thread may hold two hundred messages of 65536 bytes, and the tool took no limit.
+
+    The runtime capped at fifty and a model could neither see that nor ask for less,
+    so one read could carry more than the conversation holds.
+    """
+    runtime, _ = runtime_holding([message(1, "stranger-one", "hello")])
+    asked = []
+    runtime.read = lambda wait, limit=50: (asked.append(limit), runtime.poll(runtime.channels["inbox"])[1])[1]
+
+    dispatch(runtime, "aamio_read", {})
+    dispatch(runtime, "aamio_read", {"limit": 3})
+
+    assert asked == [50, 3], "the limit a model asked for did not reach the runtime: %s" % asked
+
+    tool = next(t for t in mcp_server.TOOLS if t["name"] == "aamio_read")
+    assert "limit" in tool["inputSchema"]["properties"]
+    assert "fifty by default" in tool["description"], "a default nobody is told is a default nobody uses"
 
 
 def refused_send(outcome):
