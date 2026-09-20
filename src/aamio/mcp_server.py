@@ -88,7 +88,19 @@ def dispatch(runtime: Runtime, name: str, arguments: dict):
         if name == "aamio_send":
             return result_of(runtime.send(arguments.get("to"), arguments.get("text"), arguments.get("data")))
         if name == "aamio_read":
-            messages = runtime.read(int(arguments.get("wait") or 0), int(arguments["limit"]) if arguments.get("limit") else 50)
+            asked = arguments.get("limit")
+
+            # The schema says an integer from 1 to 200 and nothing enforced it, so -5
+            # reached the runtime and 999 did too. A refusal says what to send instead,
+            # as every other refusal here does.
+            if asked is not None and (isinstance(asked, bool) or not isinstance(asked, int) or not 1 <= asked <= 200):
+                return result_of({
+                    "error": "limit must be a whole number of messages from 1 to 200",
+                    "fix": "Leave it out for the default of fifty, or pass a smaller number and read the rest with the next call.",
+                    "given": asked,
+                }, is_error=True)
+
+            messages = runtime.read(int(arguments.get("wait") or 0), asked if asked else 50)
             attention = runtime.attention_taken()
             # from_key used to be stripped here. It is the sender's public
             # Ed25519 key -- the thing that appears on every board post, not a

@@ -238,6 +238,36 @@ def test_an_entry_inherited_without_the_flag_is_still_known_to_have_been_sent(ho
         runtime.close()
 
 
+def test_the_read_limit_is_enforced_not_only_declared(home_dir):
+    """The schema said an integer from 1 to 200 and nothing checked it.
+
+    -5 reached the runtime, and so did 999. A schema a model is shown and a
+    dispatch that ignores it are two different promises.
+    """
+    runtime = Runtime(home=home_dir, archive=False)
+    asked = []
+    runtime.read = lambda wait, limit=50: (asked.append(limit), [])[1]
+
+    try:
+        for bad in (0, -5, 201, 999, "ten", 3.7, True):
+            answer = dispatch(runtime, "aamio_read", {"limit": bad})
+
+            assert answer["isError"] is True, "limit=%r was accepted" % bad
+            assert "fix" in answer["structuredContent"], bad
+
+        assert asked == [], "a refused limit still reached the runtime: %s" % asked
+
+        for good in (1, 50, 200):
+            assert dispatch(runtime, "aamio_read", {"limit": good}).get("isError") is not True, good
+
+        assert asked == [1, 50, 200], asked
+
+        dispatch(runtime, "aamio_read", {})
+        assert asked[-1] == 50, "no limit should mean the documented default"
+    finally:
+        runtime.close()
+
+
 def test_forget_tells_five_outcomes_apart(home_dir):
     """A boolean was too few words, and the wrong one shipped in a package.
 
