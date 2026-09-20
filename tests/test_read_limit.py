@@ -50,7 +50,7 @@ def build(threads, allow=None):
     runtime._open = lambda message: ({"text": message["body"]}, {"signed": bool(message.get("from")), "encrypted": False, "format": "text"})
     runtime.asked = []
 
-    def read(w, read_key, after, wait):
+    def read(w, read_key, after, wait, **limits):
         runtime.asked.append((w, after))
         held = threads[w]
         answer = {"exists": True, "created_at": 1000, "messages": [m for m in held["messages"] if m["seq"] > after]}

@@ -72,7 +72,7 @@ def build(home, waiting):
     runtime._open = lambda message: ({"post": "p1", "text": message["body"]}, {"signed": True, "encrypted": False, "format": "json"})
     runtime.asked = []
 
-    def read(w, read_key, after, wait):
+    def read(w, read_key, after, wait, **limits):
         runtime.asked.append(w)
         held = [m for m in waiting.get(w, []) if m["seq"] > after]
 

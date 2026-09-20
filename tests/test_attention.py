@@ -37,7 +37,7 @@ def build(answers):
     runtime.listener = None
     runtime.ensure_inbox = lambda: runtime.channels["inbox"]
     runtime.publish_presence = lambda force=False: None
-    runtime.client = SimpleNamespace(read=lambda w, read_key, after, wait: answers.pop(0))
+    runtime.client = SimpleNamespace(read=lambda w, read_key, after, wait, **limits: answers.pop(0))
 
     return runtime
 
@@ -116,7 +116,7 @@ def test_a_dead_channel_does_not_eat_the_whole_wait():
     """The first channel used to spend the wait whether or not it answered."""
     asked = []
 
-    def read(w, read_key, after, wait):
+    def read(w, read_key, after, wait, **limits):
         asked.append((w, wait))
         return (410, {}) if w.startswith("d") else (200, {"messages": []})
 

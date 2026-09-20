@@ -367,7 +367,7 @@ def test_the_key_is_gone_before_the_message_is_archived(home):
     runtime = build(home)
     runtime.partners = [{"name": "alice", "key": PARTNER.public}]
     channel = Channel("inbox", "read", "i" * 20, time.time() + 600)
-    runtime.client = SimpleNamespace(read=lambda w, read_key, after, wait: (200, {"messages": [stored("i" * 20, 1, "sealed", PARTNER)]}))
+    runtime.client = SimpleNamespace(read=lambda w, read_key, after, wait, **limits: (200, {"messages": [stored("i" * 20, 1, "sealed", PARTNER)]}))
     runtime._open = lambda message: ({"from": "abcd1234", "text": "Scope team", "data": {"aamio_scope": {"name": "team", "key": VECTOR_KEY}}}, {"signed": True, "encrypted": True, "format": "json"})
 
     state, entries = runtime.poll(channel)
@@ -381,7 +381,7 @@ def test_a_share_that_cannot_be_saved_is_not_kept_and_the_rest_of_the_batch_arri
     runtime = build(home)
     runtime.partners = [{"name": "alice", "key": PARTNER.public}]
     channel = Channel("inbox", "read", "i" * 20, time.time() + 600)
-    runtime.client = SimpleNamespace(read=lambda w, read_key, after, wait: (200, {"messages": [stored("i" * 20, n, "sealed %d" % n, PARTNER) for n in (1, 2)]}))
+    runtime.client = SimpleNamespace(read=lambda w, read_key, after, wait, **limits: (200, {"messages": [stored("i" * 20, n, "sealed %d" % n, PARTNER) for n in (1, 2)]}))
     bodies = {1: {"text": "Scope team", "data": {"aamio_scope": {"name": "team", "key": VECTOR_KEY}}}, 2: {"text": "and the next message"}}
     runtime._open = lambda message: (bodies[message["seq"]], {"signed": True, "encrypted": True, "format": "json"})
 

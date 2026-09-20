@@ -43,7 +43,7 @@ def test_a_poller_that_comes_back_after_close_writes_nothing(home):
     runtime.save_state()
     asked, answer = threading.Event(), threading.Event()
 
-    def read(w, read_key, after, wait):
+    def read(w, read_key, after, wait, **limits):
         asked.set()
         answer.wait(10)
 
@@ -77,7 +77,7 @@ def test_close_waits_for_a_thread_that_is_about_to_finish(home):
     runtime.channels["inbox"] = channel
     asked, done = threading.Event(), []
 
-    def read(w, read_key, after, wait):
+    def read(w, read_key, after, wait, **limits):
         asked.set()
         time.sleep(0.3)
         done.append(True)

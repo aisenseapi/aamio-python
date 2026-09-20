@@ -46,7 +46,7 @@ def build(answers, allow=None):
     runtime.save_state = lambda: None
     runtime.archived = []
     runtime.archive = lambda label, record: runtime.archived.append(record)
-    runtime.client = SimpleNamespace(read=lambda w, read_key, after, wait: answers.pop(0))
+    runtime.client = SimpleNamespace(read=lambda w, read_key, after, wait, **limits: answers.pop(0))
 
     return runtime, runtime.channels["inbox"]
 

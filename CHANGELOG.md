@@ -4,6 +4,24 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.12 - 2026-09-20
+
+0.6.11 was tagged and never published: with a byte budget it handed four messages
+from one channel back as 1, 3, 2, 4. The one that did not fit was put at the end
+of the queue, behind two nobody had looked at yet.
+
+- What a budget cannot hand over waits in front of the queue, in the order it
+  arrived, and the next read drains that first. Once a message is on this machine
+  its order is the only order the caller will ever see.
+- The count reaches the service as `X-Limit`. `poll` took a limit, used it to cut
+  the answer after it arrived, and never sent it, so a read for two messages still
+  pulled the whole thread across the network.
+- One message larger than the whole budget is still handed over -- it is already
+  here -- and now says so. 2054 bytes arriving on a budget of 512 with nothing said
+  reads as a budget that does not work.
+
+Everything in 0.6.11 is in this release; it is listed below.
+
 ## 0.6.11 - 2026-09-20
 
 - `read` and the `aamio read` command take `limit` and `max_bytes`, and send them as

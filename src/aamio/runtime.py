@@ -473,6 +473,9 @@ class Runtime:
         # exactly the same from outside.
         self.attention = {}
         self.inbound = queue.Queue()
+        # Fetched by the listener, offered to a caller, and not taken because the
+        # caller's byte budget was full. In front of the queue on the next read.
+        self.held_back = []
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.listener = None
@@ -2078,8 +2081,19 @@ class Runtime:
         channel.more_at_service = False
         # Passed only when there is one, so a client given a plain read function, as
         # every test and every older integration hands over, is called as before.
-        budget = {} if max_bytes is None else {"max_bytes": max_bytes}
-        status, data = self.client.read(channel.w, channel.read_key, channel.after, wait, **budget)
+        #
+        # Both of them: the count was taken here, used to cut the list after the
+        # answer had arrived, and never sent. A read for two messages still pulled
+        # the whole thread over the network and threw most of it away.
+        limits = {}
+
+        if limit is not None:
+            limits["limit"] = limit
+
+        if max_bytes is not None:
+            limits["max_bytes"] = max_bytes
+
+        status, data = self.client.read(channel.w, channel.read_key, channel.after, wait, **limits)
         if status == 410:
             self._note(channel, "expired", "the thread at this address has expired, so anything written to it before now is gone and nothing more will arrive here")
             return "expired", []
@@ -2110,7 +2124,7 @@ class Runtime:
         if channel.created_at is not None and created is not None and created != channel.created_at and not reset:
             self._note(channel, "restarted", "the thread at this address is a new one, opened at %s where this channel knew one opened at %s, so it is read again from the start" % (created, channel.created_at))
             channel.forget_thread()
-            return self.poll(channel, 0, limit, **({} if max_bytes is None else {"max_bytes": max_bytes}))
+            return self.poll(channel, 0, limit, max_bytes)
         if reset:
             self._note(channel, "restarted", (reset.get("what") if isinstance(reset, dict) else None) or "the service read this thread from the start")
             channel.observed.clear()
@@ -2340,40 +2354,60 @@ class Runtime:
         collected = []
         used = 0
         deadline = time.time() + max(0, int(wait))
-        held = None
+        oversized = None
+
+        # What an earlier read could not fit waits here, in front of the queue and
+        # in the order it arrived. It used to go back on the end of the queue, so
+        # four messages read with a small budget came back 1, then 3, 2, 4: the one
+        # that did not fit had been put behind two nobody had looked at yet. Once a
+        # message is on this machine its order is the only order the caller sees.
+        with self.lock:
+            waiting = list(getattr(self, "held_back", []))
+            self.held_back = []
 
         while len(collected) < limit:
-            remaining = deadline - time.time()
+            if waiting:
+                entry = waiting.pop(0)
+            else:
+                remaining = deadline - time.time()
 
-            try:
-                entry = self.inbound.get(timeout=max(0.0, remaining) if not collected else 0.05)
-            except queue.Empty:
-                if collected or remaining <= 0:
-                    break
+                try:
+                    entry = self.inbound.get(timeout=max(0.0, remaining) if not collected else 0.05)
+                except queue.Empty:
+                    if collected or remaining <= 0:
+                        break
 
-                continue
+                    continue
 
             if max_bytes is not None:
                 weight = len(json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
-                # Whole messages, as the service does it. One message over the
-                # budget on its own is handed over anyway rather than dropped or
-                # held for ever: it is already on this machine, and a queue that
-                # silently keeps a message is the fault this is here to fix.
+                # Whole messages, as the service does it.
                 if collected and used + weight > max_bytes:
-                    held = entry
+                    waiting.insert(0, entry)
                     break
+
+                # One message larger than the whole budget is handed over rather
+                # than held for ever: it is already here, and a queue that quietly
+                # keeps a message is the fault this is here to fix. The caller is
+                # told, because 2054 bytes arriving on a budget of 512 with nothing
+                # said reads as a budget that does not work.
+                if not collected and weight > max_bytes:
+                    self._note_trouble(
+                        "read",
+                        "too_large",
+                        "message %s is %d bytes, larger than the whole budget of %d this read asked for. It was already on this machine, so it is handed over rather than held back for ever, and this read is over budget by design." % (entry.get("seq"), weight, max_bytes),
+                    )
 
                 used += weight
 
             collected.append(entry)
 
-        if held is not None:
-            # Back at the front is not possible with a Queue, so it goes back at
-            # the end and the next read gets it. Order within one channel is the
-            # cursor's business, and every entry carries its own seq.
-            self.inbound.put(held)
-            self._note_trouble("read", "more", "this read stopped at the byte budget it asked for, %d bytes. The rest is still here and the next read hands it over; nothing was dropped." % max_bytes)
+        if waiting:
+            with self.lock:
+                self.held_back = waiting + list(getattr(self, "held_back", []))
+
+            self._note_trouble("read", "more", "this read stopped at the byte budget it asked for, %d bytes. The rest is here in the order it arrived and the next read hands it over; nothing was dropped and nothing changed places." % max_bytes)
 
         return collected
 

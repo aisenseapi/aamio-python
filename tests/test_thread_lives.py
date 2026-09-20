@@ -40,7 +40,7 @@ def build(answers, label="inbox"):
     runtime.name_for_key = lambda key: None
     runtime.asked = []
 
-    def read(w, read_key, after, wait):
+    def read(w, read_key, after, wait, **limits):
         runtime.asked.append(after)
         return answers.pop(0)
 

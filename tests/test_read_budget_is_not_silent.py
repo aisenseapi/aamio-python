@@ -119,7 +119,7 @@ def test_a_budget_reaches_the_service_when_there_is_no_listener():
     runtime, _ = runtime_answering({"exists": True, "created_at": 1000, "messages": [], "next": 0})
     runtime.read(0, 50, max_bytes=4096)
 
-    assert runtime.asked == [{"max_bytes": 4096}], runtime.asked
+    assert runtime.asked == [{"limit": 50, "max_bytes": 4096}], runtime.asked
 
 
 def test_a_budget_bounds_the_answer_when_a_listener_is_running():
