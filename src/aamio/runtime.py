@@ -189,6 +189,14 @@ class SendFailed(RuntimeError):
         self.opened = opened
 
 
+class WorkDropped(RuntimeError):
+    """The proof of work finished after the message was dropped, so nothing was sent.
+
+    Not a failure and not an unknown outcome: the send stopped because this side asked
+    it to, through aamio_outbox_forget or close(), and it stopped before the POST.
+    """
+
+
 class Channel:
     def __init__(self, label, read_key, w, expire_at, allow=None, after=0, created_at=None):
         self.label = label
@@ -1443,6 +1451,10 @@ class Runtime:
             "status": "sending",
             "last_status": None,
             "replaces": replaces,
+            # This entry is the outbox's to hand out and to drop. An entry built by a
+            # caller and delivered directly is not, and its absence from the outbox
+            # means it was never there rather than that somebody dropped it.
+            "tracked": True,
         }
         with self.lock:
             self.outbox[entry["id"]] = entry
@@ -1569,6 +1581,24 @@ class Runtime:
         nonce = gate_solve(w, self.keys.public, body_text, bits, deadline)
 
         if entry is not None:
+            # The work is done and nothing has left yet. aamio_outbox_forget drops the
+            # entry and close() releases the home, and both say nothing is sent
+            # afterwards. Until 20 September neither was checked here: the thread held
+            # the entry object, so it posted a message that had been dropped, and posted
+            # into a home a successor process might already hold. Checked inside the
+            # lock forget pops under, so there is no window between looking and sending.
+            with self.lock:
+                dropped = entry.get("tracked") is True and self.outbox.get(entry["id"]) is not entry
+                wanted = not dropped and getattr(self, "home_released", False) is not True
+
+                if wanted:
+                    entry["posting"] = True
+
+            if not wanted:
+                raise WorkDropped(
+                    "the proof of work finished after this message was dropped, so nothing was sent"
+                )
+
             entry["status"] = "sending"
             self.save_outbox()
 
@@ -1639,6 +1669,12 @@ class Runtime:
         where = "send %s" % entry["id"]
         try:
             status, result = self._deliver(entry)
+        except WorkDropped as dropped:
+            # Said before the generic catch below, which would have called this
+            # "may or may not have been sent". It was not sent, on purpose.
+            self._note_trouble(where, "dropped", "the message to %s was not sent: %s" % (self.name_for_key(key) or entry["w"], dropped))
+
+            return
         except GateStop as stop:
             self._note_trouble(where, "refused", "the message to %s was not sent: %s" % (self.name_for_key(key) or entry["w"], stop.reason))
             return
@@ -1678,12 +1714,26 @@ class Runtime:
         return out
 
     def outbox_forget(self, message_id):
-        """Drop an entry once its fate no longer matters. Nothing is retried after this."""
+        """Drop an entry once its fate no longer matters. Nothing is retried after this.
+
+        A send that is already away cannot be recalled, and this says so rather than
+        reporting a clean stop: the difference decides whether the caller may compose
+        a replacement.
+        """
         with self.lock:
             entry = self.outbox.pop(message_id, None)
+            already = bool(entry and entry.get("posting"))
+
         self.save_outbox()
 
-        return {"id": message_id, "forgotten": entry is not None}
+        return {
+            "id": message_id,
+            "forgotten": entry is not None,
+            "already_sending": already,
+            "note": "a send was already away when this was dropped, so its outcome stays unknown and nothing here can recall it"
+            if already
+            else "nothing had left this machine for it, and nothing will now",
+        }
 
     # ---------------------------------------------------------- effects --
 
