@@ -517,8 +517,13 @@ class Runtime:
             self._save_json("effects.json", self.effects)
 
     def archive(self, label, record):
+        """Writes one record, and says whether it wrote one.
+
+        A folder that keeps nothing is not a failure, and it is not a write either.
+        Returning nothing let the caller call both of them archived.
+        """
         if not self.archive_enabled or getattr(self, "home_released", False) is True:
-            return
+            return False
         # ensure_ascii=False so ordinary non-English text stays readable in the
         # file. Some text cannot be written that way at all: JSON can carry a
         # lone surrogate, Python will happily parse it into a str, and UTF-8
@@ -552,6 +557,8 @@ class Runtime:
                 os.fsync(handle.fileno())
         if time.time() - getattr(self, "pruned_at", 0.0) > 3600:
             self._prune()
+
+        return True
 
     # ---------------------------------------------------------- partners --
 
@@ -1999,8 +2006,13 @@ class Runtime:
             # do. Nor is it swallowed: it stays on the entry and in the log,
             # because a storage failure is worth knowing about.
             try:
-                self.archive(channel.label, dict(entry, kind="received"))
-                entry["archived"] = True
+                wrote = self.archive(channel.label, dict(entry, kind="received"))
+                entry["archived"] = wrote is not False
+
+                if wrote is False:
+                    # Nothing went wrong and nothing was written: this folder keeps
+                    # nothing decrypted. Said, so the caller does not go looking.
+                    entry["archive_off"] = True
             except Exception as error:
                 entry["archived"] = False
                 entry["archive_error"] = "%s: %s" % (error.__class__.__name__, error)

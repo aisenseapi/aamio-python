@@ -154,5 +154,10 @@ def test_archiving_off_is_not_a_failure(home):
     state, entries = deliver(runtime, channel, [ORDINARY])
 
     assert state == "ok"
-    assert entries[0]["archived"] is True
+    # It said archived: True for a message it had not written, which is how an
+    # application came to look for it in an archive this folder never keeps.
+    # Off is still not a failure: no archive_error, and the reason is said.
+    assert entries[0]["archived"] is False
+    assert entries[0]["archive_off"] is True
+    assert "archive_error" not in entries[0]
     assert not os.path.exists(os.path.join(str(home), "archive", "board.jsonl"))
