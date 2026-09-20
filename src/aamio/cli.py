@@ -151,7 +151,7 @@ def main(argv=None):
     p.add_argument("--wait", type=int, default=0)
     p.add_argument("--limit", type=int, default=None, help="at most this many messages")
     p.add_argument("--max-bytes", type=int, default=None, dest="max_bytes",
-                   help="at most this many bytes of messages; whole messages only")
+                   help="bytes of messages to hand over, per channel; whole messages only, and one larger than the budget still comes")
     p = sub.add_parser("receipt")
     p.add_argument("--channel", default="inbox")
     p.add_argument("--anchor", action="store_true")

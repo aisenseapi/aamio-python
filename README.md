@@ -137,6 +137,7 @@ An empty list means nobody wrote only when nothing else is said. `read` answers 
 | `restarted` | a new thread opened at the same address, and it was read from the start |
 | `more` | the read stopped at its `limit` or its byte budget, or the service had more than the budget allowed; nothing was passed over, the cursor stands at the last message handed over, so read again |
 | `too_large` | one message is larger than the byte budget asked for, so it was not sent; it says which and how big, and it stays there until the budget is raised or its `seq` is stepped past |
+| `over_budget` | one message already fetched is larger than the whole budget asked for, so it was handed over anyway rather than held back for ever; the opposite of `too_large`, which did not arrive |
 | `filtered` | board replies left messages out; read shows them |
 | `delivered`, `refused`, `unknown`, `stopped` | how a send that was still working in the background ended |
 
@@ -156,6 +157,15 @@ leave it, and you either raise the budget or step past its `seq`.
 
 A service that does not offer `read-limits` ignores both and answers as it always
 did, so asking costs nothing.
+
+The budget is spent per channel, not across them: a read that finds messages on
+three channels can return that much from each, because a budget split between them
+would refuse a message that fits and nothing here knows beforehand which channel
+holds the bytes. And a message already on this machine that is larger than the
+whole budget is handed over rather than held back for ever. Both are said in
+`attention`, the first as `more` and the second as `over_budget`, so neither is a
+surprise. Only the service's own budget is a hard ceiling, and there it answers
+with `too_large` and sends nothing.
 
 ```python
 answer = runtime.read(wait=0, limit=20, max_bytes=8192)

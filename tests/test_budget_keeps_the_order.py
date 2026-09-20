@@ -177,3 +177,79 @@ def test_a_read_always_tells_the_service_how_many_it_wants():
     runtime.poll(runtime.channels["inbox"], 20)
 
     assert runtime.asked == [{}], runtime.asked
+
+
+# ------------------------------------------ and what the description promises --
+
+def test_the_local_tool_does_not_promise_a_hard_ceiling_it_does_not_keep():
+    """Codex, 20 September 2026: the tool said "at most this many bytes" and two
+    things here are not at most.
+
+    The budget is spent per channel, because a budget divided between channels would
+    refuse a message that fits and the caller cannot know beforehand which channel
+    holds the bytes. A read across three channels can therefore hand over three
+    budgets. And one message larger than the whole budget is handed over rather than
+    held back for ever, because it is already on this machine.
+
+    Both are deliberate. Neither is 'at most', and a model that reads 'at most' and
+    sizes its context on it is being told something untrue by the tool it trusts.
+
+    The service's own budget is a hard one: it reads one thread and sends nothing
+    rather than one message over. That description stays as it is.
+    """
+    from aamio.mcp_server import TOOLS
+
+    tool = next(t for t in TOOLS if t["name"] == "aamio_read")
+    said = tool["inputSchema"]["properties"]["max_bytes"]["description"]
+
+    assert "per channel" in said or "each channel" in said, (
+        "the budget is spent per channel and the description does not say so: %s" % said)
+    assert "larger than the budget" in said or "larger than the whole budget" in said, (
+        "a message over the budget is handed over anyway and the description does not say so: %s" % said)
+
+
+def test_the_command_line_says_the_same_thing():
+    import argparse
+
+    from aamio import cli
+
+    captured = {}
+    original = argparse.ArgumentParser.parse_args
+
+    def capture(self, *args, **kwargs):
+        captured["parser"] = self
+        raise SystemExit(0)
+
+    argparse.ArgumentParser.parse_args = capture
+
+    try:
+        cli.main([])
+    except SystemExit:
+        pass
+    finally:
+        argparse.ArgumentParser.parse_args = original
+
+    read = None
+
+    for action in captured["parser"]._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            read = action.choices.get("read")
+
+    said = " ".join(a.help or "" for a in read._actions)
+
+    assert "per channel" in said, said
+
+def test_a_message_that_came_and_one_that_did_not_are_not_the_same_state():
+    """Both were called too_large.
+
+    One means it is still at the service and a bigger budget would fetch it. The
+    other means it is here, over the budget, because it was already on this machine.
+    A reader acting on the state would do the wrong thing for one of them whichever
+    way it guessed.
+    """
+    runtime = listening_runtime([entry(1, size=2000)])
+    runtime.read(0, 50, max_bytes=512)
+    states = [note["state"] for note in runtime.attention_taken()]
+
+    assert states == ["over_budget"], (
+        "a message that was handed over is reported as one that was not: %s" % states)

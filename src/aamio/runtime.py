@@ -2393,9 +2393,13 @@ class Runtime:
                 # told, because 2054 bytes arriving on a budget of 512 with nothing
                 # said reads as a budget that does not work.
                 if not collected and weight > max_bytes:
+                    # Not too_large: that is the service's word for a message that
+                    # did not come and is still there. This one came. Under one name
+                    # a reader cannot tell which happened, and the two call for
+                    # opposite actions.
                     self._note_trouble(
                         "read",
-                        "too_large",
+                        "over_budget",
                         "message %s is %d bytes, larger than the whole budget of %d this read asked for. It was already on this machine, so it is handed over rather than held back for ever, and this read is over budget by design." % (entry.get("seq"), weight, max_bytes),
                     )
 

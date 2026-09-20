@@ -21,6 +21,15 @@ of the queue, behind two nobody had looked at yet.
   reads as a budget that does not work.
 
 Everything in 0.6.11 is in this release; it is listed below.
+- The byte budget says what it does. `aamio_read` and `aamio read --max-bytes`
+  said "at most this many bytes" and two things here are not at most: the budget
+  is spent per channel, and one message already fetched that is larger than the
+  whole budget is handed over rather than held back for ever. Both are deliberate
+  and both are now in the words a model reads before it sizes its context.
+- A message that arrived over budget is `over_budget` in `attention`, not
+  `too_large`. `too_large` is the service's word for a message that did *not*
+  arrive and is still there; under one name a reader could not tell which had
+  happened, and the two call for opposite actions.
 
 ## 0.6.11 - 2026-09-20
 
