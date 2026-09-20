@@ -202,6 +202,11 @@ def outbox_outcome(entry):
 
     status = entry.get("status")
 
+    # Read before the statuses, because a retry sets the status back to working
+    # while the first attempt is still with the other side.
+    if entry.get("posting") and status == "working":
+        return "attempted"
+
     if status == "delivered":
         return "delivered"
 
@@ -395,6 +400,12 @@ class Runtime:
         # Whether it reached aamio is unknown, and it stays unknown until
         # somebody looks. Retrying is a decision, not a default.
         for entry in self.outbox.values():
+            # A post that happened is history, and a retry rewrites the status, so
+            # the flag carries it instead. Without this an entry that came back as
+            # unknown or refused reported never_sent while its retry did the work.
+            if entry.get("status") in ("sending", "unknown", "refused", "delivered"):
+                entry["posting"] = True
+
             if entry.get("status") == "sending":
                 entry["status"] = "unknown"
                 entry["note"] = "the process stopped while this was in flight"
