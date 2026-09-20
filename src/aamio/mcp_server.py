@@ -13,7 +13,7 @@ import time
 
 from . import __version__
 from .gate import GateStop
-from .runtime import Runtime, SendFailed, send_advice, BOARD_TTL
+from .runtime import Runtime, SendFailed, send_advice, outbox_outcome, OUTBOX_NOTES, BOARD_TTL
 
 SUPPORTED = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"]
 
@@ -156,13 +156,28 @@ def dispatch(runtime: Runtime, name: str, arguments: dict):
             if done:
                 return result_of(done[0])
 
-            # Nothing was sent, and the two reasons want different next moves.
+            # Nothing was sent, and the reasons want different next moves, so the
+            # answer names which one rather than offering a choice of two.
+            held = runtime.outbox.get(message_id)
+
+            if held is None:
+                return result_of({
+                    "id": message_id,
+                    "retried": False,
+                    "why": "this outbox has no message with that id",
+                    "fix": "aamio_pending lists what is unsettled on this machine. If it is not there, nothing here is waiting on it.",
+                }, is_error=True)
+
+            settled = outbox_outcome(held)
+
             return result_of({
                 "id": message_id,
                 "retried": False,
-                "why": "that message has a settled outcome, or aamio refused it for a reason that will not change, so the same bytes are not sent again"
-                if message_id in runtime.outbox
-                else "this outbox has no message with that id: aamio_pending lists what is unsettled here",
+                "outcome": settled,
+                "why": OUTBOX_NOTES[settled],
+                "fix": "It is delivered, so sending it again would be a second copy."
+                if settled == "delivered"
+                else "aamio will answer the same for these bytes. Change what is wrong and send a new message, keeping this id out of it.",
             }, is_error=True)
         if name == "aamio_outbox_forget":
             return result_of(runtime.outbox_forget(str(arguments["id"])))

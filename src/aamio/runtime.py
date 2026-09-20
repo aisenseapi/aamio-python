@@ -130,6 +130,11 @@ _LOCKED_HOMES = set()
 # it failed, but not whether it had already stored the message.
 SEND_DETERMINISTIC = (400, 403, 410, 413, 415, 422, 428, 501)
 SEND_TRY_LATER = (429, 503)
+# Answers that prove the message was never stored. The deterministic ones, and a
+# rate window, which aamio decides before it reads the body. 503 is deliberately
+# not here: it can be a front door that saw nothing or the service failing after
+# it had written, and this side cannot tell which.
+SEND_NOT_STORED = SEND_DETERMINISTIC + (429,)
 
 
 def send_advice(outcome, status):
@@ -189,6 +194,15 @@ class SendFailed(RuntimeError):
         self.opened = opened
 
 
+def outbox_open(entry):
+    """Whether this message still has something to decide.
+
+    One place, because two places disagreed: pending listed a message and retry
+    called the same message settled, in the same runtime, in the same second.
+    """
+    return outbox_outcome(entry) in ("attempted", "unknown")
+
+
 def outbox_outcome(entry):
     """Which of five things happened to a send, for a caller deciding whether to replace it.
 
@@ -213,11 +227,19 @@ def outbox_outcome(entry):
     if status == "unknown":
         return "unknown"
 
+    if status == "attempted":
+        # It left this machine and what came back settles nothing.
+        return "attempted"
+
     if status == "refused":
-        # Only what the service said no to. Anything else it answered may have been
-        # stored before it failed, and SEND_DETERMINISTIC is the list of answers that
-        # mean the same bytes would be refused again.
-        return "refused" if entry.get("last_status") in SEND_DETERMINISTIC else "attempted"
+        # The service turned it away without storing it. An earlier attempt that
+        # was left open is not undone by any later refusal, and _record_answer
+        # keeps that as ever_open; this is the same rule for an entry written by
+        # an older version, which had no such field.
+        if entry.get("ever_open"):
+            return "attempted"
+
+        return "refused" if entry.get("last_status") in SEND_NOT_STORED else "attempted"
 
     # The flag is set in the moment before the post, so it is the only mark that means
     # bytes were on their way. attempts counts calls to deliver, and the proof of work
@@ -1778,9 +1800,15 @@ class Runtime:
         try:
             status, result = self._post(entry["w"], entry["envelope"], notes, entry)
         except GateStop as stop:
-            # Nothing left this machine and nothing will: the entry is refused,
-            # not pending, and says why.
-            entry["status"] = "refused"
+            # Nothing left this machine and nothing will. That is not the same as
+            # the service turning bytes away: refused with no answer behind it read
+            # as an attempt that left, so forget said already_sending about a
+            # message the transport had never been asked to send, and a caller told
+            # that cannot compose a replacement for something that never went.
+            #
+            # Unless an earlier attempt is still open. A stop now settles this
+            # decision, not that one.
+            entry["status"] = "unknown" if entry.get("ever_open") else "stopped"
             entry["error"] = stop.reason
             entry["last_at"] = int(time.time())
             self.save_outbox()
@@ -1788,8 +1816,30 @@ class Runtime:
 
         if notes:
             entry["gate_notes"] = notes
+
+        self._record_answer(entry, status, result)
+        self.save_outbox()
+
+        return status, result
+
+    def _record_answer(self, entry, status, result=None):
+        """What one answer changes about a message, which is less than it looks.
+
+        The status on an entry used to be the last HTTP answer wearing the name of an
+        outcome. Every answer that was not 201 and not silence became refused: a 500,
+        a 429, a 503. refused is not a status aamio_pending shows, so a message whose
+        fate was wide open vanished from the list of open ones, while its own note
+        said it might have been stored. forget then called the same entry attempted.
+
+        Certainty only ever narrows, and only in one direction. A delivery settles a
+        message for good. A refusal the service will give again settles it, but only
+        if nothing before it was left open: an attempt that got no answer may be on
+        the other side, and a 410 an hour later says the thread is gone, not that the
+        first attempt never landed.
+        """
         entry["last_status"] = status
         entry["last_at"] = int(time.time())
+        entry["attempts"] = int(entry.get("attempts") or 0)
 
         # An inbox that is not there, or has expired, takes its gate with it:
         # the next send to this address reads the gate of whatever is there then.
@@ -1799,21 +1849,50 @@ class Runtime:
         if status == 201:
             entry["status"] = "delivered"
             entry["seq"] = (result or {}).get("seq") if isinstance(result, dict) else None
-        elif status == 0:
-            # No reply. The bytes may have arrived, so this is not a failure
-            # we are allowed to call a failure.
+
+            return
+
+        error = (result or {}).get("error") if isinstance(result, dict) else str(result)[:200]
+
+        if error:
+            entry["error"] = error
+
+        # No reply at all. The bytes may be on the other side.
+        if status == 0:
+            entry["ever_open"] = True
             entry["status"] = "unknown"
-        else:
-            entry["status"] = "refused"
-            entry["error"] = (result or {}).get("error") if isinstance(result, dict) else str(result)[:200]
 
-        self.save_outbox()
+            return
 
-        return status, result
+        # The service turned the request away without storing it: either it will
+        # say the same about these bytes for ever, or it was a rate window, which
+        # is decided before the body is read. Both are settled as not stored.
+        if status in SEND_NOT_STORED:
+            # Unless something earlier was left open. A 410 an hour later says the
+            # thread is gone now, not that an attempt which got no answer never
+            # landed, and the entry used to be reported as refused and not stored.
+            entry["status"] = "attempted" if entry.get("ever_open") else "refused"
+
+            return
+
+        # It answered, and its answer says nothing about whether it stored the
+        # message first: a 500 is the service failing, not the service saying no.
+        # This wore the status refused, and refused is not one of the statuses
+        # pending shows, so a message whose fate was wide open vanished from the
+        # list of open ones while its own note said it might have been stored.
+        entry["ever_open"] = True
+        entry["status"] = "attempted"
 
     def outbox_pending(self):
-        """Messages whose fate is not settled: working, in flight, or unknown after a stop."""
-        return [dict(e) for e in self.outbox.values() if e["status"] in ("working", "sending", "unknown")]
+        """Messages whose fate is not settled: working, in flight, or open after an answer.
+
+        attempted belongs here and was missing. A 500 set the status to refused, which
+        is not in this list, so the one kind of message that most needs a decision was
+        the one kind that did not appear on it. And then this list and outbox_retry
+        disagreed about the same entry, which is why both now ask outbox_open.
+        """
+        return [dict(e) for e in self.outbox.values()
+                if e["status"] in ("working", "sending") or outbox_open(e)]
 
     def _deliver_after_work(self, entry, body, key, archived_data=None):
         """The background half of a send whose work was too long to wait for.
@@ -1860,10 +1939,13 @@ class Runtime:
         for entry in list(self.outbox.values()):
             if message_id is not None and entry["id"] != message_id:
                 continue
-            if entry["status"] not in ("unknown", "refused"):
+
+            # The same question pending asks, asked once. A message whose outcome is
+            # open is exactly the message a second attempt is for; one the service
+            # will refuse again, or has already stored, is not.
+            if not outbox_open(entry):
                 continue
-            if entry["status"] == "refused" and entry.get("last_status") in SEND_DETERMINISTIC:
-                continue
+
             status, _ = self._deliver(entry)
             out.append({"id": entry["id"], "w": entry["w"], "status": entry["status"], "http": status})
 
@@ -2006,11 +2088,29 @@ class Runtime:
 
             return {"text": raw}, {"signed": True, "encrypted": False, "format": "json"}
 
+        # Three things, and they used to share one except: opening the envelope,
+        # reading the bytes as text, and the text happening to be JSON. Only the
+        # first two say anything about whether the message can be read. `for your
+        # eyes`, encrypted and signed, opened correctly and came back as text: null,
+        # format: unreadable, with the cursor moved past it -- a message that had
+        # arrived intact, reported as one nobody could read, and then dropped.
+        #
+        # The plain branch above has always handed over text that is not JSON. This
+        # is the same message with a lid on it.
         try:
             plaintext = self.keys.open(message["from"], raw)
-            parsed = json.loads(plaintext.decode("utf-8"))
         except Exception as error:
             return {"text": None}, {"signed": True, "encrypted": True, "format": "unreadable", "error": error.__class__.__name__}
+
+        try:
+            text = plaintext.decode("utf-8")
+        except UnicodeDecodeError as error:
+            return {"text": None}, {"signed": True, "encrypted": True, "format": "unreadable", "error": error.__class__.__name__}
+
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return {"text": text}, {"signed": True, "encrypted": True, "format": "text"}
 
         if isinstance(parsed, dict):
             content, extra = self._canonical(parsed)
@@ -2069,6 +2169,61 @@ class Runtime:
             why = "the message could not be checked here: " + error.__class__.__name__
             return {"channel": channel.label, "seq": seq, "at": at, "verified": False, "from_key": None, "known_contact": False, "sender": "unsigned", "sha256": None, "replay": False, "body": {"text": message.get("body")}, "signed": False, "encrypted": False, "format": "unreadable", "error": error.__class__.__name__, "unverified_because": why}
 
+    def _save_cursor(self, channel, to_seq):
+        """Move the cursor and write it down, and say so if the writing fails.
+
+        The cursor and the replay hashes go in one write, before the caller sees a
+        message, so that a crash cannot redeliver. The write was allowed to throw
+        straight out of poll, and the loop that calls poll logs an exception and
+        sleeps -- so messages that had arrived, been checked and been appended to
+        the channel never reached the queue, and the reader saw an empty inbox with
+        nothing in attention.
+
+        When the write fails the cursor stays where it was last written down. The
+        same messages arrive again on the next read and the stored hashes mark them
+        as replays, which is exactly what a crash would have given, and is the safe
+        direction: a message twice is a nuisance, a message never is a loss.
+        """
+        was = channel.after
+        channel.after = max(channel.after, to_seq)
+
+        if not self._save_quietly(channel, was):
+            channel.after = was
+
+            return False
+
+        return True
+
+    def _set_cursor(self, channel, to_seq):
+        """The cursor moves to exactly this, forwards or backwards, and is written."""
+        was = channel.after
+        channel.after = to_seq
+
+        if not self._save_quietly(channel, was):
+            channel.after = was
+
+    def _save_quietly(self, channel, was=None):
+        """Write the state; a failure is said in attention and never raised.
+
+        Every save inside a poll used to be able to throw straight out at the loop
+        that calls it, which logs and sleeps -- and the messages poll had already
+        decoded went nowhere.
+        """
+        try:
+            self.save_state()
+        except Exception as error:
+            self._note(
+                channel,
+                "unsaved",
+                "this machine could not write down what it had read: %s: %s.%s Nothing was lost: what arrived was handed over, and anything whose place was not written down arrives again and comes back marked as a replay. Free some room or fix the permissions on the home folder, and check aamio doctor."
+                % (error.__class__.__name__, error,
+                   "" if was is None else " The cursor stays at %s." % was),
+            )
+
+            return False
+
+        return True
+
     def poll(self, channel, wait=0, limit=None, max_bytes=None):
         """Reads one channel. With a limit, at most that many messages are handed over.
 
@@ -2116,7 +2271,7 @@ class Runtime:
                 self._note(channel, "gone", "there is no thread at this address any more. It expired and was swept, or the service restarted and it went with it. A write opens a new one here with the default lifetime and without the allowlist or gate this channel was opened with" + (", so a new inbox is opened for the partners" if channel.label == "inbox" else ""))
             channel.gone = True
             channel.forget_thread()
-            self.save_state()
+            self._save_quietly(channel)
             return "gone", []
         channel.gone = False
         created = data.get("created_at")
@@ -2215,14 +2370,12 @@ class Runtime:
             # is a record of what was delivered, not the delivery itself:
             # holding the cursor back would re-read that message forever while
             # the disk stayed full, and redeliver everything after it.
-            channel.after = max(channel.after, entries[-1]["seq"])
-            self.save_state()
+            self._save_cursor(channel, entries[-1]["seq"])
         if kept_out:
             # Past them as well, or the same messages are read and kept out on
             # every call. And said, since a message that does not arrive has to
             # be told from one that was never sent.
-            channel.after = max(channel.after, last_seq)
-            self.save_state()
+            self._save_cursor(channel, last_seq)
             opened_for = "any key, signed only" if "*" in channel.allow else "%d named key(s)" % len(channel.allow)
             self._note(channel, "kept_out", "This channel was opened for %s, and these messages did not satisfy that list as checked here. They are not handed over and not archived." % opened_for, seqs=kept_out)
         # After a reset the service's next is the cursor, and it is lower than
@@ -2235,27 +2388,40 @@ class Runtime:
         # one it did look at, handed over or kept out.
         if channel.left_waiting:
             if last_seq is not None:
-                channel.after = last_seq
-                self.save_state()
+                # Backwards as well as forwards here, so _save_cursor's max is not
+                # the rule: the service's next covers messages this call never
+                # looked at. Same care about the write, though.
+                self._set_cursor(channel, last_seq)
         elif type(data.get("next")) is int:
-            channel.after = data["next"]
-            self.save_state()
+            self._set_cursor(channel, data["next"])
         return "ok", entries
 
     def _poll_loop(self, channel):
         """One long-poll loop per channel, so mail on any channel is seen at once."""
         while not self.stop.is_set() and not channel.closed and channel.expire_at > time.time():
+            entries = []
+
             try:
                 state, entries = self.poll(channel, 20)
                 if state == "expired":
                     break
                 if state in ("error", "gone"):
                     time.sleep(2)
-                for entry in entries:
-                    self.inbound.put(entry)
             except Exception as error:
+                # Whatever went wrong, anything poll had already decoded is on this
+                # machine and is handed over below. Losing it here is how a full disk
+                # turned two messages into an empty inbox with nothing said.
+                self._note_trouble(
+                    "poller %s" % channel.label,
+                    "unread",
+                    "reading this channel stopped part way: %s: %s. Anything already read is handed over; the rest arrives on the next read."
+                    % (error.__class__.__name__, error),
+                )
                 self.log("poller %s: %s" % (channel.label, error))
                 time.sleep(3)
+
+            for entry in entries:
+                self.inbound.put(entry)
         channel.poller = None
 
     def _start_poller(self, channel):

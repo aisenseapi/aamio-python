@@ -4,6 +4,34 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.13 - 2026-09-20
+
+Five findings from a review of the release itself.
+
+- `refused` meant two things. A 500 set the status to refused beside a note saying
+  the message may have been stored, and refused is not a status `aamio_pending`
+  shows -- so the one kind of message that most needs a decision was the one kind
+  that did not appear on the list, and `forget` then called the same entry
+  attempted. The last answer now settles nothing on its own: certainty only
+  narrows, and an earlier attempt left open is not undone by a later refusal.
+- A message the service broke on can be sent again. `attempted` was added to the
+  list of unsettled sends and `outbox_retry` went on refusing it, so the runtime
+  listed a message as needing a decision and refused the one action that makes it.
+  Both now ask the same question in one place.
+- A disk that will not take the cursor no longer loses the message. The save threw
+  out of `poll`, the background loop logged it and slept, and messages already
+  decoded and verified never reached the queue a reader drains -- while the cursor
+  in memory had moved past them. The reader saw an empty inbox and nothing in
+  `attention`.
+- Encrypted plain text survives. `for your eyes`, encrypted and signed without
+  being wrapped as JSON, opened correctly and came back as `text: null`,
+  `format: unreadable`, with the cursor moved past it. Decryption failing and the
+  content not being JSON were in one `try`; they are two different things.
+- A gate this client will not meet is `never_sent`, not a possible delivery. A
+  local stop was recorded as refused, and refused with no answer behind it read as
+  an attempt that left, so `forget` said `already_sending` about a message the
+  transport had never been asked to send.
+
 ## 0.6.12 - 2026-09-20
 
 0.6.11 was tagged and never published: with a byte budget it handed four messages

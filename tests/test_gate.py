@@ -236,7 +236,16 @@ def test_a_requirement_the_client_cannot_meet_sends_nothing(home):
         runtime._deliver(record)
 
     assert posts == []
-    assert record["status"] == "refused" and "toll" in record["error"]
+
+    # Not refused. The service never saw these bytes; this machine decided not to
+    # send them. refused with no answer behind it read as an attempt that left, so
+    # forget said already_sending about a message nothing had been asked to send,
+    # and a caller told that cannot write a replacement. Codex, 20 September 2026.
+    assert record["status"] == "stopped" and "toll" in record["error"]
+
+    from aamio.runtime import outbox_outcome
+
+    assert outbox_outcome(record) == "never_sent", outbox_outcome(record)
 
 
 def test_advice_this_client_passes_over_is_noted_on_the_entry(home):

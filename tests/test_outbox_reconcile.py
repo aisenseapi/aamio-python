@@ -132,7 +132,11 @@ def test_retry_of_an_id_this_outbox_never_had_refuses_and_says_where_to_look(run
     answer = mcp_server.dispatch(runtime, "aamio_outbox_retry", {"id": "nothing"})
 
     assert answer["isError"] is True
-    assert "aamio_pending" in answer["structuredContent"]["why"], "a refusal says what to do instead"
+    # The fix is where a fix goes, by this service's own contract: why says what
+    # happened, fix says what to do. It used to be one sentence carrying both.
+    said = answer["structuredContent"]
+    assert "no message with that id" in said["why"], said
+    assert "aamio_pending" in said["fix"], "a refusal says what to do instead"
 
 
 def test_retry_of_a_settled_message_is_refused_rather_than_sent_again(runtime):
