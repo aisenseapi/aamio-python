@@ -144,9 +144,9 @@ def send_advice(outcome, status):
         return None, (
             "No answer came back, so this message may already have been delivered. Keep its message_id. "
             "aamio_pending lists what has no settled outcome on this machine; it does not confirm delivery, "
-            "and nothing here can, because the address it went to is not yours to read. This interface has no "
-            "retry-by-id tool: do not pass the message_id to aamio_send and do not compose a replacement. "
-            "An approved retry sends the stored bytes again through the runtime's own outbox retry."
+            "and nothing here can, because the address it went to is not yours to read. Do not pass the "
+            "message_id to aamio_send and do not compose a replacement. An approved retry sends the stored "
+            "bytes again: aamio_outbox_retry with this id, or aamio outbox retry --id on the command line."
         )
 
     if status in SEND_TRY_LATER:

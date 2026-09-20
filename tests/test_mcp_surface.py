@@ -230,9 +230,13 @@ def test_no_answer_keeps_the_uncertainty_and_the_id():
     assert out["message_id"]
     # Two things the advice must not tell a model to do from here: read the
     # recipient's thread, which needs their read key, and retry by id through
-    # aamio_send, which takes no id.
+    # aamio_send, which takes no id. Until 20 September there was no retry tool
+    # at all and the advice said so; now it names the one that does the job,
+    # and the rule against composing a replacement is unchanged.
     assert "not yours to read" in out["fix"]
-    assert "no retry-by-id tool" in out["fix"]
+    assert "aamio_outbox_retry" in out["fix"]
+    assert "do not compose a replacement" in out["fix"]
+    assert "no retry-by-id tool" not in out["fix"]
 
 
 def test_a_server_error_is_left_undecided_rather_than_guessed():
