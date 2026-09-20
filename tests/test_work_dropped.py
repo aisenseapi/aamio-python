@@ -236,3 +236,64 @@ def test_an_entry_inherited_without_the_flag_is_still_known_to_have_been_sent(ho
         assert "unknown" in said["note"].lower()
     finally:
         runtime.close()
+
+
+def test_forget_tells_five_outcomes_apart(home_dir):
+    """A boolean was too few words, and the wrong one shipped in a package.
+
+    Until 20 September a send answered 500 was reported as "nothing had left this
+    machine", and so was one the service had already stored. Both invite a second
+    copy. Only a stop before the first post may be called safely unsent.
+    """
+    runtime = Runtime(home=home_dir, archive=False)
+
+    def entry(status, http=None, attempts=1, posting=False):
+        made = {"id": "m-" + status + str(http), "w": "w" * 20, "status": status,
+                "last_status": http, "attempts": attempts, "envelope": {}, "to_key": None}
+
+        if posting:
+            made["posting"] = True
+
+        return made
+
+    try:
+        cases = [
+            (entry("working", attempts=1), "never_sent", False),
+            (entry("sending", attempts=0), "never_sent", False),
+            (entry("working", attempts=1, posting=True), "attempted", True),
+            (entry("refused", 500), "attempted", True),
+            (entry("refused", 403), "refused", True),
+            (entry("delivered", 201), "delivered", True),
+            (entry("unknown", 0), "unknown", True),
+        ]
+
+        for made, outcome, already in cases:
+            runtime.outbox[made["id"]] = made
+            said = runtime.outbox_forget(made["id"])
+
+            assert said["outcome"] == outcome, "%s/%s gave %s" % (made["status"], made["last_status"], said["outcome"])
+            assert said["already_sending"] is already, made["id"]
+            assert said["note"], made["id"]
+
+        gone = runtime.outbox_forget("m-never-existed")
+        assert gone["outcome"] == "not_found" and gone["forgotten"] is False
+        assert gone["already_sending"] is False
+    finally:
+        runtime.close()
+
+
+def test_a_server_error_is_not_called_a_refusal(home_dir):
+    """deliver marks anything that is not 201 and not 0 as refused, so a service that
+    broke shares a status with one that said no. For sending again the difference was
+    small; for "may I compose a replacement" it is the whole question."""
+    runtime = Runtime(home=home_dir, archive=False)
+
+    try:
+        for http, outcome in ((500, "attempted"), (503, "attempted"), (400, "refused"), (410, "refused")):
+            made = {"id": "m-%d" % http, "w": "w" * 20, "status": "refused", "last_status": http,
+                    "attempts": 1, "envelope": {}, "to_key": None}
+            runtime.outbox[made["id"]] = made
+
+            assert runtime.outbox_forget(made["id"])["outcome"] == outcome, http
+    finally:
+        runtime.close()

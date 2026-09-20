@@ -189,6 +189,57 @@ class SendFailed(RuntimeError):
         self.opened = opened
 
 
+def outbox_outcome(entry):
+    """Which of five things happened to a send, for a caller deciding whether to replace it.
+
+    Only a stop before the first POST may be called safely unsent. An attempt that was
+    answered 500 does not prove the message is absent, and one that was delivered is
+    certainly not unsent: both were reported as never sent until 20 September, which
+    invites a second copy.
+    """
+    if entry is None:
+        return "not_found"
+
+    status = entry.get("status")
+
+    if status == "delivered":
+        return "delivered"
+
+    if status == "unknown":
+        return "unknown"
+
+    if status == "refused":
+        # Only what the service said no to. Anything else it answered may have been
+        # stored before it failed, and SEND_DETERMINISTIC is the list of answers that
+        # mean the same bytes would be refused again.
+        return "refused" if entry.get("last_status") in SEND_DETERMINISTIC else "attempted"
+
+    # The flag is set in the moment before the post, so it is the only mark that means
+    # bytes were on their way. attempts counts calls to deliver, and the proof of work
+    # runs inside one of those: a message still working has attempts 1 and has sent
+    # nothing.
+    if entry.get("posting"):
+        return "attempted"
+
+    if status == "working":
+        return "never_sent"
+
+    if int(entry.get("attempts") or 0) > 0:
+        return "attempted"
+
+    return "never_sent"
+
+
+OUTBOX_NOTES = {
+    "never_sent": "nothing had left this machine for it, and nothing will now",
+    "attempted": "a send was attempted and its answer does not prove the message is absent, so its outcome stays unknown and nothing here can recall it",
+    "delivered": "the service had already stored it when this was dropped; dropping the entry does not unsend it",
+    "refused": "the service answered that it refused this one, so it was not stored, but the attempt did leave this machine",
+    "unknown": "a send was already away when this was dropped, so its outcome stays unknown and nothing here can recall it",
+    "not_found": "this outbox has no message with that id, so nothing was dropped and nothing was sent",
+}
+
+
 class WorkDropped(RuntimeError):
     """The proof of work finished after the message was dropped, so nothing was sent.
 
@@ -1739,12 +1790,8 @@ class Runtime:
         """
         with self.lock:
             entry = self.outbox.pop(message_id, None)
-            # The flag is set the moment before a post. The two statuses cover an entry
-            # written by a process that stopped between the post and the next save: a
-            # message that is "unknown" was posted by definition.
-            already = bool(
-                entry and (entry.get("posting") or entry.get("status") in ("sending", "unknown"))
-            )
+            outcome = outbox_outcome(entry)
+            already = outcome not in ("never_sent", "not_found")
 
         self.save_outbox()
 
@@ -1752,9 +1799,8 @@ class Runtime:
             "id": message_id,
             "forgotten": entry is not None,
             "already_sending": already,
-            "note": "a send was already away when this was dropped, so its outcome stays unknown and nothing here can recall it"
-            if already
-            else "nothing had left this machine for it, and nothing will now",
+            "outcome": outcome,
+            "note": OUTBOX_NOTES[outcome],
         }
 
     # ---------------------------------------------------------- effects --
