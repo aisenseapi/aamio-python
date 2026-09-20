@@ -255,3 +255,115 @@ def test_a_message_the_service_refused_is_not_sent_again():
 
     assert transport.post_count == 1, "a settled refusal was sent again"
     assert again == [], "outbox_retry answers with a list of what it sent: %s" % (again,)
+
+def test_a_rate_window_lets_the_same_bytes_through_later():
+    """Codex, 20 September 2026. 429 is the one refusal that says try again:
+    the service turned the request away without reading it, so the message was never
+    stored and the same bytes are what should go. Retry refused to send them, and the
+    local MCP told the caller to change the content -- the opposite of the advice the
+    same runtime gives for the same status.
+    """
+    transport = Transport(posts=[(429, {"error": "too many"}), (201, {"seq": 3})])
+    runtime = sending(transport)
+
+    try:
+        runtime.send(PARTNER_W, "hello")
+    except Exception:
+        pass
+
+    assert transport.post_count == 1, transport.post_count
+    message_id = list(runtime.outbox)[0]
+    runtime.outbox_retry(message_id)
+
+    assert transport.post_count == 2, (
+        "the same bytes were refused for a moment and never sent again")
+    assert runtime.outbox[message_id]["status"] == "delivered"
+
+
+def test_a_refusal_that_will_not_change_is_still_not_sent_again():
+    transport = Transport(posts=[(413, {"error": "too large"})])
+    runtime = sending(transport)
+
+    try:
+        runtime.send(PARTNER_W, "hello")
+    except Exception:
+        pass
+
+    runtime.outbox_retry(list(runtime.outbox)[0])
+
+    assert transport.post_count == 1, "a message that will be refused again was sent again"
+
+def test_work_that_ran_out_of_time_sent_nothing_and_says_so():
+    """Codex, 20 September 2026. gate_solve answers None when the deadline passes,
+    and the flag that means bytes were on their way was set anyway. Zero POSTs, and
+    forget said attempted, already_sending: true.
+    """
+    import aamio.runtime as runtime_module
+
+    transport = Transport()
+    runtime = sending(transport)
+    ran_out = lambda *args, **kwargs: None
+    was = runtime_module.gate_solve
+    runtime_module.gate_solve = ran_out
+    runtime.gates = {}
+
+    try:
+        runtime._post_with_work("w" * 20, "body", "sig", 20, seconds_left=1,
+                                entry={"id": "m-slow", "w": "w" * 20, "status": "sending",
+                                       "attempts": 1})
+    except Exception as stopped:
+        assert stopped.__class__.__name__ == "GateStop", stopped
+    else:
+        raise AssertionError("work that ran out of time did not stop the send")
+    finally:
+        runtime_module.gate_solve = was
+
+    assert transport.post_count == 0, transport.post_count
+
+
+def test_and_the_entry_it_leaves_behind_is_plainly_unsent():
+    import aamio.runtime as runtime_module
+
+    from aamio.runtime import outbox_outcome
+
+    transport = Transport()
+    runtime = sending(transport)
+    entry = {"id": "m-slow", "w": "w" * 20, "status": "sending", "attempts": 1,
+             "envelope": {}, "to_key": None}
+    runtime.outbox["m-slow"] = entry
+    was = runtime_module.gate_solve
+    runtime_module.gate_solve = lambda *args, **kwargs: None
+
+    try:
+        runtime._post_with_work("w" * 20, "body", "sig", 20, seconds_left=1, entry=entry)
+    except Exception:
+        pass
+    finally:
+        runtime_module.gate_solve = was
+
+    assert entry.get("posting") is not True, "the flag that means bytes left was set"
+    assert outbox_outcome(entry) == "never_sent", outbox_outcome(entry)
+
+
+def test_but_an_earlier_attempt_left_open_stays_open():
+    """A stop now settles this decision, not one that is already away."""
+    import aamio.runtime as runtime_module
+
+    from aamio.runtime import outbox_outcome
+
+    transport = Transport()
+    runtime = sending(transport)
+    entry = {"id": "m-again", "w": "w" * 20, "status": "sending", "attempts": 2,
+             "envelope": {}, "to_key": None, "ever_open": True, "posting": True}
+    runtime.outbox["m-again"] = entry
+    was = runtime_module.gate_solve
+    runtime_module.gate_solve = lambda *args, **kwargs: None
+
+    try:
+        runtime._post_with_work("w" * 20, "body", "sig", 20, seconds_left=1, entry=entry)
+    except Exception:
+        pass
+    finally:
+        runtime_module.gate_solve = was
+
+    assert outbox_outcome(entry) in ("attempted", "unknown"), outbox_outcome(entry)

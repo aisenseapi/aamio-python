@@ -319,12 +319,22 @@ def test_a_server_error_is_left_undecided_rather_than_guessed():
 
 
 def test_the_advice_and_the_retry_mechanism_cannot_disagree():
-    from aamio.runtime import SEND_DETERMINISTIC, send_advice
+    """Both halves, by using both.
 
-    # outbox_retry skips exactly these, and send_advice calls exactly these
-    # not worth repeating. One list, so the two cannot drift apart.
+    This used to read send_advice and then write in a comment that outbox_retry skips
+    exactly the same list. The comment was the only thing holding the second half, so
+    when retry changed its filter a 429 came back retryable: true, do not change the
+    content -- and retry refused to send those same bytes. Codex, 20 September 2026.
+    """
+    from aamio.runtime import SEND_DETERMINISTIC, SEND_TRY_LATER, outbox_retryable, send_advice
+
     for status in SEND_DETERMINISTIC:
         assert send_advice("refused", status)[0] is False, status
+        assert not outbox_retryable(
+            {"id": "m", "status": "refused", "last_status": status, "attempts": 1}), status
 
-    for status in (429, 503):
+    for status in SEND_TRY_LATER:
         assert send_advice("refused", status)[0] is True, status
+        assert outbox_retryable(
+            {"id": "m", "status": "refused", "last_status": status, "attempts": 1}), (
+            "%d is advised as worth sending again and retry will not send it" % status)

@@ -177,7 +177,7 @@ def dispatch(runtime: Runtime, name: str, arguments: dict):
                 "why": OUTBOX_NOTES[settled],
                 "fix": "It is delivered, so sending it again would be a second copy."
                 if settled == "delivered"
-                else "aamio will answer the same for these bytes. Change what is wrong and send a new message, keeping this id out of it.",
+                else "aamio will answer the same for these bytes, however long you wait. Change what is wrong and send a new message, keeping this id out of it.",
             }, is_error=True)
         if name == "aamio_outbox_forget":
             return result_of(runtime.outbox_forget(str(arguments["id"])))

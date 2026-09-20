@@ -4,6 +4,19 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.14 - 2026-09-20
+
+- A rate window lets the same bytes through later. 429 answered retryable: true,
+  "do not change the content", and `outbox_retry` refused to send those same bytes
+  -- while the local MCP told the caller to change the message and send a new one.
+  Unsettled and worth sending again are two questions, and retry was asking the
+  first. The old test asserted this contract by reading the advice and writing in
+  a comment that retry skipped the same list; nothing checked the second half.
+- Proof of work that runs out of time sent nothing, and says so. `gate_solve`
+  answers None when the deadline passes, and the flag meaning bytes were on their
+  way was set anyway: zero POSTs, and `forget` answered attempted,
+  already_sending: true. An earlier attempt left open still stays open.
+
 ## 0.6.13 - 2026-09-20
 
 Five findings from a review of the release itself.

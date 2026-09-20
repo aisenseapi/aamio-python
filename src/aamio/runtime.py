@@ -194,6 +194,27 @@ class SendFailed(RuntimeError):
         self.opened = opened
 
 
+def outbox_retryable(entry):
+    """Whether sending these same bytes again is the right next move.
+
+    Not the same question as outbox_open, and retry was asking that one. A rate
+    window is settled -- the service turned the request away without reading the
+    body, so nothing was stored -- and it is also the one refusal whose advice is
+    do not change the content, wait, send it again. Retry refused to do the thing
+    its own advice asked for.
+
+    A refusal the service will repeat is not here, and a delivery is not here.
+    """
+    if entry is None:
+        return False
+
+    if outbox_open(entry):
+        return True
+
+    return (outbox_outcome(entry) == "refused"
+            and entry.get("last_status") in SEND_TRY_LATER)
+
+
 def outbox_open(entry):
     """Whether this message still has something to decide.
 
@@ -1773,6 +1794,17 @@ class Runtime:
         deadline = None if seconds_left is None else time.monotonic() + max(0, seconds_left - 5)
         nonce = gate_solve(w, self.keys.public, body_text, bits, deadline)
 
+        # None is gate_solve saying the time ran out, and it used to fall through to
+        # the line below, which sets the flag that means bytes were on their way. The
+        # transport was never called, and forget answered attempted, already_sending:
+        # true, about a message that had not moved. A caller told that cannot write a
+        # replacement for something that was never sent.
+        if nonce is None:
+            raise GateStop(
+                "the inbox asks for %d bits of work and the time it still takes writes ran out before a nonce was found, so nothing was sent" % bits,
+                "Nothing left this machine. Open a thread with a longer life, or send this to an inbox whose gate asks for less: the same bytes are still here under this message id.",
+            )
+
         # The work is done and nothing has left yet.
         self._about_to_post(entry)
 
@@ -1940,10 +1972,10 @@ class Runtime:
             if message_id is not None and entry["id"] != message_id:
                 continue
 
-            # The same question pending asks, asked once. A message whose outcome is
-            # open is exactly the message a second attempt is for; one the service
+            # Worth sending again, which is not the same as unsettled: a rate window
+            # is settled and is exactly what a second attempt is for. One the service
             # will refuse again, or has already stored, is not.
-            if not outbox_open(entry):
+            if not outbox_retryable(entry):
                 continue
 
             status, _ = self._deliver(entry)
