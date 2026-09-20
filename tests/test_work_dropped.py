@@ -26,7 +26,7 @@ sys.path.insert(0, "src")
 
 import aamio.runtime as mod
 from aamio.mcp_server import dispatch
-from aamio.runtime import Runtime
+from aamio.runtime import Runtime, SendFailed
 
 
 class Held:
@@ -77,6 +77,12 @@ class Held:
 
 
 @pytest.fixture
+def home_dir():
+    with tempfile.TemporaryDirectory(prefix="aamio-unsent-") as made:
+        yield made
+
+
+@pytest.fixture
 def held():
     with tempfile.TemporaryDirectory(prefix="aamio-work-dropped-") as home:
         made = Held(home)
@@ -122,3 +128,33 @@ def test_a_send_already_away_is_not_claimed_to_be_stopped(held):
 
     assert said["already_sending"] is True
     assert "unknown" in said["note"].lower(), said["note"]
+
+
+def test_a_send_whose_answer_never_came_is_not_called_unsent(home_dir):
+    """The first fix set the flag only on the path that does proof of work.
+
+    A send with no work posts through another line, so a message that went out and got
+    no answer carried no flag, and forget answered that nothing had left this machine.
+    A caller reading that composes a replacement, and the first one may already be
+    there. Found in a second review the same day.
+    """
+    runtime = Runtime(home=home_dir, archive=False)
+
+    try:
+        runtime.ensure_inbox = lambda: SimpleNamespace(w='i' * 20)
+        runtime.client.post = lambda *a, **k: (0, None)
+        sent = None
+
+        try:
+            sent = runtime._send('w' * 20, runtime.keys.public, None, text='no answer came')
+        except SendFailed as failure:
+            sent = {'message_id': failure.messageId if hasattr(failure, 'messageId') else failure.message_id}
+
+        message_id = sent['message_id']
+        assert runtime.outbox[message_id]['status'] == 'unknown', runtime.outbox[message_id]['status']
+
+        said = runtime.outbox_forget(message_id)
+        assert said['already_sending'] is True, 'it said nothing left this machine for a message that was posted'
+        assert 'unknown' in said['note'].lower(), said['note']
+    finally:
+        runtime.close()

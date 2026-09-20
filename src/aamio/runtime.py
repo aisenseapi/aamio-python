@@ -1571,8 +1571,33 @@ class Runtime:
 
         return status, result
 
+    def _about_to_post(self, entry):
+        """The last moment before bytes leave this machine, for every path that sends.
+
+        aamio_outbox_forget and close() both say nothing is sent afterwards, so the check
+        belongs where the sending is and not where the work is. It guarded the
+        proof-of-work line alone for a few hours, and a send with no work went out
+        through the other line unchecked and unmarked.
+
+        The flag it sets is what lets forget say whether it stopped anything.
+        """
+        if entry is None:
+            return
+
+        with self.lock:
+            dropped = entry.get("tracked") is True and self.outbox.get(entry["id"]) is not entry
+
+            if dropped or getattr(self, "home_released", False) is True:
+                raise WorkDropped(
+                    "this message was dropped before it was sent, so nothing was sent"
+                )
+
+            entry["posting"] = True
+
     def _post_with_work(self, w, body_text, signature, bits, seconds_left=None, entry=None):
         if not bits:
+            self._about_to_post(entry)
+
             return self.client.post(w, body_text, self.keys.public, signature)
 
         # While the work runs nothing has been sent, and the entry says so, so
@@ -1587,25 +1612,10 @@ class Runtime:
         deadline = None if seconds_left is None else time.monotonic() + max(0, seconds_left - 5)
         nonce = gate_solve(w, self.keys.public, body_text, bits, deadline)
 
+        # The work is done and nothing has left yet.
+        self._about_to_post(entry)
+
         if entry is not None:
-            # The work is done and nothing has left yet. aamio_outbox_forget drops the
-            # entry and close() releases the home, and both say nothing is sent
-            # afterwards. Until 20 September neither was checked here: the thread held
-            # the entry object, so it posted a message that had been dropped, and posted
-            # into a home a successor process might already hold. Checked inside the
-            # lock forget pops under, so there is no window between looking and sending.
-            with self.lock:
-                dropped = entry.get("tracked") is True and self.outbox.get(entry["id"]) is not entry
-                wanted = not dropped and getattr(self, "home_released", False) is not True
-
-                if wanted:
-                    entry["posting"] = True
-
-            if not wanted:
-                raise WorkDropped(
-                    "the proof of work finished after this message was dropped, so nothing was sent"
-                )
-
             entry["status"] = "sending"
             self.save_outbox()
 
@@ -1729,7 +1739,12 @@ class Runtime:
         """
         with self.lock:
             entry = self.outbox.pop(message_id, None)
-            already = bool(entry and entry.get("posting"))
+            # The flag is set the moment before a post. The two statuses cover an entry
+            # written by a process that stopped between the post and the next save: a
+            # message that is "unknown" was posted by definition.
+            already = bool(
+                entry and (entry.get("posting") or entry.get("status") in ("sending", "unknown"))
+            )
 
         self.save_outbox()
 
