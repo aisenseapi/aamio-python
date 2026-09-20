@@ -158,3 +158,81 @@ def test_a_send_whose_answer_never_came_is_not_called_unsent(home_dir):
         assert 'unknown' in said['note'].lower(), said['note']
     finally:
         runtime.close()
+
+
+def test_a_successor_holds_the_home_and_the_old_worker_still_does_not_post(held):
+    """The case the review reproduced, and the one that is not only about this process.
+
+    close() releases the home so another runtime can take it. In the reproduction the
+    successor reported the work stopped, and the old instance posted afterwards. What
+    goes out then is a message the process that owns the home knows nothing about.
+
+    Held at the proof of work by a barrier, so the order is decided and not raced.
+    """
+    message_id = held.start()
+    home = held.runtime.home
+    held.runtime.close()
+
+    successor = Runtime(home=home, archive=False)
+
+    try:
+        assert successor.owns_lock, "the successor could not take a home that was released"
+
+        inherited = successor.outbox[message_id]
+        # Work that never finished was never sent, so this is settled and not
+        # pending. It is not silent either: the caller was promised an outcome,
+        # and gets one on the next read.
+        assert inherited["status"] == "stopped", inherited["status"]
+        assert message_id not in [entry["id"] for entry in successor.outbox_pending()]
+        told = [note for note in successor.attention.values() if note["state"] == "stopped"]
+        assert told, "the successor inherited a send that was never made and said nothing"
+        assert "Send it again if it still matters" in told[0]["what"]
+
+        assert held.let_the_work_finish() is False, "the old instance posted into a home it no longer holds"
+    finally:
+        successor.close()
+
+
+def test_a_send_with_no_work_is_marked_before_it_posts(home_dir):
+    """The mark, not only what can be inferred from the status afterwards.
+
+    forget reads the flag first and falls back on the status, so a test that only
+    checks forget's answer passes even when the no-work line sets no flag. The
+    flag is the thing that makes the cancellation cover that line at all, so it
+    is asserted where it is set.
+    """
+    runtime = Runtime(home=home_dir, archive=False)
+
+    try:
+        runtime.ensure_inbox = lambda: SimpleNamespace(w="i" * 20)
+        runtime.client.post = lambda *a, **k: (201, {"seq": 1, "at": 1, "sha256": "x" * 64, "expire_at": 2})
+        sent = runtime._send("w" * 20, runtime.keys.public, None, text="straight out")
+        entry = runtime.outbox[sent["message_id"]]
+
+        assert entry["status"] == "delivered", entry["status"]
+        assert entry.get("posting") is True, "the line that posts without proof of work marked nothing, so nothing can stop it"
+    finally:
+        runtime.close()
+
+
+def test_an_entry_inherited_without_the_flag_is_still_known_to_have_been_sent(home_dir):
+    """The flag is set the moment before a post, and saved by whatever comes next.
+
+    A process that stopped between the post and that save leaves an entry with no
+    flag at all. The load path turns it into "unknown", which by definition means
+    a post went out, so forget has to read that too. Without it, the entry that
+    survived a crash is the one forget lies about.
+    """
+    runtime = Runtime(home=home_dir, archive=False)
+    runtime.outbox["m-crashed"] = {
+        "id": "m-crashed", "w": "w" * 20, "status": "unknown", "tracked": True,
+        "envelope": {}, "to_key": None, "attempts": 1,
+    }
+
+    try:
+        said = runtime.outbox_forget("m-crashed")
+
+        assert said["already_sending"] is True, "an entry that survived a crash mid-send was called unsent"
+        assert "unknown" in said["note"].lower()
+    finally:
+        runtime.close()
