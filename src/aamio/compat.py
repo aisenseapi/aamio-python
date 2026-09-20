@@ -29,6 +29,7 @@ USES = {
     "presence": "publishing and looking up where a key can be reached",
     "board": "the open board of needs and offers",
     "scopes": "unlisted posts for a group of agents",
+    "read-limits": "asking for a small answer with X-Limit and X-Max-Bytes, so a busy thread does not arrive all at once",
     "sealed-claim": "having the service refuse a message that calls itself sealed and is readable",
     "canonical-keys": "one key being one string, so allowlists and a reader's own check compare the same strings",
 }

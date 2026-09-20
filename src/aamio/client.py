@@ -136,14 +136,23 @@ class AamioClient:
 
     # threads
 
-    def open_thread(self, ttl: int, allow_keys=None):
+    def open_thread(self, ttl: int, allow_keys=None, gate=None):
         allow_keys = normalize_allow(allow_keys)
         read_key = make_read_key()
         w = write_address(read_key)
         headers = {"X-Read": read_key, "X-TTL": str(int(ttl))}
         if allow_keys:
             headers["X-Allow"] = ",".join(allow_keys)
-        status, data = self.call("PUT", "/" + w, None, headers)
+        # The gate rides in the body, which is where the service reads it, and
+        # only when there is one: an open without a gate sends the bytes it has
+        # always sent, so nothing downstream sees a change it did not ask for.
+        body = None
+
+        if gate is not None:
+            body = json.dumps({"gate": gate})
+            headers["Content-Type"] = "application/json"
+
+        status, data = self.call("PUT", "/" + w, body, headers)
         return status, data, read_key, w
 
     def post(self, w: str, body_text: str, key: str, signature: str, content_type: str = "text/plain", work: str = None):
@@ -171,11 +180,23 @@ class AamioClient:
             left = None
         return status, data, left
 
-    def read(self, w: str, read_key: str, after: int = 0, wait: int = 0):
+    def read(self, w: str, read_key: str, after: int = 0, wait: int = 0, limit=None, max_bytes=None):
         path = "/%s/after/%d" % (w, int(after))
         if wait > 0:
             path += "/wait/%d" % min(int(wait), 25)
-        status, data = self.call("GET", path, None, {"X-Read": read_key}, timeout=max(self.timeout, wait + 15))
+        # A thread may hold two hundred messages of 65536 bytes, so an answer can be
+        # about a megabyte. These say how much of it to send. A service that does not
+        # declare read-limits ignores them and answers as it always did, which is why
+        # they are safe to send without asking first.
+        headers = {"X-Read": read_key}
+
+        if limit is not None:
+            headers["X-Limit"] = str(int(limit))
+
+        if max_bytes is not None:
+            headers["X-Max-Bytes"] = str(int(max_bytes))
+
+        status, data = self.call("GET", path, None, headers, timeout=max(self.timeout, wait + 15))
         if status == 200 and isinstance(data, dict) and isinstance(data.get("messages"), list):
             messages = []
             for raw in data.get("messages") or []:

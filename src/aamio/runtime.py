@@ -226,7 +226,7 @@ def outbox_outcome(entry):
     if entry.get("posting"):
         return "attempted"
 
-    if status == "working":
+    if status in ("working", "stopped"):
         return "never_sent"
 
     if int(entry.get("attempts") or 0) > 0:
@@ -253,6 +253,40 @@ class WorkDropped(RuntimeError):
     """
 
 
+def check_gate(gate):
+    """The shape of a gate, refused here rather than a round trip later.
+
+    Only the shape. What the numbers may be is the service's to decide, it decides
+    that in one place, and its refusal carries the detail. Duplicating the whole
+    rule here would give an agent two answers that can drift apart, and the one it
+    could reach without a network would be the wrong one.
+
+    Worth catching before the call because a gate is set once, when the inbox is
+    opened, and never changes. A gate that quietly went nowhere leaves an inbox
+    open for its whole life without the conditions its owner meant it to have.
+    """
+    shape = ('A gate is an object with "require", "advise" or both, as in '
+             '{"require": {"pow": {"bits": 20}, "per_key": 5}}. require refuses a '
+             'write that does not meet it; advise lets the write in and reports on it.')
+
+    if not isinstance(gate, dict):
+        raise ValueError("a gate must be an object, not %s. %s" % (type(gate).__name__, shape))
+
+    unknown = [key for key in gate if key not in ("require", "advise")]
+
+    if unknown:
+        raise ValueError("a gate has no field %s. %s" % (", ".join(sorted(unknown)), shape))
+
+    if not gate:
+        raise ValueError("an empty gate asks for nothing; leave the gate out instead. %s" % shape)
+
+    for key in ("require", "advise"):
+        if key in gate and not isinstance(gate[key], dict):
+            raise ValueError("gate.%s must be an object. %s" % (key, shape))
+
+    return gate
+
+
 class Channel:
     def __init__(self, label, read_key, w, expire_at, allow=None, after=0, created_at=None):
         self.label = label
@@ -271,6 +305,11 @@ class Channel:
         # one, because the caller's limit was reached. They are still at the
         # service and the cursor stands before them.
         self.left_waiting = 0
+        # Whether the service itself held some back, because the read asked
+        # for fewer bytes than the thread holds. A different fact from the
+        # one above -- nothing was fetched and left here -- and a count this
+        # side never learns, so it is a flag and not a made-up number.
+        self.more_at_service = False
         self.seen = set()
         self.received = []
         self.observed = {}
@@ -413,9 +452,19 @@ class Runtime:
             # finished was never sent. It used to stay working for good, with
             # nothing working on it, and the outcome promised to the caller
             # never came.
+            #
+            # Unless it is a retry. Then an earlier attempt already left this
+            # machine, posting says so, and the unfinished work changes nothing
+            # about it: the outcome is the one the first attempt left behind.
+            # Calling that stopped, and offering to send again, asks for a second
+            # copy of a message that may already be there.
             elif entry.get("status") == "working":
-                entry["status"] = "stopped"
-                entry["note"] = "the process stopped before its proof of work was done, so nothing was sent"
+                if entry.get("posting"):
+                    entry["status"] = "unknown"
+                    entry["note"] = "the process stopped while a retry was doing its proof of work. An earlier attempt had already left this machine and its answer never came, so the outcome is still unknown"
+                else:
+                    entry["status"] = "stopped"
+                    entry["note"] = "the process stopped before its proof of work was done, so nothing was sent"
         self.presence_at = 0.0
         # What a read could not do, kept by channel and state until it is
         # handed to a caller. An empty read means nothing arrived. An empty
@@ -428,11 +477,28 @@ class Runtime:
         self.stop = threading.Event()
         self.listener = None
         # Told once, on the first read after the restart, since the caller was
-        # promised how the send would end.
+        # promised how the send would end. Two different things to say: one
+        # message never left and can be sent again, the other left once and
+        # must not be sent again until somebody knows what became of it.
         untold = [e for e in self.outbox.values() if e.get("status") == "stopped" and not e.get("told")]
         for entry in untold:
             self._note_trouble("send %s" % entry["id"], "stopped", "the message to %s was not sent: the process stopped before its proof of work was done. Send it again if it still matters." % entry.get("w"))
             entry["told"] = True
+
+        interrupted = [e for e in self.outbox.values()
+                       if e.get("status") == "unknown" and e.get("posting") and not e.get("told")
+                       and "retry" in (e.get("note") or "")]
+
+        for entry in interrupted:
+            self._note_trouble(
+                "send %s" % entry["id"],
+                "unknown",
+                "the message to %s may have arrived: an attempt left this machine and no answer came back, and the process then stopped during a retry. Its outcome is still open. Do not compose a replacement; aamio_outbox_retry sends the same stored bytes again, and aamio_outbox_forget stops waiting without claiming it was not sent."
+                % entry.get("w"))
+            entry["told"] = True
+
+        untold = untold + interrupted
+
         if untold:
             # So the next restart does not say it again.
             self.save_outbox()
@@ -893,7 +959,7 @@ class Runtime:
 
     # --------------------------------------------------------- channels --
 
-    def open_channel(self, label, ttl, allow_names=None):
+    def open_channel(self, label, ttl, allow_names=None, gate=None):
         if label in self.channels or label.startswith("inbox"):
             raise ValueError("channel exists or reserved: " + label)
         keys = []
@@ -902,14 +968,22 @@ class Runtime:
             if partner is None:
                 raise ValueError("unknown partner: " + str(name))
             keys.append(partner["key"])
-        status, data, read_key, w = self.client.open_thread(int(ttl), keys or None)
+
+        if gate is not None:
+            gate = check_gate(gate)
+
+        status, data, read_key, w = self.client.open_thread(int(ttl), keys or None, gate)
         if status != 201:
             raise RuntimeError("could not open channel: %s %s" % (status, data))
         channel = Channel(label, read_key, w, data["expire_at"], keys)
         with self.lock:
             self.channels[label] = channel
         self.save_state()
-        return {"label": label, "w": w, "expire_at": channel.expire_at, "allow": [self.name_for_key(k) or k for k in keys]}
+        # The gate is in the answer whether or not there is one, since a channel
+        # with no conditions answered exactly like one whose gate went nowhere.
+        # It is not kept here: the inbox holds it and GET /{w}/gate serves it,
+        # and a second copy on this machine could only disagree with the first.
+        return {"label": label, "w": w, "expire_at": channel.expire_at, "allow": [self.name_for_key(k) or k for k in keys], "gate": gate}
 
     def close_channel(self, label):
         channel = self.channels.get(label)
@@ -1992,7 +2066,7 @@ class Runtime:
             why = "the message could not be checked here: " + error.__class__.__name__
             return {"channel": channel.label, "seq": seq, "at": at, "verified": False, "from_key": None, "known_contact": False, "sender": "unsigned", "sha256": None, "replay": False, "body": {"text": message.get("body")}, "signed": False, "encrypted": False, "format": "unreadable", "error": error.__class__.__name__, "unverified_because": why}
 
-    def poll(self, channel, wait=0, limit=None):
+    def poll(self, channel, wait=0, limit=None, max_bytes=None):
         """Reads one channel. With a limit, at most that many messages are handed over.
 
         The cursor then stops at the last message this call dealt with, and
@@ -2001,7 +2075,11 @@ class Runtime:
         past everything: the messages over the limit were gone for good.
         """
         channel.left_waiting = 0
-        status, data = self.client.read(channel.w, channel.read_key, channel.after, wait)
+        channel.more_at_service = False
+        # Passed only when there is one, so a client given a plain read function, as
+        # every test and every older integration hands over, is called as before.
+        budget = {} if max_bytes is None else {"max_bytes": max_bytes}
+        status, data = self.client.read(channel.w, channel.read_key, channel.after, wait, **budget)
         if status == 410:
             self._note(channel, "expired", "the thread at this address has expired, so anything written to it before now is gone and nothing more will arrive here")
             return "expired", []
@@ -2032,11 +2110,35 @@ class Runtime:
         if channel.created_at is not None and created is not None and created != channel.created_at and not reset:
             self._note(channel, "restarted", "the thread at this address is a new one, opened at %s where this channel knew one opened at %s, so it is read again from the start" % (created, channel.created_at))
             channel.forget_thread()
-            return self.poll(channel, 0, limit)
+            return self.poll(channel, 0, limit, **({} if max_bytes is None else {"max_bytes": max_bytes}))
         if reset:
             self._note(channel, "restarted", (reset.get("what") if isinstance(reset, dict) else None) or "the service read this thread from the start")
             channel.observed.clear()
         channel.created_at = created
+
+        # What the budget kept out. The service answers a byte budget honestly:
+        # whole messages only, because a signed message cut in half does not
+        # verify. So a thread holding one message larger than the budget answers
+        # with no messages and too_large naming it -- and read that as an empty
+        # inbox for as long as nothing here looked at the field. The message is
+        # there, it will never arrive at this budget, and nobody was told.
+        too_large = data.get("too_large")
+
+        if isinstance(too_large, dict):
+            seq = too_large.get("seq")
+            size = too_large.get("bytes")
+            self._note(
+                channel,
+                "too_large",
+                "message %s on this channel is %s bytes and does not fit the byte budget this read asked for, so it was not sent. It is still there and every read at this budget will leave it. %s"
+                % (seq, size, too_large.get("fix") or "Read again with a larger max_bytes, or without one."),
+                seqs=[seq] if seq is not None else None,
+            )
+
+        # And what it held back that does fit: more messages after the ones sent.
+        if data.get("more") is True:
+            channel.more_at_service = True
+
         entries = []
         kept_out = []
         last_seq = None
@@ -2177,7 +2279,7 @@ class Runtime:
             self.listener.start()
         return self
 
-    def read(self, wait=0, limit=50):
+    def read(self, wait=0, limit=50, max_bytes=None):
         """Messages the listener has received and nobody has read yet."""
         if self.listener is None:
             # No background listener: poll directly.
@@ -2186,6 +2288,7 @@ class Runtime:
             collected = []
             waited = False
             left_waiting = 0
+            held_back = []
             not_asked = []
             for channel in list(self.channels.values()):
                 # A channel is only asked for what this call still has room
@@ -2198,7 +2301,8 @@ class Runtime:
                     not_asked.append(channel.label)
                     continue
                 try:
-                    state, entries = self.poll(channel, 0 if waited else wait, room)
+                    state, entries = self.poll(channel, 0 if waited else wait, room,
+                                               **({} if max_bytes is None else {"max_bytes": max_bytes}))
                 except Exception as error:
                     self._note(channel, "unread", "this channel could not be read: %s. Messages from the other channels are still returned." % error.__class__.__name__)
                     continue
@@ -2209,6 +2313,13 @@ class Runtime:
                 waited = waited or state in ("ok", "gone")
                 collected.extend(entries)
                 left_waiting += channel.left_waiting
+
+                if channel.more_at_service:
+                    held_back.append(channel.label)
+
+            if held_back:
+                self._note_trouble("read", "more", "the service had more waiting on %s than the byte budget this read asked for, so it sent what fits and kept the rest. Read again for it: the cursor stands at the last message handed over." % ", ".join(held_back))
+
             if left_waiting or not_asked:
                 # Nothing is lost, and the caller still has to hear it: a read
                 # that stopped at its limit is not a read of everything.
@@ -2220,15 +2331,50 @@ class Runtime:
                     ) if part),
                 ))
             return collected
+        # With a listener running, the messages are already here: it fetched them
+        # on its own polls, which belong to every caller and cannot take one
+        # caller's budget without shortening somebody else's stream. So here the
+        # budget bounds the answer rather than the transfer. It was neither until
+        # now: max_bytes was taken, carried down two calls, and dropped, in the
+        # one mode the MCP server actually runs in.
         collected = []
+        used = 0
         deadline = time.time() + max(0, int(wait))
+        held = None
+
         while len(collected) < limit:
             remaining = deadline - time.time()
+
             try:
-                collected.append(self.inbound.get(timeout=max(0.0, remaining) if not collected else 0.05))
+                entry = self.inbound.get(timeout=max(0.0, remaining) if not collected else 0.05)
             except queue.Empty:
                 if collected or remaining <= 0:
                     break
+
+                continue
+
+            if max_bytes is not None:
+                weight = len(json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+                # Whole messages, as the service does it. One message over the
+                # budget on its own is handed over anyway rather than dropped or
+                # held for ever: it is already on this machine, and a queue that
+                # silently keeps a message is the fault this is here to fix.
+                if collected and used + weight > max_bytes:
+                    held = entry
+                    break
+
+                used += weight
+
+            collected.append(entry)
+
+        if held is not None:
+            # Back at the front is not possible with a Queue, so it goes back at
+            # the end and the next read gets it. Order within one channel is the
+            # cursor's business, and every entry carries its own seq.
+            self.inbound.put(held)
+            self._note_trouble("read", "more", "this read stopped at the byte budget it asked for, %d bytes. The rest is still here and the next read hands it over; nothing was dropped." % max_bytes)
+
         return collected
 
     # ---------------------------------------------------------- receipt --

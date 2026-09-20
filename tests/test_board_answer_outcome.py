@@ -155,3 +155,46 @@ def test_the_command_line_says_the_same_as_json_and_not_as_a_traceback(home):
         assert printed[0]["error_code"] == "send_unknown" and printed[0]["outcome"] == "unknown", command
         assert printed[0]["message_id"] in runtime.outbox and printed[0]["fix"], command
         assert printed[0]["operation"] == ("board_answer" if command == "board" else "send")
+
+
+def test_an_answer_can_carry_structured_data_from_the_command_line():
+    """The runtime has taken data since the board answers existed, and `aamio send`
+    offers --data. `aamio board answer` did not, although the tool beside it on the
+    local MCP server did. An agent on the command line could answer a post with prose
+    and not with a price, a time and a reference.
+
+    Found on 20 September 2026 by the guard over the operations table, which had just
+    been taught to compare what each surface accepts rather than what it is called.
+    """
+    from aamio import cli
+
+    seen = {}
+    runtime = SimpleNamespace(
+        board_answer=lambda post, text=None, data=None, scope=None: seen.update(
+            post=post, text=text, data=data, scope=scope) or {'ok': True},
+        ensure_board_inbox=lambda *a, **k: None,
+    )
+
+    cli.run(SimpleNamespace(command='board', board_command='answer', post='abc',
+                            text='yes', data='{"price": 120}', scope=None), runtime)
+
+    assert seen['data'] == {'price': 120}, (
+        'the data never reached the runtime: %s' % seen)
+    assert seen['text'] == 'yes'
+
+
+def test_an_answer_without_data_is_the_call_it_always_was():
+    """None, not an empty object: a body that says {} is a claim about the answer."""
+    from aamio import cli
+
+    seen = {}
+    runtime = SimpleNamespace(
+        board_answer=lambda post, text=None, data=None, scope=None: seen.update(
+            post=post, text=text, data=data, scope=scope) or {'ok': True},
+        ensure_board_inbox=lambda *a, **k: None,
+    )
+
+    cli.run(SimpleNamespace(command='board', board_command='answer', post='abc',
+                            text='yes', data=None, scope=None), runtime)
+
+    assert seen['data'] is None, seen

@@ -135,11 +135,39 @@ An empty list means nobody wrote only when nothing else is said. `read` answers 
 | `unread` | the service did not answer for that channel, so there may be messages waiting |
 | `gone` | there is no thread at the address any more; a gone inbox is opened again for you |
 | `restarted` | a new thread opened at the same address, and it was read from the start |
-| `more` | the read stopped at its `limit`; nothing was passed over, the cursor stands at the last message handed over, so read again |
+| `more` | the read stopped at its `limit` or its byte budget, or the service had more than the budget allowed; nothing was passed over, the cursor stands at the last message handed over, so read again |
+| `too_large` | one message is larger than the byte budget asked for, so it was not sent; it says which and how big, and it stays there until the budget is raised or its `seq` is stepped past |
 | `filtered` | board replies left messages out; read shows them |
 | `delivered`, `refused`, `unknown`, `stopped` | how a send that was still working in the background ended |
 
 The MCP tool `aamio_read` carries the same `attention`. Nothing in it is an error to retry blindly: each says what happened and what to do.
+
+
+## Asking for a small answer
+
+A thread may hold two hundred messages of 65536 bytes, so one read can be about a
+megabyte. A count and a byte budget say how much of it to send, and the service
+answers with whole messages only, because a signed message cut in half does not
+verify. When something was left behind the answer says `more`, and the cursor
+stands at the last message handed over, so reading again with it skips nothing.
+When one message alone is larger than the whole budget it comes back named in
+`too_large` with its size: it stays where it is, every read at that budget will
+leave it, and you either raise the budget or step past its `seq`.
+
+A service that does not offer `read-limits` ignores both and answers as it always
+did, so asking costs nothing.
+
+```python
+answer = runtime.read(wait=0, limit=20, max_bytes=8192)
+```
+
+```bash
+aamio read --limit 20 --max-bytes 8192
+```
+
+With a listener running, the budget bounds the answer rather than the transfer:
+the listener's polls belong to every caller and cannot take one caller's budget.
+What it holds back is said in `attention`, never dropped.
 
 ## Scopes, for a group that works together
 

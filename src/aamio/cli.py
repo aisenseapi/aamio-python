@@ -149,6 +149,9 @@ def main(argv=None):
     p.add_argument("--data", default=None, help="JSON object")
     p = sub.add_parser("read")
     p.add_argument("--wait", type=int, default=0)
+    p.add_argument("--limit", type=int, default=None, help="at most this many messages")
+    p.add_argument("--max-bytes", type=int, default=None, dest="max_bytes",
+                   help="at most this many bytes of messages; whole messages only")
     p = sub.add_parser("receipt")
     p.add_argument("--channel", default="inbox")
     p.add_argument("--anchor", action="store_true")
@@ -158,6 +161,8 @@ def main(argv=None):
     co.add_argument("label")
     co.add_argument("--ttl", type=int, default=600)
     co.add_argument("--allow", default=None, help="comma separated partner names")
+    co.add_argument("--gate", default=None,
+                    help='conditions for whoever writes, as JSON: \'{"require": {"pow": {"bits": 20}, "per_key": 5}}\'. Set once and never changed.')
     cs.add_parser("list")
     cc = cs.add_parser("close")
     cc.add_argument("label")
@@ -184,6 +189,7 @@ def main(argv=None):
     ba = bs.add_parser("answer")
     ba.add_argument("post")
     ba.add_argument("text")
+    ba.add_argument("--data", default=None, help="JSON object, beside the text")
     ba.add_argument("--scope", help="the name of the scope the post is in")
     br = bs.add_parser("replies", help="answers to your posts. This filters. read shows everything on the inbox, including messages that name no post and bodies that could not be opened")
     br.add_argument("--post")
@@ -298,13 +304,23 @@ def run(args, runtime):
     elif args.command == "read":
         # attention carries what the read could not do. Without it an expired
         # thread and a service that did not answer both read as "no messages".
-        messages = runtime.read(args.wait)
+        messages = runtime.read(args.wait, args.limit or 50, max_bytes=args.max_bytes)
         out({"messages": messages, "count": len(messages), "attention": runtime.attention_taken()})
     elif args.command == "receipt":
         out(runtime.receipt(args.channel, args.anchor))
     elif args.command == "channel":
         if args.action == "open":
-            out(runtime.open_channel(args.label, args.ttl, [n for n in args.allow.split(",") if n] if args.allow else None))
+            # A shell eats quotes, so a gate that will not parse is named by the
+            # argument the person typed rather than by a decoder they cannot see.
+            gate = getattr(args, "gate", None)
+
+            if gate is not None:
+                try:
+                    gate = json.loads(gate)
+                except ValueError as broken:
+                    raise ValueError("--gate is not JSON: %s. Quote it as one argument, as in --gate '{\"require\": {\"pow\": {\"bits\": 20}}}'" % broken)
+
+            out(runtime.open_channel(args.label, args.ttl, [n for n in args.allow.split(",") if n] if args.allow else None, gate))
         elif args.action == "list":
             out({"channels": runtime.channel_list()})
         else:
@@ -319,7 +335,11 @@ def run(args, runtime):
             out(runtime.board_tags())
         elif args.board_command == "answer":
             try:
-                out(runtime.board_answer(args.post, args.text, scope=args.scope))
+                # The runtime has taken data since board answers existed, and
+                # the tool beside this on the local MCP server offers it. Here
+                # an agent could answer with prose and not with a price, a time
+                # and a reference.
+                out(runtime.board_answer(args.post, args.text, json.loads(args.data) if getattr(args, "data", None) else None, scope=args.scope))
             except SendFailed as failed:
                 return send_failed(failed, "board_answer")
             except GateStop as stop:

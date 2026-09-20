@@ -113,6 +113,53 @@ def test_a_model_can_say_how_much_comes_back():
     assert "fifty by default" in tool["description"], "a default nobody is told is a default nobody uses"
 
 
+def test_a_model_can_say_how_many_bytes_come_back():
+    """Fifty small messages and fifty large ones are the same count and 3 MB apart.
+
+    The service has answered a byte budget since 0.7.2 and the hosted tool has taken
+    one since the same day. The local tool took only the count, so the surface a model
+    runs on its own machine was the one that could not ask. A count is not a budget:
+    the caller cannot know what fifty messages weigh before reading them.
+    """
+    runtime, _ = runtime_holding([message(1, "stranger-one", "hello")])
+    asked = []
+    runtime.read = lambda wait, limit=50, max_bytes=None: (
+        asked.append((limit, max_bytes)), runtime.poll(runtime.channels["inbox"])[1])[1]
+
+    dispatch(runtime, "aamio_read", {})
+    dispatch(runtime, "aamio_read", {"max_bytes": 4096})
+    dispatch(runtime, "aamio_read", {"limit": 3, "max_bytes": 4096})
+
+    assert asked == [(50, None), (50, 4096), (3, 4096)], (
+        "the byte budget a model asked for did not reach the runtime: %s" % asked)
+
+    tool = next(t for t in mcp_server.TOOLS if t["name"] == "aamio_read")
+    assert "max_bytes" in tool["inputSchema"]["properties"], (
+        "the service takes a byte budget and the local tool does not offer one")
+
+
+def test_a_budget_too_small_to_be_answered_is_refused_rather_than_guessed_at():
+    """512 is the floor because one message can be 65536 bytes.
+
+    Under the floor there is nothing sensible to do: a signed message cannot be cut in
+    half and still verify, so a tiny budget either returns nothing forever or returns
+    one whole message over budget. The refusal says which, so the model sets a real one.
+    """
+    runtime, _ = runtime_holding([message(1, "stranger-one", "hello")])
+    reached = []
+    runtime.read = lambda wait, limit=50, max_bytes=None: (
+        reached.append(max_bytes), runtime.poll(runtime.channels["inbox"])[1])[1]
+
+    for bad in (0, -1, 100, "4096", True):
+        answer = dispatch(runtime, "aamio_read", {"max_bytes": bad})
+        assert answer["isError"] is True, "max_bytes=%r was accepted" % (bad,)
+        assert "512" in answer["structuredContent"]["error"], answer["structuredContent"]
+        assert "too_large" in answer["structuredContent"]["fix"], (
+            "the fix does not say what happens to a message over budget")
+
+    assert reached == [], "a refused budget still reached the runtime: %s" % reached
+
+
 def refused_send(outcome):
     runtime = SimpleNamespace(send=lambda *a, **k: (_ for _ in ()).throw(
         SendFailed(outcome, "m-acac9b3fbdf77d8e", 413 if outcome == "refused" else 0, "detail")
