@@ -282,11 +282,15 @@ def run(args, runtime):
     elif args.command == "whoami":
         out(runtime.whoami())
     elif args.command == "partner":
+        # What the change did to the inbox is in the answer: the address a
+        # partner can write to now, or that the old one stays because the new
+        # one could not be opened.
+        changed = {}
         if args.action == "add":
-            runtime.partner_add(args.name, args.key)
+            changed = runtime.partner_add(args.name, args.key)
         elif args.action == "remove":
-            runtime.partner_remove(args.name)
-        out({"partners": runtime.partner_list()})
+            changed = runtime.partner_remove(args.name)
+        out(dict(changed, partners=runtime.partner_list()))
     elif args.command == "lookup":
         runtime.ensure_inbox()
         out(runtime.lookup(args.names or None, args.wait))

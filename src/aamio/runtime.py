@@ -344,6 +344,11 @@ class Channel:
         # thing that tells the two apart.
         self.created_at = created_at
         self.gone = False
+        # Read no more, kept for its records and its receipt until it expires.
+        # An inbox is muted when a partner is removed: the removed key can
+        # still write to the address it was given until the thread expires,
+        # and nothing from there is delivered.
+        self.muted = False
         # How many messages the last poll had fetched and left for the next
         # one, because the caller's limit was reached. They are still at the
         # service and the cursor stands before them.
@@ -376,13 +381,14 @@ class Channel:
     def to_state(self):
         # seen travels with the channel: without it a restart cannot tell a
         # redelivered message from a new one, and the model may act twice.
-        return {"label": self.label, "read_key": self.read_key, "w": self.w, "expire_at": self.expire_at, "allow": self.allow, "after": self.after, "created_at": self.created_at, "gone": self.gone, "seen": sorted(value for value in self.seen if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value))}
+        return {"label": self.label, "read_key": self.read_key, "w": self.w, "expire_at": self.expire_at, "allow": self.allow, "after": self.after, "created_at": self.created_at, "gone": self.gone, "muted": self.muted, "seen": sorted(value for value in self.seen if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value))}
 
     @classmethod
     def from_state(cls, item):
         channel = cls(item["label"], item["read_key"], item["w"], item["expire_at"], item.get("allow"), item.get("after", 0), item.get("created_at"))
         channel.seen = {value for value in item.get("seen") or [] if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)}
         channel.gone = item.get("gone") is True
+        channel.muted = item.get("muted") is True
 
         return channel
 
@@ -741,15 +747,55 @@ class Runtime:
         return {"key": self.keys.public, "hash": self.keys.hash, "hash_prefix": self.keys.hash[:8], "inbox": inbox.w if inbox else None, "inbox_expires_at": inbox.expire_at if inbox else None, "host": self.host, "tags": self.tags}
 
     def partner_add(self, name, key):
+        """A partner into the address book, and into the inbox at once.
+
+        The address book and the inbox used to drift apart: this wrote
+        partners.json and nothing else, the inbox kept the list it was opened
+        with for up to 57 minutes, and the partner just added was refused with
+        403 at the address presence pointed to, which the owner never saw. Now
+        an inbox that does not name the key is replaced by one that does, and
+        the answer says which address the partner can write to.
+        """
         if not is_key(key):
             raise ValueError("not a base64url Ed25519 public key of 32 bytes")
         self.partners = [p for p in self.partners if p["name"] != name and p["key"] != key]
         self.partners.append({"name": name, "key": key})
         self._save_json("partners.json", self.partners)
+        return self._inbox_after_change("partner %s was added" % name, {"partner": name, "key": key})
 
     def partner_remove(self, name):
+        """A partner out of the address book, and out of the inbox at once.
+
+        Forgetting the name is not a revocation: the service takes the removed
+        key's writes to the old address until that thread expires. So the old
+        inbox is muted, read no more, and a new one is opened without the key.
+        Once the last partner is gone the new inbox takes signed writes from any
+        key, each shown as an unknown one, rather than unsigned writes from
+        anyone at an address the partners were given.
+        """
+        known = self.partner_by_name(name)
         self.partners = [p for p in self.partners if p["name"] != name]
         self._save_json("partners.json", self.partners)
+        outcome = {"partner": name, "known": known is not None}
+        if known is None:
+            inbox = self.channels.get("inbox")
+            outcome["inbox"] = inbox.w if inbox else None
+            return outcome
+        return self._inbox_after_change("partner %s was removed" % name, outcome)
+
+    def _inbox_after_change(self, reason, outcome):
+        """Whether the inbox still matches the address book, and a new one if not."""
+        inbox = self.channels.get("inbox")
+        if inbox is None:
+            # Registration before the first read: the inbox opens with this
+            # list when it opens, and there is no address to hand out yet.
+            outcome.update({"inbox": None, "rotated": False})
+            return outcome
+        if self._inbox_matches(inbox, self._wanted_allow()):
+            outcome.update({"inbox": inbox.w, "rotated": False, "expire_at": inbox.expire_at})
+            return outcome
+        outcome.update(self._rotate_inbox(reason))
+        return outcome
 
     def partner_list(self):
         return [{"name": p["name"], "key": p["key"], "hash_prefix": key_hash(p["key"])[:8]} for p in self.partners]
@@ -966,28 +1012,83 @@ class Runtime:
         channel.label = label
         self.channels[label] = channel
 
+    def _wanted_allow(self):
+        """The list the inbox should carry now: the partners' keys, or none while
+        there are no partners, since a first contact has nobody to name."""
+        return [p["key"] for p in self.partners] if self.partners else None
+
+    def _inbox_matches(self, inbox, wanted):
+        # No partners: an inbox open to anyone matches, and so does one that
+        # takes any signed key, which is what the last removal leaves behind.
+        if wanted is None:
+            return list(inbox.allow or []) in ([], ["*"])
+        return sorted(inbox.allow or []) == sorted(wanted)
+
+    def _rotate_inbox(self, reason):
+        """A new inbox with the list as it is now; the old one is dealt with by what changed.
+
+        Keys only added, or an old inbox open to anyone: the old one is still
+        read until it expires, since whoever was told the address may still
+        write there, and an open one is said to be open until then. A key
+        removed: the old one is muted, kept for its records and its receipt but
+        read no more, so nothing from the removed key arrives through the
+        address it was given. That is this runtime's delivery stopping, not a
+        revocation: the service takes the write until the thread expires.
+
+        A rotation that fails leaves the old inbox in use, and says so.
+        """
+        old = self.channels.get("inbox")
+        wanted = self._wanted_allow()
+        if wanted is None and old is not None and old.allow:
+            # The last partner is gone. An inbox open to anyone would take
+            # unsigned writes at an address the partners had: signed only, and
+            # every message shown as an unknown key.
+            wanted = ["*"]
+        status, data, read_key, w = self.client.open_thread(INBOX_TTL, wanted)
+        if status != 201:
+            what = "the inbox could not be opened again after %s: %s %s. The old inbox stays in use with its old list." % (reason, status, data)
+            self._note_trouble("inbox", "rotation_failed", what, w=old.w if old else None)
+            return {"rotated": False, "inbox": old.w if old else None, "allow": self._allow_names(old.allow if old else []), "error": what}
+        inbox = Channel("inbox", read_key, w, data["expire_at"], wanted)
+        outcome = {"rotated": True, "inbox": w, "allow": self._allow_names(inbox.allow), "expire_at": inbox.expire_at}
+        with self.lock:
+            if old is not None:
+                removed = [k for k in (old.allow or []) if k != "*" and k not in (inbox.allow or [])]
+                if removed:
+                    old.muted = True
+                    self._note(old, "muted", "inbox %s is read no more after %s: %d removed key(s) can still write there until %d, and nothing from there is delivered" % (old.w, reason, len(removed), old.expire_at))
+                elif not old.allow:
+                    self._note(old, "open", "inbox %s was open to anyone and is still read until %d; after %s the new inbox %s names %d key(s)" % (old.w, old.expire_at, reason, w, len(inbox.allow or [])))
+                outcome["old_inbox"] = {"w": old.w, "muted": old.muted, "until": old.expire_at}
+                self._retire_channel(old)
+            self.channels["inbox"] = inbox
+        self.save_state()
+        self.log("inbox %s until %d, %s%s" % (w, inbox.expire_at, reason, " (allowlist %d keys)" % len(inbox.allow) if inbox.allow else ""))
+        outcome["presence"] = self.publish_presence(force=True)
+        return outcome
+
+    def _allow_names(self, allow):
+        return [self.name_for_key(k) or k for k in (allow or [])]
+
     def ensure_inbox(self):
         inbox = self.channels.get("inbox")
         # A gone inbox is opened again at once. A write to the old address
         # opens a thread there with none of this inbox's allowlist, so the
         # partners are pointed at a new one that has it. The old address is
         # still read until its time runs out, for whoever writes there anyway.
-        if inbox and inbox.expire_at - time.time() > RENEW_BEFORE and not inbox.gone:
+        # So is an inbox whose list no longer matches the address book: a
+        # partner added or removed while this process was not running, or by
+        # an older version that changed partners.json and nothing else.
+        usable = inbox is not None and inbox.expire_at - time.time() > RENEW_BEFORE and not inbox.gone
+        if usable and self._inbox_matches(inbox, self._wanted_allow()):
             return inbox
-        allow = [p["key"] for p in self.partners] if self.partners else None
-        status, data, read_key, w = self.client.open_thread(INBOX_TTL, allow)
-        if status != 201:
-            raise RuntimeError("could not open inbox: %s %s" % (status, data))
-        old = inbox
-        inbox = Channel("inbox", read_key, w, data["expire_at"], allow)
-        with self.lock:
-            if old is not None:
-                # Keep reading the old one until it dies; partners may still write there.
-                self._retire_channel(old)
-            self.channels["inbox"] = inbox
-        self.save_state()
-        self.log("inbox %s until %d%s" % (w, inbox.expire_at, " (allowlist %d keys)" % len(allow) if allow else ""))
-        self.publish_presence(force=True)
+        reason = "the address book changed" if usable else ("the inbox was gone" if inbox is not None and inbox.gone else "renewal")
+        outcome = self._rotate_inbox(reason)
+        if outcome["rotated"]:
+            return self.channels["inbox"]
+        if inbox is None or inbox.gone or inbox.expire_at <= time.time():
+            raise RuntimeError("could not open inbox: %s" % outcome["error"])
+        # The old one still holds; it is read on, and attention says why.
         return inbox
 
     def publish_presence(self, force=False):
@@ -1045,7 +1146,7 @@ class Runtime:
     def channel_list(self):
         # expired, since a channel past its time was listed like any other
         # until a read took it away.
-        return [{"label": c.label, "w": c.w, "expire_at": c.expire_at, "seconds_left": max(0, int(c.expire_at - time.time())), "expired": c.expire_at <= time.time(), "allow": [self.name_for_key(k) or k for k in c.allow], "received": len(c.received)} for c in self.channels.values()]
+        return [{"label": c.label, "w": c.w, "expire_at": c.expire_at, "seconds_left": max(0, int(c.expire_at - time.time())), "expired": c.expire_at <= time.time(), "allow": [self.name_for_key(k) or k for k in c.allow], "received": len(c.received), "muted": c.muted} for c in self.channels.values()]
 
 
     # ------------------------------------------------------------ board --
@@ -2477,6 +2578,8 @@ class Runtime:
                             with self.lock:
                                 self.channels.pop(label, None)
                         continue
+                    if channel.muted:
+                        continue
                     if channel.poller is None:
                         channel.poller = threading.Thread(target=self._poll_loop, args=(channel,), daemon=True)
                         channel.poller.start()
@@ -2503,6 +2606,8 @@ class Runtime:
             held_back = []
             not_asked = []
             for channel in list(self.channels.values()):
+                if channel.muted:
+                    continue
                 # A channel is only asked for what this call still has room
                 # for. poll moves the cursor and saves it before the caller
                 # sees a message, so whatever was fetched beyond the limit and

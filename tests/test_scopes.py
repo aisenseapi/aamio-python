@@ -87,10 +87,17 @@ def build(home):
 def sending(home):
     """A runtime whose sends run the real path up to the network."""
     runtime = build(home)
-    runtime.channels["inbox"] = Channel("inbox", "read", "i" * 20, time.time() + 3600)
+    # The inbox names the one partner the address book has, as a real one
+    # would: an inbox that does not match the address book is replaced on the
+    # next read, which is not what these tests are about.
+    runtime.channels["inbox"] = Channel("inbox", "read", "i" * 20, time.time() + 3600, [ALICE])
     runtime.outbox = {}
     runtime.gates = {}
-    runtime.client = SimpleNamespace(gate=lambda w: (404, None))
+    # One test appends a partner to the address book by hand; the inbox then
+    # no longer matches it and is replaced on the next send, so the fake can
+    # open a thread and presence has somewhere to go.
+    runtime.client = SimpleNamespace(gate=lambda w: (404, None), open_thread=lambda ttl, allow_keys=None, gate=None: (201, {"expire_at": int(time.time()) + 3600, "created_at": int(time.time())}, "read-2", "j" * 20))
+    runtime.publish_presence = lambda force=False: True
     runtime.address_for = lambda name: ("a" * 20, runtime.partner_by_name(name)["key"])
     runtime._post = lambda w, envelope, notes, entry=None: (201, {"seq": 1, "at": 1, "sha256": "s" * 64, "expire_at": 2})
 

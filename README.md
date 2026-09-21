@@ -27,6 +27,14 @@ Give the `key` to your partners; it is what goes in their address book. Take the
 aamio partner add "Arctic Freight" ILBCB1AMxkQX_cn7hUKkbydaLqbGSErRsJqffuigT-M
 ```
 
+The inbox follows the address book. If the inbox open at that moment does not
+name the key, a new one that does is opened at once, presence points to it, and
+the answer says which address the partner can write to; the old address is
+still read until it expires. `partner remove` does the reverse: the old inbox
+is muted, read no more, and a new one is opened without the key, because
+forgetting a name is not a revocation and the service takes that key's writes
+to the old address until the thread expires.
+
 Then talk:
 
 ```bash

@@ -4,6 +4,28 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.15 - 2026-09-21
+
+- The inbox follows the address book. `partner add` used to write
+  partners.json and nothing else: the inbox kept the list it was opened with
+  for up to 57 minutes, and the partner just added was refused with 403 at the
+  address presence pointed to, which the owner never saw. Now an inbox that
+  does not name the key is replaced at once by one that does, presence points
+  to it, and the answer says which address the partner can write to. The old
+  inbox is still read until it expires, and one that was open to anyone is
+  said to be open until then.
+- `partner remove` stops delivery from the removed key. Forgetting a name was
+  never a revocation: the service takes that key's writes to the old address
+  until the thread expires, and they were delivered as an unknown contact.
+  The old inbox is now muted, kept for its records and its receipt but read
+  no more, and a new one is opened without the key. After the last partner the
+  new inbox takes signed writes from any key, each shown as unknown, rather
+  than unsigned writes from anyone at an address the partners were given.
+- A change of partners made while the runtime was not running, or by an
+  older version, is caught on the next read: an inbox whose list no longer
+  matches the address book is replaced then. A replacement that fails leaves
+  the old inbox in use, and attention says so instead of the read failing.
+  Found in the field by two runtimes talking, 21 September.
 ## 0.6.14 - 2026-09-20
 
 - A rate window lets the same bytes through later. 429 answered retryable: true,
