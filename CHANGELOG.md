@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## Unreleased
+## 0.6.16 - 2026-09-21
 
 - The local MCP server delivers the revision it announces. `aamio serve` has
   said 2026-07-28 since that revision came out, and answered as the older
@@ -21,8 +21,6 @@ not what moved in the source.
   empty result of those revisions refuses any field; a revision this server
   does not know is served the old way, as before. Finding MCP-1 of the
   collaboration round of 21 September.
-
-## 0.6.16 - 2026-09-21
 
 - A muted inbox is read no more on every path. 0.6.15 muted it for the
   command line and the direct read, but a poller that was already running for
