@@ -515,6 +515,13 @@ class Runtime:
                     entry["status"] = "stopped"
                     entry["note"] = "the process stopped before its proof of work was done, so nothing was sent"
         self.presence_at = 0.0
+        # The last attempt and the last success are two different times: a
+        # failed publish used to count as a fresh one, and the new address
+        # went unpublished for a minute while the old one was still announced.
+        self.presence_ok_at = 0.0
+        self.presence_failed = False
+        self.presence_retry_at = 0.0
+        self.presence_backoff = 0.0
         # What a read could not do, kept by channel and state until it is
         # handed to a caller. An empty read means nothing arrived. An empty
         # read on a thread that has expired, or that the service would not
@@ -526,6 +533,11 @@ class Runtime:
         # caller's byte budget was full. In front of the queue on the next read.
         self.held_back = []
         self.lock = threading.RLock()
+        # Partners may have changed while this process was not running. The
+        # current inbox is compared with the address book on the first read;
+        # the older generations are judged here, so a key removed while the
+        # runtime was down is read no more from any address it was given.
+        self._mute_generations("a restart")
         self.stop = threading.Event()
         self.listener = None
         # Told once, on the first read after the restart, since the caller was
@@ -1053,15 +1065,19 @@ class Runtime:
         outcome = {"rotated": True, "inbox": w, "allow": self._allow_names(inbox.allow), "expire_at": inbox.expire_at}
         with self.lock:
             if old is not None:
-                removed = [k for k in (old.allow or []) if k != "*" and k not in (inbox.allow or [])]
-                if removed:
-                    old.muted = True
-                    self._note(old, "muted", "inbox %s is read no more after %s: %d removed key(s) can still write there until %d, and nothing from there is delivered" % (old.w, reason, len(removed), old.expire_at))
-                elif not old.allow:
-                    self._note(old, "open", "inbox %s was open to anyone and is still read until %d; after %s the new inbox %s names %d key(s)" % (old.w, old.expire_at, reason, w, len(inbox.allow or [])))
-                outcome["old_inbox"] = {"w": old.w, "muted": old.muted, "until": old.expire_at}
                 self._retire_channel(old)
             self.channels["inbox"] = inbox
+        # Every generation is judged, not only the one just retired: an inbox
+        # from two rotations ago that still names the removed key was read on
+        # until it expired, and delivered that key's messages as an unknown
+        # contact.
+        muted = self._mute_generations(reason)
+        if old is not None:
+            if not old.muted and not old.allow:
+                self._note(old, "open", "inbox %s was open to anyone and is still read until %d; after %s the new inbox %s names %d key(s)" % (old.w, old.expire_at, reason, w, len(inbox.allow or [])))
+            outcome["old_inbox"] = {"w": old.w, "muted": old.muted, "until": old.expire_at}
+        if muted:
+            outcome["muted"] = muted
         self.save_state()
         self.log("inbox %s until %d, %s%s" % (w, inbox.expire_at, reason, " (allowlist %d keys)" % len(inbox.allow) if inbox.allow else ""))
         outcome["presence"] = self.publish_presence(force=True)
@@ -1069,6 +1085,33 @@ class Runtime:
 
     def _allow_names(self, allow):
         return [self.name_for_key(k) or k for k in (allow or [])]
+
+    def _mute_generations(self, reason):
+        """Every inbox generation that names a key no longer in the address book is muted.
+
+        Muted means read no more: no poller, nothing handed over, the record
+        and the receipt kept until the address expires. It is this runtime's
+        delivery stopping, not a revocation; the service takes the removed
+        key's writes until the thread expires. An open generation, or one that
+        takes any signed key, names nobody and is left as it is.
+        """
+        partners = {p["key"] for p in self.partners}
+        current = self.channels.get("inbox")
+        muted = []
+        for channel in list(self.channels.values()):
+            if channel is current or channel.muted or not channel.label.startswith("inbox"):
+                continue
+            gone = [k for k in (channel.allow or []) if k != "*" and k not in partners]
+            if not gone:
+                continue
+            channel.muted = True
+            muted.append(channel.w)
+            self._note(channel, "muted", "inbox %s is read no more after %s: %d removed key(s) can still write there until %d, and nothing from there is delivered" % (channel.w, reason, len(gone), channel.expire_at))
+        return muted
+
+    def _muted_address(self, w):
+        with self.lock:
+            return any(c.muted and c.w == w for c in self.channels.values())
 
     def ensure_inbox(self):
         inbox = self.channels.get("inbox")
@@ -1092,17 +1135,39 @@ class Runtime:
         return inbox
 
     def publish_presence(self, force=False):
-        if not force and time.time() - self.presence_at < PRESENCE_REFRESH:
-            return None
+        """Where this runtime can be reached, published; a failure said, and tried again soon.
+
+        A failed publish used to be silent and to count as a fresh one, so the
+        new inbox went unpublished for a minute while the record from before
+        still pointed partners at the old address, which refused the one just
+        added. Now attention says so, and the next try comes after a short
+        wait that doubles up to the normal interval, so a service in trouble
+        is not asked every two seconds.
+        """
+        now = time.time()
+        failed = getattr(self, "presence_failed", False)
+        if not force:
+            fresh = now - self.presence_at < PRESENCE_REFRESH
+            retry = failed and now >= getattr(self, "presence_retry_at", 0.0)
+            if fresh and not retry:
+                return None
         inbox = self.channels.get("inbox")
         if inbox is None:
             return None
         body = json.dumps({"w": inbox.w, "tags": self.tags[:8], "ttl": PRESENCE_TTL}, separators=(",", ":"))
         status, data = self.client.presence_put(self.keys.public, body, self.keys.sign(presence_signing_input(self.keys.public, body)))
-        self.presence_at = time.time()
+        self.presence_at = now
         if status != 200:
-            self.log("presence failed: %s %s" % (status, data))
-        return status == 200
+            backoff = min(float(PRESENCE_REFRESH), max(2.0, 2 * getattr(self, "presence_backoff", 0.0)))
+            self.presence_backoff = backoff
+            self.presence_retry_at = now + backoff
+            self.presence_failed = True
+            self._note_trouble("presence", "presence_failed", "presence for inbox %s could not be published: %s %s. A partner who looks you up is sent to the address published before, while that record lives, and may be refused there. The next try is in %d seconds." % (inbox.w, status, data, backoff), w=inbox.w)
+            return False
+        self.presence_ok_at = now
+        self.presence_failed = False
+        self.presence_backoff = 0.0
+        return True
 
     # --------------------------------------------------------- channels --
 
@@ -2293,14 +2358,14 @@ class Runtime:
             checked = dict(message, verified=verified, sha256=digest, **{"from": sender})
             body, meta = self._open(checked)
             known = self.name_for_key(sender)
-            entry = {"channel": channel.label, "seq": seq, "at": at, "verified": verified, "from_key": sender, "known_contact": known is not None, "sender": known or ("unknown key" if sender else "unsigned"), "sha256": digest, "replay": digest is not None and digest in channel.seen, "body": body}
+            entry = {"channel": channel.label, "w": channel.w, "seq": seq, "at": at, "verified": verified, "from_key": sender, "known_contact": known is not None, "sender": known or ("unknown key" if sender else "unsigned"), "sha256": digest, "replay": digest is not None and digest in channel.seen, "body": body}
             entry.update(meta)
             if why_not:
                 entry["unverified_because"] = why_not
             return entry
         except Exception as error:
             why = "the message could not be checked here: " + error.__class__.__name__
-            return {"channel": channel.label, "seq": seq, "at": at, "verified": False, "from_key": None, "known_contact": False, "sender": "unsigned", "sha256": None, "replay": False, "body": {"text": message.get("body")}, "signed": False, "encrypted": False, "format": "unreadable", "error": error.__class__.__name__, "unverified_because": why}
+            return {"channel": channel.label, "w": channel.w, "seq": seq, "at": at, "verified": False, "from_key": None, "known_contact": False, "sender": "unsigned", "sha256": None, "replay": False, "body": {"text": message.get("body")}, "signed": False, "encrypted": False, "format": "unreadable", "error": error.__class__.__name__, "unverified_because": why}
 
     def _save_cursor(self, channel, to_seq):
         """Move the cursor and write it down, and say so if the writing fails.
@@ -2367,6 +2432,11 @@ class Runtime:
         """
         channel.left_waiting = 0
         channel.more_at_service = False
+        # A muted channel is read no more, whoever calls: the read path and the
+        # listener skip it, and a library caller that asks straight out gets
+        # the same answer instead of the removed partner's messages.
+        if channel.muted:
+            return "muted", []
         # Passed only when there is one, so a client given a plain read function, as
         # every test and every older integration hands over, is called as before.
         #
@@ -2468,9 +2538,16 @@ class Runtime:
             # Before the message is kept, archived or shown: a scope key in it
             # goes to scopes.json or nowhere, never to the reader.
             self._take_scope_share(entry)
-            if isinstance(entry["body"], dict) and isinstance(entry["body"].get("reply_to"), str) and sender_key:
-                with self.lock:
-                    self.peers[entry["body"]["reply_to"]] = sender_key
+            # A verified message that carries an address binds the sender's key
+            # to it: reply_to, as always, and channel, which a handoff carries.
+            # A handoff used to leave the new address without a key, so the
+            # first send to it failed with no key known for the address.
+            if isinstance(entry["body"], dict) and sender_key:
+                for field in ("reply_to", "channel"):
+                    address = entry["body"].get(field)
+                    if isinstance(address, str) and address:
+                        with self.lock:
+                            self.peers[address] = sender_key
             entries.append(entry)
             with channel.lock:
                 channel.received.append(entry)
@@ -2531,7 +2608,11 @@ class Runtime:
 
     def _poll_loop(self, channel):
         """One long-poll loop per channel, so mail on any channel is seen at once."""
-        while not self.stop.is_set() and not channel.closed and channel.expire_at > time.time():
+        # A poller already running when its channel was muted used to run on,
+        # and everything it fetched went into the queue: the removed partner's
+        # messages arrived through the listener, which the MCP server uses,
+        # while the command line delivered nothing.
+        while not self.stop.is_set() and not channel.closed and not channel.muted and channel.expire_at > time.time():
             entries = []
 
             try:
@@ -2552,6 +2633,11 @@ class Runtime:
                 )
                 self.log("poller %s: %s" % (channel.label, error))
                 time.sleep(3)
+
+            if channel.muted:
+                # Muted while this poll was out: what it brought back stays on
+                # the channel's record and is handed to nobody.
+                entries = []
 
             for entry in entries:
                 self.inbound.put(entry)
@@ -2681,6 +2767,13 @@ class Runtime:
                         break
 
                     continue
+
+            # Nothing from a muted inbox is handed over, whatever fetched it: a
+            # poller that was already running, or a message that sat in the
+            # queue before the partner was removed. It stays on the channel's
+            # record, for the receipt.
+            if self._muted_address(entry.get("w")):
+                continue
 
             if max_bytes is not None:
                 weight = len(json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))

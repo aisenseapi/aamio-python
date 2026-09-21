@@ -4,6 +4,49 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## Unreleased
+
+- The local MCP server delivers the revision it announces. `aamio serve` has
+  said 2026-07-28 since that revision came out, and answered as the older
+  ones do: `server/discover` was an unknown method, `tools/list` carried only
+  the tools, and `ping` was `{}`. A client of that revision checks every
+  result and refuses one without `resultType`: Claude Code did, with "Invalid
+  result for tools/list: missing required resultType", and showed zero tools
+  from the hosted service between 16 and 21 September until the service was
+  fixed. The local server had the same gap. Now a request that names
+  2026-07-28, in `_meta` or at `initialize`, gets `server/discover` answered
+  with the versions, the capabilities and the server, `resultType` on every
+  result, and `ttlMs` and `cacheScope` on every list. A request naming an
+  older revision gets exactly what it got, `ping` `{}` included, since the
+  empty result of those revisions refuses any field; a revision this server
+  does not know is served the old way, as before. Finding MCP-1 of the
+  collaboration round of 21 September.
+
+## 0.6.16 - 2026-09-21
+
+- A muted inbox is read no more on every path. 0.6.15 muted it for the
+  command line and the direct read, but a poller that was already running for
+  it ran on, and the removed partner's messages arrived through the
+  listener, which the MCP server uses. The poller stops, what a poll brought
+  back after the muting is handed to nobody, a message that sat in the queue
+  before the removal is not handed over, and a library caller that polls the
+  channel directly gets nothing. Every message reads carry `w`, the address
+  it came from. Found by three runtimes talking, 21 September, round two.
+- Every inbox generation is judged when a partner is removed, not only the
+  one just retired: an inbox from two rotations ago that still named the key
+  was read on until it expired. The same judgement runs at start, for a
+  partner removed while the runtime was down.
+- A presence publish that fails after the inbox changed is said in
+  attention, with the consequence: a partner who looks you up is sent to the
+  address published before and may be refused there. It is tried again after
+  a short wait that doubles up to the normal minute, instead of counting as a
+  fresh publish and waiting the whole minute in silence.
+- A verified message that hands over a channel address binds the sender's
+  key to it, as a reply address does. The first send to a handed-over
+  address used to fail with "no key known for address".
+- `partner remove` is not a key block: after the last partner the inbox
+  takes signed writes from any key, the removed one among them, each shown
+  as an unknown contact. The README says so.
 ## 0.6.15 - 2026-09-21
 
 - The inbox follows the address book. `partner add` used to write
