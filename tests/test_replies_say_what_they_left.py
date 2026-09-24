@@ -54,7 +54,7 @@ def test_the_runtime_counts_what_its_filter_passed_over():
     board.received.append({"channel": "board", "at": 1, "verified": True, "sha256": "h1", "body": {"post": "p1", "text": "yes"}})
     inbox.received.append({"channel": "inbox", "at": 2, "verified": True, "sha256": "h2", "body": {"text": "an answer that names no post"}})
     runtime.channels = {"board": board, "inbox": inbox}
-    runtime.lock = threading.Lock()
+    runtime.lock = threading.RLock()
     runtime.log = lambda *args: None
 
     assert len(runtime.board_replies()) == 1

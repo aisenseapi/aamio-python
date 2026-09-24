@@ -24,7 +24,9 @@ except ImportError:  # run as a script, without pytest installed
     pytest = None
 
 if pytest is not None:
-    pytestmark = pytest.mark.skipif(not os.environ.get("AAMIO_LIVE"), reason="live tests against AAMIO_HOST run only with AAMIO_LIVE=1")
+    # Exactly "1": a CI that sets the flag to 0 or false to turn the live tests
+    # off would have turned them on. K3 of the health check of 24 September 2026.
+    pytestmark = pytest.mark.skipif(os.environ.get("AAMIO_LIVE") != "1", reason="live tests against AAMIO_HOST run only with AAMIO_LIVE=1, exactly")
 
 from aamio.crypto import Keys, is_envelope, key_hash  # noqa: E402
 from aamio.runtime import Runtime  # noqa: E402

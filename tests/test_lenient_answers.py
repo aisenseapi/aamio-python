@@ -31,7 +31,7 @@ def deliver(body, verified=True, sender=SENDER, sealed_to=None):
     runtime = object.__new__(Runtime)
     channel = Channel("board", "read-key", "b" * 20, 2000000000)
     runtime.channels = {"board": channel}
-    runtime.lock = threading.Lock()
+    runtime.lock = threading.RLock()
     runtime.peers = {}
     runtime.name_for_key = lambda key: None
     runtime.archive = lambda *args: None
@@ -76,7 +76,7 @@ def test_a_sealed_message_that_will_not_open_says_so_without_pretending():
     runtime = object.__new__(Runtime)
     channel = Channel("board", "read-key", "b" * 20, 2000000000)
     runtime.channels = {"board": channel}
-    runtime.lock = threading.Lock()
+    runtime.lock = threading.RLock()
     runtime.peers = {}
     runtime.name_for_key = lambda key: None
     runtime.archive = lambda *args: None
@@ -147,7 +147,7 @@ def test_an_answer_on_another_channel_is_still_found():
     board = Channel("board", "r1", "b" * 20, 2000000000)
     private = Channel("Arctic Freight", "r2", "c" * 20, 2000000000)
     runtime.channels = {"board": board, "Arctic Freight": private}
-    runtime.lock = threading.Lock()
+    runtime.lock = threading.RLock()
     runtime.log = lambda *args: None
     private.received.append({"channel": "Arctic Freight", "at": 5, "body": {"post": "p1", "text": "yes"}})
     board.received.append({"channel": "board", "at": 4, "body": {"post": "p2", "text": "other"}})
@@ -162,7 +162,7 @@ def test_a_private_thread_does_not_become_a_list_of_board_answers():
     runtime = object.__new__(Runtime)
     private = Channel("Arctic Freight", "r2", "c" * 20, 2000000000)
     runtime.channels = {"Arctic Freight": private}
-    runtime.lock = threading.Lock()
+    runtime.lock = threading.RLock()
     runtime.log = lambda *args: None
     private.received.append({"channel": "Arctic Freight", "at": 5, "body": {"text": "an ordinary message"}})
     assert runtime.board_replies() == []
@@ -173,7 +173,7 @@ def test_one_undecodable_message_does_not_cost_the_others():
     runtime = object.__new__(Runtime)
     channel = Channel("board", "read-key", "b" * 20, 2000000000)
     runtime.channels = {"board": channel}
-    runtime.lock = threading.Lock()
+    runtime.lock = threading.RLock()
     runtime.peers = {}
     runtime.name_for_key = lambda key: None
     runtime.archive = lambda *args: None

@@ -532,6 +532,10 @@ class Runtime:
         # Fetched by the listener, offered to a caller, and not taken because the
         # caller's byte budget was full. In front of the queue on the next read.
         self.held_back = []
+        # Re-entrant on purpose: poll holds this lock while it applies a message,
+        # and the helpers it calls, binding an address or keeping a scope, take
+        # it again. A stub runtime in a test needs an RLock here for the same
+        # reason.
         self.lock = threading.RLock()
         # Partners may have changed while this process was not running. The
         # current inbox is compared with the address book on the first read;
@@ -976,12 +980,14 @@ class Runtime:
         prefix = re.sub(r"[^A-Za-z0-9._-]+", "-", partner["name"]).strip("._-")[:24] or key_hash(partner["key"])[:8]
         return ("%s.%s" % (prefix, name))[:64]
 
-    def _take_scope_share(self, entry):
+    def _take_scope_share(self, entry, apply=True):
         """A scope in an incoming message. Kept only when it came sealed and
         verified from a partner in the address book, and not seen before. The
         key is taken out of the message either way, and aamio_scope is replaced
         whatever it holds and wherever it sits, so whoever reads the message
-        never sees a key in it."""
+        never sees a key in it. With apply False nothing is kept, and the key
+        still comes out: for a message read on a channel that was muted
+        meanwhile, which stays on the record and goes to the archive."""
         body = entry.get("body")
         if not isinstance(body, dict):
             return
@@ -997,7 +1003,9 @@ class Runtime:
         key = share.get("key")
         view = {"shared_as": share.get("name") if isinstance(share.get("name"), str) else None, "can_read": key is not None, "kept": False}
         partner = self.partner_by_key(entry.get("from_key")) if entry.get("from_key") else None
-        if not (entry.get("verified") and entry.get("encrypted") and entry.get("known_contact") and partner is not None):
+        if not apply:
+            view["note"] = "not kept: this channel was muted while the message was being read, so nothing from it is taken"
+        elif not (entry.get("verified") and entry.get("encrypted") and entry.get("known_contact") and partner is not None):
             view["note"] = "not kept: a scope is only taken when it comes sealed from a partner in your address book"
         elif entry.get("replay"):
             view["note"] = "not kept again: this message arrived before, and a scope removed since stays removed"
@@ -1104,7 +1112,11 @@ class Runtime:
             gone = [k for k in (channel.allow or []) if k != "*" and k not in partners]
             if not gone:
                 continue
-            channel.muted = True
+            # Under the lock poll holds while it applies a message, so a
+            # message being applied as the partner goes sees the mute before
+            # it binds or shares anything.
+            with self.lock:
+                channel.muted = True
             muted.append(channel.w)
             self._note(channel, "muted", "inbox %s is read no more after %s: %d removed key(s) can still write there until %d, and nothing from there is delivered" % (channel.w, reason, len(gone), channel.expire_at))
         return muted
@@ -2452,12 +2464,6 @@ class Runtime:
             limits["max_bytes"] = max_bytes
 
         status, data = self.client.read(channel.w, channel.read_key, channel.after, wait, **limits)
-        # Muted while the read was out: a partner removed during the wait. The
-        # poller already handed what came back to nobody, but by then the
-        # bindings and scope shares it carried had been applied. Now they are
-        # not: what came back goes on the channel's record, for the receipt,
-        # and is applied to nothing and handed to nobody.
-        muted_meanwhile = channel.muted
         if status == 410:
             self._note(channel, "expired", "the thread at this address has expired, so anything written to it before now is gone and nothing more will arrive here")
             return "expired", []
@@ -2542,18 +2548,28 @@ class Runtime:
             if entry["sha256"] is not None:
                 channel.seen.add(entry["sha256"])
             # Before the message is kept, archived or shown: a scope key in it
-            # goes to scopes.json or nowhere, never to the reader. Nowhere,
-            # when the channel was muted while the read was out.
-            if not muted_meanwhile:
-                self._take_scope_share(entry)
-            # A verified message that carries an address binds the sender's key
+            # goes to scopes.json or nowhere, never to the reader. And a
+            # verified message that carries an address binds the sender's key
             # to it: reply_to, as always, and channel, which a handoff carries.
             # A handoff used to leave the new address without a key, so the
-            # first send to it failed with no key known for the address. And an
+            # first send to it failed with no key known for the address; an
             # address another key already holds is not rebound by a claim.
-            if isinstance(entry["body"], dict) and entry["verified"] and sender_key and not muted_meanwhile:
-                for field in ("reply_to", "channel"):
-                    self._bind_claimed_address(channel, entry, field, entry["body"].get(field), sender_key)
+            #
+            # Under the lock a removal takes to mute this channel, and judged
+            # message by message: a partner removed while the read was out, or
+            # while this batch is being applied, shares nothing and binds
+            # nothing from that moment on. The key comes out of the message
+            # either way, since the message stays on the channel's record for
+            # the receipt and goes to the archive. Read once before the batch,
+            # the mute was missed by everything after that reading; skipped
+            # whole, the share left its key in the record. Findings K1 and K2
+            # of the health check of 24 September 2026.
+            with self.lock:
+                applying = not channel.muted
+                self._take_scope_share(entry, apply=applying)
+                if applying and isinstance(entry["body"], dict) and entry["verified"] and sender_key:
+                    for field in ("reply_to", "channel"):
+                        self._bind_claimed_address(channel, entry, field, entry["body"].get(field), sender_key)
             entries.append(entry)
             with channel.lock:
                 channel.received.append(entry)
@@ -2610,8 +2626,11 @@ class Runtime:
                 self._set_cursor(channel, last_seq)
         elif type(data.get("next")) is int:
             self._set_cursor(channel, data["next"])
-        if muted_meanwhile:
-            return "muted", []
+        # Muted since the read went out: what came back is on the record and
+        # is handed to nobody.
+        with self.lock:
+            if channel.muted:
+                return "muted", []
         return "ok", entries
 
     def _bind_claimed_address(self, channel, entry, field, address, sender_key):

@@ -154,7 +154,7 @@ def bare_runtime(channels):
 
     runtime = object.__new__(Runtime)
     runtime.channels = channels
-    runtime.lock = threading.Lock()
+    runtime.lock = threading.RLock()
     runtime.log = lambda *args: None
     return runtime
 

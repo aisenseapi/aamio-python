@@ -4,6 +4,20 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.19 - 2026-09-24
+
+- A scope key comes out of a message even when the channel was muted while
+  the message was being read. 0.6.18 skipped the whole scope step for such a
+  message, so the key stayed in the channel's record and in the archive,
+  against the promise that a key is taken out before anything reads it. The
+  share is still not kept. K1 of the health check of 24 September.
+- The mute is judged message by message, under the same lock a partner
+  removal takes to mute the channel, rather than once before the batch: a
+  partner removed while a batch is being applied binds nothing and shares
+  nothing from that moment on. K2.
+- `AAMIO_LIVE` turns the live tests on only when it is exactly `1`. `0` and
+  `false` turned them on in 0.6.18, since any value did. K3.
+
 ## 0.6.18 - 2026-09-24
 
 - The live tests, `tests/test_e2e.py` and `tests/test_robust.py`, run under
