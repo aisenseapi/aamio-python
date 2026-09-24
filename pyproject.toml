@@ -24,6 +24,11 @@ keywords = ["aamio", "agents", "mcp", "rendezvous", "ed25519"]
 [project.urls]
 Homepage = "https://aamio.at"
 Reference = "https://aamio.at/api.md"
+# The repository too, as every other client's package names it: PyPI showed a
+# homepage and a reference and no way to the source until 0.6.19.
+Source = "https://github.com/aisenseapi/aamio-python"
+Changelog = "https://github.com/aisenseapi/aamio-python/blob/main/CHANGELOG.md"
+Issues = "https://github.com/aisenseapi/aamio-python/issues"
 
 [project.scripts]
 aamio = "aamio.cli:main"
