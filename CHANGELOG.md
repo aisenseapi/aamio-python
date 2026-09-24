@@ -4,6 +4,25 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.17 - 2026-09-24
+
+- An address already bound to a key is not rebound by a claim from another
+  key. A verified message naming an address in `channel` or `reply_to` bound
+  the signer's key to it whoever had it before, so a stranger's signed message
+  naming a partner's address made the next send there seal to the stranger. A
+  first claim is learned and the same key again changes nothing; a different
+  key is a conflict: the binding stays, the message still arrives with
+  `binding_conflicts` on it, and attention says so. Reach the claimant through
+  the partner list or a fresh handoff. Finding N1 of the health check of 21
+  September, demonstrated with real encryption on the 24th.
+- A poll whose channel was muted while the read was out applies nothing it
+  brought back: no binding and no scope import. The messages were already
+  handed to nobody, but the bindings they claimed had been made. They stay on
+  the channel's record, for the receipt. N2.
+- `aamio serve` refuses a request that names a protocol revision it does not
+  know with -32022 and the supported list, as the hosted service does, instead
+  of guessing the older shape. `initialize` negotiates as before. N7.
+
 ## 0.6.16 - 2026-09-21
 
 - The local MCP server delivers the revision it announces. `aamio serve` has

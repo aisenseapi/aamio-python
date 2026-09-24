@@ -2325,7 +2325,7 @@ class Runtime:
         with self.lock:
             if not hasattr(self, "attention"):
                 self.attention = {}
-            if state in ("kept_out", "unverified") and seqs is not None:
+            if state in ("kept_out", "unverified", "binding_conflict") and seqs is not None:
                 previous = self.attention.get((where, state), {})
                 note["seqs"] = previous.get("seqs", []) + list(seqs)
                 note["count"] = len(note["seqs"])
@@ -2452,6 +2452,12 @@ class Runtime:
             limits["max_bytes"] = max_bytes
 
         status, data = self.client.read(channel.w, channel.read_key, channel.after, wait, **limits)
+        # Muted while the read was out: a partner removed during the wait. The
+        # poller already handed what came back to nobody, but by then the
+        # bindings and scope shares it carried had been applied. Now they are
+        # not: what came back goes on the channel's record, for the receipt,
+        # and is applied to nothing and handed to nobody.
+        muted_meanwhile = channel.muted
         if status == 410:
             self._note(channel, "expired", "the thread at this address has expired, so anything written to it before now is gone and nothing more will arrive here")
             return "expired", []
@@ -2536,18 +2542,18 @@ class Runtime:
             if entry["sha256"] is not None:
                 channel.seen.add(entry["sha256"])
             # Before the message is kept, archived or shown: a scope key in it
-            # goes to scopes.json or nowhere, never to the reader.
-            self._take_scope_share(entry)
+            # goes to scopes.json or nowhere, never to the reader. Nowhere,
+            # when the channel was muted while the read was out.
+            if not muted_meanwhile:
+                self._take_scope_share(entry)
             # A verified message that carries an address binds the sender's key
             # to it: reply_to, as always, and channel, which a handoff carries.
             # A handoff used to leave the new address without a key, so the
-            # first send to it failed with no key known for the address.
-            if isinstance(entry["body"], dict) and sender_key:
+            # first send to it failed with no key known for the address. And an
+            # address another key already holds is not rebound by a claim.
+            if isinstance(entry["body"], dict) and entry["verified"] and sender_key and not muted_meanwhile:
                 for field in ("reply_to", "channel"):
-                    address = entry["body"].get(field)
-                    if isinstance(address, str) and address:
-                        with self.lock:
-                            self.peers[address] = sender_key
+                    self._bind_claimed_address(channel, entry, field, entry["body"].get(field), sender_key)
             entries.append(entry)
             with channel.lock:
                 channel.received.append(entry)
@@ -2604,7 +2610,40 @@ class Runtime:
                 self._set_cursor(channel, last_seq)
         elif type(data.get("next")) is int:
             self._set_cursor(channel, data["next"])
+        if muted_meanwhile:
+            return "muted", []
         return "ok", entries
+
+    def _bind_claimed_address(self, channel, entry, field, address, sender_key):
+        """A verified message that names an address binds its signer's key to it, once.
+
+        The signature proves who made the claim, not that the claimant holds an
+        address another key is already bound to. On 21 September 2026 a
+        stranger's signed message naming a partner's address in channel
+        replaced that partner's key, and the next send to the address was
+        sealed to the stranger. So a first claim is learned, the same key again
+        changes nothing, and a different key is a conflict: the binding stays,
+        the message still arrives, and the conflict is on the entry and in
+        attention. Whoever holds the address reaches this side through the
+        partner list or a fresh handoff, not by claiming.
+        """
+        if not isinstance(address, str) or not re.fullmatch(r"[a-z2-7]{20}", address):
+            return
+        with self.lock:
+            bound = self.peers.get(address)
+            if bound is None:
+                self.peers[address] = sender_key
+                return
+        if bound == sender_key:
+            return
+        entry.setdefault("binding_conflicts", []).append({"field": field, "address": address, "claimed_by": sender_key, "bound_to": bound})
+        self._note(
+            channel,
+            "binding_conflict",
+            "message %s names %s as %s, signed by %s, and that address is already bound to %s. The binding is kept: a signature proves who made the claim, not who holds the address. Reach the claimant through the partner list or a fresh handoff."
+            % (entry["seq"], address, field, self.name_for_key(sender_key) or sender_key, self.name_for_key(bound) or bound),
+            seqs=[entry["seq"]],
+        )
 
     def _poll_loop(self, channel):
         """One long-poll loop per channel, so mail on any channel is seen at once."""

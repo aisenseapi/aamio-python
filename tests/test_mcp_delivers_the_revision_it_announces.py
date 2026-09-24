@@ -142,14 +142,22 @@ def test_an_older_client_gets_exactly_the_shapes_it_had():
         assert answer("ping", version=version)["result"] == {}, version
 
 
-def test_a_revision_this_server_does_not_know_falls_back_as_before():
-    # The hosted service refuses 2031-01-01. This server ignores what it does
-    # not know and serves the old shapes, as it did before it read _meta at all.
-    result = answer("tools/list", version="2031-01-01")["result"]
+def test_a_revision_this_server_does_not_know_is_refused_before_anything_is_done():
+    # The hosted service refuses 2031-01-01 with -32022, and so does this one
+    # now: the shape such a client wants is unknown, and the older shape was a
+    # guess. Finding N7 of the health check of 21 September 2026. The runtime
+    # here raises if a tool runs, and an unknown tool named in the same request
+    # would answer -32602 if dispatch came first.
+    def never(*args, **kwargs):
+        raise AssertionError("the tool ran")
 
-    assert len(result["tools"]) == 22 and set(result) == {"tools"}
-    assert answer("ping", version="2031-01-01")["result"] == {}
-    assert answer("server/discover", version="2031-01-01")["result"]["supportedVersions"] == mcp_server.SUPPORTED
+    untouched = SimpleNamespace(scope_list=never)
+    for method, params in (("ping", None), ("tools/list", None), ("server/discover", None), ("tools/call", {"name": "aamio_scopes", "arguments": {}}), ("tools/call", {"name": "aamio_nope", "arguments": {}})):
+        reply = answer(method, params, version="2031-01-01", runtime=untouched)
+
+        assert "result" not in reply and reply["error"]["code"] == -32022, method
+        assert reply["error"]["data"] == {"supported": list(mcp_server.SUPPORTED), "requested": "2031-01-01"}, method
+        assert "2031-01-01" in reply["error"]["message"] and MODERN in reply["error"]["message"], method
 
 
 def test_what_initialize_settled_holds_for_the_requests_that_name_nothing():

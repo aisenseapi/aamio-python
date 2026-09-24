@@ -307,6 +307,13 @@ def handle(runtime: Runtime, message, session=None):
         return None
     rid = message["id"]
     session = {} if session is None else session
+    # A request that names a revision this server does not know is refused
+    # before anything is done, as the hosted service refuses it: the shape
+    # such a client wants is unknown, and the older shape was a guess. What an
+    # initialize asks for is negotiated as before, down to one that is known.
+    named = params["_meta"].get("io.modelcontextprotocol/protocolVersion") if isinstance(params.get("_meta"), dict) else None
+    if isinstance(named, str) and named and named not in SUPPORTED:
+        return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32022, "message": "Unsupported protocol version %s. Retry with one of %s, in params._meta." % (named, ", ".join(SUPPORTED)), "data": {"supported": list(SUPPORTED), "requested": named}}}
     modern = requested_version(params, session) == MODERN
     if method == "server/discover":
         # A 2026-07-28 method, so its answer has that revision's shape whoever
