@@ -4,6 +4,14 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.18 - 2026-09-24
+
+- The live tests, `tests/test_e2e.py` and `tests/test_robust.py`, run under
+  pytest only with `AAMIO_LIVE=1`. The sdist carries them, and on a release
+  day around ten clients ran them against the service without knowing, since
+  pytest collects them wherever the package is unpacked. Run as scripts they
+  run as before, against `AAMIO_HOST`. Nothing in the package itself changes.
+
 ## 0.6.17 - 2026-09-24
 
 - An address already bound to a key is not rebound by a claim from another

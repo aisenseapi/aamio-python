@@ -7,7 +7,8 @@ Four properties, each with a test that fails if the property is missing:
     no answer means unknown, never failure
     one live runtime per home
 
-Runs against AAMIO_HOST (default https://aamio.at) and leaves nothing behind.
+Runs against AAMIO_HOST (default https://aamio.at) and leaves nothing behind; under
+pytest only with AAMIO_LIVE=1.
 
     python aamio-python/tests/test_robust.py
 """
@@ -20,6 +21,19 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
+
+# Against the live service, so only when asked for. The sdist carries these
+# tests, and on the release day of 22 September 2026 around ten clients ran
+# them against production without knowing: pytest collects them wherever the
+# package is unpacked. AAMIO_LIVE=1 runs them, and AAMIO_HOST points them
+# elsewhere. Run as a script, the file is the intent, and it runs as before.
+try:
+    import pytest
+except ImportError:  # run as a script, without pytest installed
+    pytest = None
+
+if pytest is not None:
+    pytestmark = pytest.mark.skipif(not os.environ.get("AAMIO_LIVE"), reason="live tests against AAMIO_HOST run only with AAMIO_LIVE=1")
 
 from aamio.crypto import thread_signing_input  # noqa: E402
 from aamio.runtime import Runtime, SendFailed  # noqa: E402
