@@ -485,9 +485,14 @@ def test_turned_away_attempted_and_stopped_are_each_said_for_what_they_are():
     real = answer_with(a, 403, stored=False)
     with pytest.raises(SendFailed) as refused:
         a.send(target, "turned away", None)
+    assert len(service.threads[target]["messages"]) == 0, "turned away, and not stored"
+    # From the real post again: a stub laid over the 403 one stored nothing,
+    # and the case below would not be the one it is named for.
+    a.client.post = real
     answer_with(a, 500, stored=True)
     with pytest.raises(SendFailed) as attempted:
         a.send(target, "stored, then a server error", None)
+    assert len(service.threads[target]["messages"]) == 1, "stored, whatever the answer said"
     a.client.post = real
     posts = a._post
 
