@@ -75,7 +75,7 @@ def test_a_legacy_client_may_ask_for_discover_too():
 def test_a_modern_tools_list_carries_the_three_fields_and_all_the_tools():
     result = answer("tools/list")["result"]
 
-    assert len(result["tools"]) == len(mcp_server.TOOLS) == 22
+    assert len(result["tools"]) == len(mcp_server.TOOLS) == 23
     # The shape the revision requires, not only the count.
     assert result["resultType"] == "complete" and result["cacheScope"] == "public" and result["ttlMs"] > 0
 

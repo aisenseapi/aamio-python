@@ -69,7 +69,7 @@ def test_the_next_send_to_the_address_still_uses_the_kept_key():
     runtime.peers[ADDRESS] = PARTNER.public
     poll_with(runtime, claim(runtime, 1, "channel", ADDRESS, STRANGER))
     sealed_to = []
-    runtime._send = lambda w, key, partner, text=None, data=None, reply_to=None: sealed_to.append((w, key))
+    runtime._send = lambda w, key, partner, text=None, data=None, reply_to=None, answers=None: sealed_to.append((w, key))
 
     runtime.send(ADDRESS, "still for the partner")
 

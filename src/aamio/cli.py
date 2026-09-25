@@ -147,6 +147,10 @@ def main(argv=None):
     p.add_argument("to")
     p.add_argument("text")
     p.add_argument("--data", default=None, help="JSON object")
+    p.add_argument("--re", default=None, help="the sha256 of the message this answers, as read shows it")
+    p = sub.add_parser("trace", help="what was sent to one counterpart and what came back, as hashes: for when a message did not arrive, or arrived empty")
+    p.add_argument("who", nargs="?", default=None, help="a partner name, a key or a write address; leave out for everyone")
+    p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("read")
     p.add_argument("--wait", type=int, default=0)
     p.add_argument("--limit", type=int, default=None, help="at most this many messages")
@@ -297,7 +301,7 @@ def run(args, runtime):
     elif args.command == "send":
         data = json.loads(args.data) if args.data else None
         try:
-            out(runtime.send(args.to, args.text, data))
+            out(runtime.send(args.to, args.text, data, **({"answers": args.re} if getattr(args, "re", None) else {})))
         except SendFailed as failed:
             return send_failed(failed, "send")
         except GateStop as stop:
@@ -310,6 +314,12 @@ def run(args, runtime):
         # thread and a service that did not answer both read as "no messages".
         messages = runtime.read(args.wait, args.limit or 50, max_bytes=args.max_bytes)
         out({"messages": messages, "count": len(messages), "attention": runtime.attention_taken()})
+    elif args.command == "trace":
+        try:
+            out(runtime.trace(args.who, args.limit))
+        except LookupError as error:
+            print("aamio: %s" % error, file=sys.stderr)
+            return 1
     elif args.command == "receipt":
         out(runtime.receipt(args.channel, args.anchor))
     elif args.command == "channel":
