@@ -5,25 +5,36 @@ messages was missing, while the send log here said non-empty and delivered. Both
 can be true -- every message this runtime sends is sealed to the recipient's key,
 and a reader without it sees an envelope -- and nothing on either side could say
 which. So a message carries re, the sha256 of the message it answers, and seen,
-the sha256 of the last message its sender read from the recipient, inside the
-sealed body; and trace lays both sides next to each other as hashes. These go
-through two real runtimes over an in-memory service: what one sends is what the
-other reads, byte for byte.
+the sha256 of the last message its sender read and opened from the recipient,
+inside the sealed body; and trace lays both sides next to each other as hashes.
+These go through two real runtimes over an in-memory service: what one sends is
+what the other reads, byte for byte.
+
+The review of the same evening (docs/client-trace-review-2026-09-25.md in the
+service) found the first version saying more than it knew. Each of its
+reproductions is a test here, next to the case that has to keep working: a
+claim covers the one message it names (R1), only a message that opened is
+named as read and a replay moves nothing (R2), a damaged trace never turns a
+delivered send or a read into an error (R3), and the trace is listed from a
+copy while a read records (R4).
 """
 
 import base64
 import hashlib
 import json
-import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
+
+import pytest
 
 sys.path.insert(0, "src")
 sys.path.insert(0, "tests")
 
 from aamio import mcp_server
+from aamio.crypto import Keys, thread_signing_input
 from aamio.runtime import Runtime
 
 
@@ -86,8 +97,8 @@ class Client:
 HOMES = []
 
 
-def runtime_for(service, name):
-    home = tempfile.mkdtemp(prefix="aamio-trace-%s-" % name)
+def runtime_for(service, name, home=None):
+    home = home or tempfile.mkdtemp(prefix="aamio-trace-%s-" % name)
     HOMES.append(home)
     runtime = Runtime(home=home, host="https://fake.test", tags=[name], archive=False)
     runtime.client = service.client()
@@ -120,6 +131,15 @@ def read_all(runtime):
     return got
 
 
+def direct(sender, recipient, body, seal_to=None, channel="inbox"):
+    """A signed message written straight at an inbox, the way any client could write it."""
+    target = recipient.channels[channel].w
+    envelope = sender.keys.seal(seal_to or recipient.keys.public, json.dumps(body).encode("utf-8"))
+    status, result = sender.client.post(target, envelope, sender.keys.public, sender.keys.sign(thread_signing_input(target, envelope)))
+    assert status == 201
+    return result
+
+
 def test_a_send_is_traced_as_the_service_stored_it():
     service, a, b = pair()
     sent = a.send(b.channels["inbox"].w, "the first", None)
@@ -146,18 +166,23 @@ def test_a_reply_says_what_it_answers_and_what_was_read():
     answer = [e for e in read_all(a) if e["body"].get("text") == "answer to one"][0]
 
     assert answer["body"]["re"] == first["sha256"], "re names the message answered, as the service hashed it"
-    assert answer["body"]["seen"] == second["sha256"], "seen names the last message b read from a"
+    assert answer["body"]["seen"] == second["sha256"], "seen names the last message b read and opened from a"
 
     trace = a.trace("b")
-    assert [row["seen_by_them"] for row in trace["sent"]] == [True, True]
+    # Three things, apart: stored by the service, named as read, answered.
+    assert [row["status"] for row in trace["sent"]] == [201, 201]
+    assert [row["seen_by_them"] for row in trace["sent"]] == [None, True], "seen covers the one message it names"
+    assert [row["answered_by_them"] for row in trace["sent"]] == [True, None]
     received = trace["received"][-1]
     assert received["answers"]["sha256"] == first["sha256"] and received["answers"]["seq"] == first["seq"]
     assert received["acknowledges"]["sha256"] == second["sha256"]
     assert received["encrypted"] is True and received["format"] == "json" and "text" in received["fields"]
-    assert trace["unacknowledged"] == [] and "acknowledged" in trace["note"]
+    assert trace["no_read_claim"] == [first["message_id"]]
+    assert "2 delivered, and their runtime says it read and opened 1 of them" in trace["note"]
+    assert "unknown, not unread" in trace["note"]
 
 
-def test_what_was_sent_after_the_last_acknowledgement_is_said():
+def test_a_message_sent_after_the_last_claim_is_unknown_not_unread():
     service, a, b = pair()
     a.send(b.channels["inbox"].w, "one", None)
     read_all(b)
@@ -167,31 +192,255 @@ def test_what_was_sent_after_the_last_acknowledgement_is_said():
 
     trace = a.trace("b")
 
-    assert [row["seen_by_them"] for row in trace["sent"]] == [True, False]
-    assert trace["unacknowledged"] == [later["message_id"]]
-    assert "1 message(s) delivered after the last one they said they read" in trace["note"]
+    assert [row["seen_by_them"] for row in trace["sent"]] == [True, None]
+    assert trace["no_read_claim"] == [later["message_id"]]
+    assert "For 1 there is no claim kept here: that is unknown, not unread" in trace["note"]
 
 
-def test_a_counterpart_that_never_acknowledges_is_explained_rather_than_blamed():
+def test_a_counterpart_that_never_claims_is_explained_rather_than_blamed():
     service, a, b = pair()
-    a.send(b.channels["inbox"].w, "hello", None)
+    sent = a.send(b.channels["inbox"].w, "hello", None)
 
     trace = a.trace("b")
 
-    assert trace["seen_by_them"] is None and [row["seen_by_them"] for row in trace["sent"]] == [None]
-    assert "sealed to their key" in trace["note"] and "envelope" in trace["note"]
+    assert [row["seen_by_them"] for row in trace["sent"]] == [None] and trace["no_read_claim"] == [sent["message_id"]]
+    assert "sealed to their key" in trace["note"] and "envelope" in trace["note"] and "unknown, not unread" in trace["note"]
+
+
+def test_an_old_client_without_seen_leaves_everything_unknown():
+    service, a, b = pair()
+    sent = a.send(b.channels["inbox"].w, "hello", None)
+    read_all(b)
+    # A client from before seen: signed and sealed, and silent about what it read.
+    direct(b, a, {"text": "hello back"})
+    read_all(a)
+
+    trace = a.trace("b")
+
+    assert trace["received"][-1]["fields"] == ["text"] and trace["received"][-1]["seen"] is None
+    assert [row["seen_by_them"] for row in trace["sent"]] == [None] and trace["no_read_claim"] == [sent["message_id"]]
+    assert trace["note"].startswith("Nothing from them has named a message of yours as read")
 
 
 def test_an_unverified_message_can_claim_nothing():
     service, a, b = pair()
-    a.send(b.channels["inbox"].w, "one", None)
+    sent = a.send(b.channels["inbox"].w, "one", None)
     mine = a.trace("b")["sent"][-1]["sha256"]
     # An unsigned write straight at a's inbox, claiming to have read a's message.
     a.channels["inbox"].allow = []
     service.threads[a.channels["inbox"].w]["messages"].append({"seq": 99, "at": int(time.time()), "type": "json", "body": json.dumps({"seen": mine, "re": mine}), "sha256": "0" * 64, "from": None, "sig": None, "verified": False})
     read_all(a)
 
-    assert a.trace("b")["seen_by_them"] is None, "an unsigned message acknowledges nothing"
+    trace = a.trace("b")
+
+    assert trace["sent"][-1]["seen_by_them"] is None and trace["no_read_claim"] == [sent["message_id"]], "an unsigned message claims nothing"
+
+
+def test_a_claim_covers_the_message_it_names_and_not_an_unread_side_channel():
+    """R1: one seen used to mark every earlier send as read, across channels."""
+    service, a, b = pair()
+    side = b.open_channel("side", 3600, ["a"])
+    a.peers[side["w"]] = b.keys.public
+    unread = a.send(side["w"], "on the side channel", None)
+    read = a.send(b.channels["inbox"].w, "in the inbox", None)
+
+    state, entries = b.poll(b.channels["inbox"], 0)
+    assert [e["sha256"] for e in entries] == [read["sha256"]] and b.channels["side"].after == 0, "b reads the inbox and nothing else"
+    b.send(a.channels["inbox"].w, "answer", None)
+    read_all(a)
+
+    trace = a.trace("b")
+
+    assert [row["seen_by_them"] for row in trace["sent"]] == [None, True], "the side channel nobody read stays unknown"
+    assert trace["no_read_claim"] == [unread["message_id"]]
+    assert "Everything" not in trace["note"] and "unknown, not unread" in trace["note"]
+
+
+def test_a_claim_to_a_message_not_recorded_here_is_not_everything_read():
+    """R1: a hash this side never sent gave 'Everything delivered is acknowledged'."""
+    service, a, b = pair()
+    sent = a.send(b.channels["inbox"].w, "unread", None)
+    direct(b, a, {"seen": "f" * 64, "text": "a claim about something else"})
+    read_all(a)
+
+    trace = a.trace("b")
+
+    assert [row["seen_by_them"] for row in trace["sent"]] == [None] and trace["no_read_claim"] == [sent["message_id"]]
+    assert trace["received"][-1]["acknowledges"] == {"sha256": "f" * 64, "note": "not one of the messages recorded here"}
+    assert "Everything" not in trace["note"]
+    assert "their runtime says it read and opened 0 of them" in trace["note"] and "1 message(s) not recorded here" in trace["note"]
+
+
+def test_a_later_claim_does_not_erase_an_earlier_one():
+    """R1: a claim is kept as long as the message that made it, whatever comes after."""
+    service, a, b = pair()
+    first = a.send(b.channels["inbox"].w, "one", None)
+    read_all(b)
+    b.send(a.channels["inbox"].w, "read one", None)
+    direct(b, a, {"seen": "e" * 64, "text": "names something not recorded here"})
+    read_all(a)
+
+    trace = a.trace("b")
+
+    assert [row["seen_by_them"] for row in trace["sent"]] == [True] and trace["no_read_claim"] == []
+    assert trace["sent"][0]["sha256"] == first["sha256"]
+
+
+def test_a_message_that_could_not_be_opened_is_recorded_and_not_named_as_read():
+    """R2: a verified message sealed to another key moved seen, and the sender's trace said read."""
+    service, a, b = pair()
+    target = b.channels["inbox"].w
+    body = {"text": "sealed to a key b does not hold"}
+    envelope = a.keys.seal(Keys(bytes([91]) * 32).public, json.dumps(body).encode("utf-8"))
+    status, unopened = a._deliver(a._outbox_add(target, b.keys.public, envelope, body))
+    assert status == 201
+
+    entries = read_all(b)
+    assert entries[0]["verified"] is True and entries[0]["format"] == "unreadable"
+    b.send(a.channels["inbox"].w, "I could not open that", None)
+    reply = [e for e in read_all(a) if e["body"].get("text") == "I could not open that"][0]
+
+    assert "seen" not in reply["body"], "a message that did not open is not named as read"
+    on_b = b.trace("a")
+    assert on_b["received"][-1]["format"] == "unreadable" and on_b["received"][-1]["error"]
+    assert on_b["received"][-1]["fields"] is None and on_b["received"][-1]["text_chars"] is None, "what it held is not known"
+    assert on_b["last_read"] is None
+    assert a.trace("b")["sent"][0]["seen_by_them"] is None
+
+    # And the case that has to keep working: one that opens is named.
+    readable = a.send(target, "this one opens", None)
+    read_all(b)
+    b.send(a.channels["inbox"].w, "that one I read", None)
+    read_all(a)
+
+    trace = a.trace("b")
+    assert [row["sha256"] for row in trace["sent"]] == [unopened["sha256"], readable["sha256"]]
+    assert [row["seen_by_them"] for row in trace["sent"]] == [None, True]
+    assert b.trace("a")["last_read"]["sha256"] == readable["sha256"]
+
+
+def test_an_old_message_sent_again_does_not_move_seen_back():
+    """R2: past the fifty rows a trace keeps, a replay moved last_read to itself."""
+    service, a, b = pair()
+    target = b.channels["inbox"].w
+    first = a.send(target, "synthetic 0", None)
+    for number in range(1, Runtime.TRACE_KEEP + 1):
+        last = a.send(target, "synthetic %d" % number, None)
+    assert len(read_all(b)) == Runtime.TRACE_KEEP + 1
+    assert b.traces[a.keys.public]["last_read"]["sha256"] == last["sha256"]
+
+    service.threads[target]["messages"].append(dict(service.threads[target]["messages"][0], seq=Runtime.TRACE_KEEP + 2))
+    again = read_all(b)
+
+    assert again[0]["replay"] is True and again[0]["sha256"] == first["sha256"]
+    assert b.traces[a.keys.public]["last_read"]["sha256"] == last["sha256"], "the replay moved nothing"
+    b.send(a.channels["inbox"].w, "after a replay", None)
+    reply = [e for e in read_all(a) if e["body"].get("text") == "after a replay"][0]
+    assert reply["body"]["seen"] == last["sha256"], "and the next message names the last one read, not the replay"
+    assert b.trace("a")["last_read"]["sha256"] == last["sha256"]
+
+
+DAMAGED = {
+    "a list where the rows go": lambda key: {key: {"sent": "not a list", "received": [], "last_read": None, "seen_by_them": None}},
+    "rows of the wrong type": lambda key: {key: {"sent": [1, "x", None, {"sha256": 5, "status": "201", "message_id": ["m"], "fields": "text"}], "received": {"a": 1}, "last_read": "nope"}},
+    "a claim and a read marker that are not hashes": lambda key: {key: {"sent": [], "received": [None, {"seen": "g" * 64, "sha256": [], "at": True}], "last_read": {"sha256": "short"}}},
+    "a book that is not a book": lambda key: {key: "a string where a book goes", "not a key": {"sent": []}},
+    "a list where the file's object goes": lambda key: [["a list"]],
+}
+
+
+@pytest.mark.parametrize("damage", sorted(DAMAGED))
+def test_a_damaged_trace_never_turns_a_delivered_send_into_an_error(damage):
+    """R3: a nested field of the wrong type raised after the message had gone."""
+    service, a, b = pair()
+    target = b.channels["inbox"].w
+    home = a.home
+    a._save_json("trace.json", DAMAGED[damage](b.keys.public), private=True)
+    a.close()
+    a = runtime_for(service, "a", home=home)
+    a.peers[target] = b.keys.public
+
+    sent = a.send(target, "delivered whatever the trace holds", None)
+
+    assert sent["sha256"] == service.threads[target]["messages"][-1]["sha256"]
+    assert len(service.threads[target]["messages"]) == 1, "sent once, and nothing invites a second"
+    assert [entry["status"] for entry in a.outbox.values()] == ["delivered"]
+    assert [row["sha256"] for row in a.trace("b")["sent"]] == [sent["sha256"]], "and the trace starts again from what it could read"
+    read_all(b)
+    b.send(a.channels["inbox"].w, "read it", None)
+    assert [e["body"].get("seen") for e in read_all(a)] == [sent["sha256"]]
+    a.close()
+
+
+def test_a_trace_that_cannot_be_saved_or_updated_costs_the_trace_and_nothing_else():
+    """R3: the send, the outbox and the whole batch come through; the log says what the trace missed."""
+    service, a, b = pair()
+    target = b.channels["inbox"].w
+    logged = []
+    a.log = logged.append
+    b.log = logged.append
+    saves = a._save_json
+
+    def no_room_for_the_trace(name, value, private=True):
+        if name == "trace.json":
+            raise OSError("no space left on device")
+        return saves(name, value, private=private)
+
+    a._save_json = no_room_for_the_trace
+    first = a.send(target, "one", None)
+    assert first["sha256"] and [entry["status"] for entry in a.outbox.values()] == ["delivered"]
+    assert any(line.startswith("trace.json: OSError") for line in logged)
+
+    def broken(key):
+        raise RuntimeError("the trace is broken")
+
+    a._trace_book = broken
+    second = a.send(target, "two", None)
+    assert second["sha256"] and len(service.threads[target]["messages"]) == 2
+    assert any("trace sent: not recorded: RuntimeError" in line for line in logged)
+
+    b._trace_book = broken
+    got = read_all(b)
+    assert [e["body"].get("text") for e in got] == ["one", "two"], "the whole batch arrives"
+    assert any("trace received: not recorded: RuntimeError" in line for line in logged)
+
+
+def test_trace_lists_from_a_copy_while_a_read_records_a_new_counterpart():
+    """R4: a read that met a new counterpart during a listing stopped it with RuntimeError."""
+    service, a, b = pair()
+    a.send(b.channels["inbox"].w, "one", None)
+    stranger = runtime_for(service, "stranger")
+    a.channels["inbox"].allow = ["*"]
+    direct(stranger, a, {"text": "a signed stranger"})
+    named = a.name_for_key
+    paused, release = threading.Event(), threading.Event()
+
+    def held(key):
+        paused.set()
+        assert release.wait(5)
+        return named(key)
+
+    outcome = []
+
+    def listing():
+        try:
+            outcome.append(a.trace())
+        except Exception as error:
+            outcome.append(error)
+
+    a.name_for_key = held
+    worker = threading.Thread(target=listing)
+    worker.start()
+    assert paused.wait(5)
+    a.name_for_key = named
+    read_all(a)
+    release.set()
+    worker.join(5)
+    stranger.close()
+
+    assert not worker.is_alive() and isinstance(outcome[0], dict), outcome
+    assert [row["key"] for row in outcome[0]["counterparts"]] == [b.keys.public], "the listing is of the record as it was"
+    assert stranger.keys.public in a.traces, "and the read recorded the new counterpart"
 
 
 def test_re_is_a_message_hash_or_it_is_refused():
@@ -214,7 +463,7 @@ def test_the_trace_survives_a_restart_and_names_everyone_without_a_name():
 
     assert len(again.trace("b")["sent"]) == 1
     everyone = again.trace()["counterparts"]
-    assert [row["with"] for row in everyone] == ["b"] and everyone[0]["sent"] == 1
+    assert [row["with"] for row in everyone] == ["b"] and everyone[0]["sent"] == 1 and everyone[0]["no_read_claim"] == 1
     again.close()
     b.close()
 
@@ -239,6 +488,7 @@ def test_both_come_through_the_mcp_tools():
     traced = mcp_server.dispatch(a, "aamio_trace", {"who": "b"})
     assert traced["isError"] is False
     assert traced["structuredContent"]["received"][-1]["answers"]["sha256"] == sent["sha256"]
+    assert traced["structuredContent"]["sent"][-1]["seen_by_them"] is True and traced["structuredContent"]["sent"][-1]["answered_by_them"] is True
     bad = mcp_server.dispatch(a, "aamio_send", {"to": "b", "text": "x", "re": "not a hash"})
     assert bad["isError"] is True and "sha256" in bad["structuredContent"]["error"]
     unknown = mcp_server.dispatch(a, "aamio_trace", {"who": "nobody"})

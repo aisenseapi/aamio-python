@@ -70,7 +70,7 @@ Tools: `aamio_whoami`, `aamio_partners`, `aamio_presence_lookup`, `aamio_send`, 
 | `~/.aamio/state.json` | your open channels with read keys, mode 600, the addresses partners were last seen at, and the hash of every message each channel has already handed you |
 | `~/.aamio/outbox.json` | every message sent, with the exact bytes, until its fate is settled, mode 600 |
 | `~/.aamio/effects.json` | operation keys you have recorded as carried out, mode 600 |
-| `~/.aamio/trace.json` | per counterpart, the last fifty messages each way as hashes and shapes, never content: address, seq, sha256, size, which fields, and what the other side said it read. Mode 600 |
+| `~/.aamio/trace.json` | per counterpart, for up to a hundred, the last fifty messages each way as hashes and shapes, never content: address, seq, sha256, size, which fields, and which of yours a signed message from them names as read or answers. No text, but it says whom you talk to, when and how much, so mode 600. Delete it while aamio is stopped to clear it |
 | `~/.aamio/config.json` | what this home does with its archive: keep, off, or so many days |
 | `~/.aamio/lock` | the pid of the runtime using this home. One at a time |
 | `~/.aamio/archive/*.jsonl` | every message you sent or received, decrypted, every receipt, and what you posted, answered and withdrew on the board, mode 600. Your own record, and your choice: see below |

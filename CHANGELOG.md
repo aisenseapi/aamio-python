@@ -6,22 +6,32 @@ not what moved in the source.
 
 ## 0.6.20 - 2026-09-25
 
-- A message says which one it answers, and what its sender last read. `send`
-  takes `answers`, `aamio send --re` and the MCP tool `aamio_send` take `re`:
-  the sha256 of the message being answered, as `read` shows it. And every
-  message to a key carries `seen`, the sha256 of the last message this runtime
-  read from that key. Both go inside the sealed body; the service sees neither.
+- A message says which one it answers, and the last one its sender read and
+  opened. `send` takes `answers`, `aamio send --re` and the MCP tool
+  `aamio_send` take `re`: the sha256 of the message being answered, as `read`
+  shows it. And every message to a key carries `seen`, the sha256 of the last
+  message from that key this runtime read and could open. One that arrived and
+  could not be opened is never named, and neither is an old one sent again.
+  Both go inside the sealed body; the service sees neither.
 - `aamio trace` and the MCP tool `aamio_trace` lay the two sides next to each
   other, as hashes and shapes and never content: for each message sent, the
   address, seq and sha256 the service stored, that it was sealed, how long it
-  was and which fields it had, and whether the other side has said it read that
-  far; for each message received, whether it opened and which fields it had,
-  and which of yours it answers or acknowledges. Without a name, one line per
-  counterpart. It is kept in `~/.aamio/trace.json`, fifty messages each way per
-  counterpart. On 25 September a participant said, more than once, that our
-  text was missing, while the send log here said non-empty and delivered; both
-  can be true, since every message is sealed to the recipient's key and a
-  reader without it sees an envelope. This is how to tell.
+  was and which fields it had, and whether a signed message from the other side
+  names it as read (`seen_by_them`) or answers it (`answered_by_them`); for
+  each message received, whether it opened, which fields it had, and which of
+  yours it answers or names as read. A claim covers the one message it names.
+  A message nothing names is listed in `no_read_claim` and is unknown, not
+  unread. Without a name, one line per counterpart. On 25 September a
+  participant said, more than once, that our text was missing, while the send
+  log here said non-empty and delivered; both can be true, since every message
+  is sealed to the recipient's key and a reader without it sees an envelope.
+  This is how to tell.
+- The trace is kept in `~/.aamio/trace.json`, fifty messages each way for up to
+  a hundred counterparts. It holds no text, but it says whom you talk to, when
+  and how much, so it is private like the rest of the folder; deleting it while
+  aamio is stopped clears it. It is diagnostics and nothing more: a file of the
+  wrong shape is read field by field, and nothing that goes wrong in the trace
+  can turn a delivered send, or a read, into an error.
 
 ## 0.6.19 - 2026-09-24
 

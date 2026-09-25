@@ -12,6 +12,7 @@ The inbox is a thread with the maximum lifetime. Before it expires the runtime
 opens a new one and republishes presence, so partners keep finding it.
 """
 
+import copy
 import json
 import os
 import queue
@@ -350,6 +351,141 @@ def message_shape(body, envelope):
     return shape
 
 
+# What a row of the trace may hold, and of what type. trace.json is this
+# runtime's own file and is still read as if anyone could have written it: on
+# 25 September 2026 a nested field of the wrong type reached the code that
+# records a send, after the message had gone, and the caller heard an error
+# about a message that was delivered (finding R3 of that evening's review).
+TRACE_SENT_FIELDS = {
+    "message_id": str, "at": int, "w": str, "status": int, "outcome": str, "seq": int, "sha256": "hash",
+    "sealed": bool, "bytes": int, "fields": list, "text_chars": int, "re": "hash", "seen": "hash",
+}
+TRACE_RECEIVED_FIELDS = {
+    "at": int, "channel": str, "w": str, "seq": int, "sha256": "hash", "encrypted": bool, "format": str,
+    "error": str, "fields": list, "text_chars": int, "re": "hash", "seen": "hash",
+}
+TRACE_READ_FIELDS = {"sha256": "hash", "seq": int, "w": str, "at": int}
+
+
+def _trace_value(kind, value):
+    if kind == "hash":
+        return value if is_message_hash(value) else None
+    if kind is list:
+        return sorted(item for item in value if isinstance(item, str)) if isinstance(value, list) else None
+    # type() rather than isinstance(): True is an int to isinstance.
+    return value if type(value) is kind else None
+
+
+def trace_row(row, fields):
+    """One row of a trace as this runtime writes it: the fields it knows, each of the type it writes or None."""
+    if not isinstance(row, dict):
+        return None
+
+    return {name: _trace_value(kind, row[name]) for name, kind in fields.items() if name in row}
+
+
+def _trace_rows(found, fields, keep, required):
+    """Rows as the file held them. A row without what names it, the message id of a send or the hash of what arrived, says nothing and is left out."""
+    rows = [trace_row(item, fields) for item in found] if isinstance(found, list) else []
+
+    return [row for row in rows if row is not None and row.get(required) is not None][-keep:]
+
+
+def normalize_traces(traces, keep, keys):
+    """trace.json as this runtime writes it, whatever the file held: a book per key, rows of a known shape, within the bounds."""
+    books = {}
+
+    for key, book in (traces.items() if isinstance(traces, dict) else ()):
+        if not isinstance(key, str) or not is_key(key) or not isinstance(book, dict):
+            continue
+
+        last = trace_row(book.get("last_read"), TRACE_READ_FIELDS)
+        books[key] = {
+            "sent": _trace_rows(book.get("sent"), TRACE_SENT_FIELDS, keep, "message_id"),
+            "received": _trace_rows(book.get("received"), TRACE_RECEIVED_FIELDS, keep, "sha256"),
+            "last_read": last if last and last.get("sha256") else None,
+            "active": book["active"] if type(book.get("active")) is int else 0,
+        }
+
+    for stale in sorted(books, key=lambda k: books[k]["active"])[:max(0, len(books) - keys)]:
+        books.pop(stale)
+
+    return books
+
+
+def trace_view(book, limit):
+    """One counterpart's record, with each message sent next to what came back about it.
+
+    A claim is exact. A verified message from them whose seen names a sha256
+    says their runtime read and opened that message, and nothing more: not the
+    ones sent before it, not another channel's. The first version read one seen
+    as covering every earlier send, so a side channel nobody had read showed as
+    read (finding R1). A message nothing names is unknown, never unread.
+    """
+    sent_rows = [row for row in book.get("sent") or [] if isinstance(row, dict)]
+    received_rows = [row for row in book.get("received") or [] if isinstance(row, dict)]
+    claimed = {row["seen"] for row in received_rows if is_message_hash(row.get("seen"))}
+    answered = {row["re"] for row in received_rows if is_message_hash(row.get("re"))}
+    mine = {row["sha256"]: row for row in sent_rows if is_message_hash(row.get("sha256"))}
+    delivered = [row for row in sent_rows if row.get("status") == 201 and is_message_hash(row.get("sha256"))]
+    no_claim = [row.get("message_id") for row in delivered if row["sha256"] not in claimed]
+    sent = []
+
+    for record in sent_rows[-limit:]:
+        row = dict(record)
+        stored = record.get("sha256") if record.get("status") == 201 and is_message_hash(record.get("sha256")) else None
+        row["seen_by_them"] = True if stored is not None and stored in claimed else None
+        row["answered_by_them"] = True if stored is not None and stored in answered else None
+        sent.append(row)
+
+    received = []
+
+    for record in received_rows[-limit:]:
+        row = dict(record)
+
+        for field, as_ in (("re", "answers"), ("seen", "acknowledges")):
+            if is_message_hash(record.get(field)):
+                ours = mine.get(record[field])
+                row[as_] = {"seq": ours.get("seq"), "sha256": ours["sha256"], "at": ours.get("at")} if ours else {"sha256": record[field], "note": "not one of the messages recorded here"}
+
+        received.append(row)
+
+    return {
+        "sent": sent,
+        "received": received,
+        "no_read_claim": no_claim,
+        "note": trace_note(sent_rows, received_rows, delivered, no_claim, claimed - set(mine)),
+    }
+
+
+def trace_note(sent, received, delivered, no_claim, elsewhere):
+    """What the record says, in words, and no more than it says."""
+    if not sent:
+        return "Nothing sent to them is recorded here."
+
+    if not delivered:
+        return "The service stored none of the messages recorded here: the status and outcome of each say what happened."
+
+    if not any(is_message_hash(row.get("seen")) for row in received):
+        said = "Nothing from them has named a message of yours as read" if received else "Nothing has come back from them"
+
+        return (said + ", so each is unknown, not unread. A client that does not send seen says nothing, and neither does one "
+                "that cannot open what it gets: every message here is sealed to their key, so a reader without it sees an "
+                "envelope and no text. The sha256 of each message is what the service stored, byte for byte; ask them for "
+                "the sha256 they read.")
+
+    note = "%d delivered, and their runtime says it read and opened %d of them." % (len(delivered), len(delivered) - len(no_claim))
+
+    if no_claim:
+        note += (" For %d there is no claim kept here: that is unknown, not unread, since each message from them names only "
+                 "the last of yours it had read when it was written, and this record keeps fifty each way." % len(no_claim))
+
+    if elsewhere:
+        note += " They also named %d message(s) not recorded here: older than this record, or not sent from this runtime." % len(elsewhere)
+
+    return note + " A claim covers the one message it names. It says their runtime opened it, not that anyone understood it or acted on it."
+
+
 class Channel:
     def __init__(self, label, read_key, w, expire_at, allow=None, after=0, created_at=None):
         self.label = label
@@ -505,9 +641,9 @@ class Runtime:
         self.effects = self._load_json("effects.json", {})
         # What was sent to each key and what came back, as hashes and shapes,
         # never content. Not a kept file: a trace that cannot be read is a
-        # trace that starts again, not a reason to stop.
-        traces = self._load_json("trace.json", {})
-        self.traces = traces if isinstance(traces, dict) else {}
+        # trace that starts again, not a reason to stop. And read field by
+        # field, as if anyone could have written it (R3).
+        self.traces = normalize_traces(self._load_json("trace.json", {}), self.TRACE_KEEP, self.TRACE_KEYS)
         self.gates = {}                                       # write address -> the gate it was opened with
         # Anything still pending was in flight when the last process stopped.
         # Whether it reached aamio is unknown, and it stays unknown until
@@ -2066,7 +2202,8 @@ class Runtime:
 
         self._record_answer(entry, status, result)
         self.save_outbox()
-        self._trace_sent(entry, status, result)
+        # After the outcome is saved, and unable to change it.
+        self._trace_safely("sent", self._trace_sent, entry, status, result)
 
         return status, result
 
@@ -2610,9 +2747,10 @@ class Runtime:
                         self._bind_claimed_address(channel, entry, field, entry["body"].get(field), sender_key)
                 # And the trace: what came from this key, and what it says it
                 # read of ours. Verified only, since an unsigned message can
-                # claim to be from anyone and to have read anything.
+                # claim to be from anyone and to have read anything. Whatever
+                # goes wrong in the trace costs the trace, never this batch.
                 if applying and entry["verified"] and sender_key:
-                    self._trace_received(channel, entry)
+                    self._trace_safely("received", self._trace_received, channel, entry)
             entries.append(entry)
             with channel.lock:
                 channel.received.append(entry)
@@ -2715,27 +2853,36 @@ class Runtime:
     # Both can be true: every message this runtime sends is sealed to the key it
     # goes to, and a reader without that key sees an envelope and no text. So each
     # message now says, inside the sealed body, which message it answers (re) and
-    # the last one this side read from the other (seen), and trace lays the two
-    # sides next to each other as hashes: the sha256 the service stored, byte for
-    # byte, is the one the other side read, or it is not.
+    # the last one this side read and opened from the other (seen), and trace lays
+    # the two sides next to each other as hashes: the sha256 the service stored,
+    # byte for byte, is the one the other side read, or it is not.
+    #
+    # Each field is a claim about the one message it names. The review of the
+    # same evening found the first version saying more than it knew: one seen
+    # marked every earlier send as read, a side channel nobody had opened
+    # included (R1); a message that arrived and could not be opened moved seen
+    # all the same, and so did an old one sent again (R2); a trace file of the
+    # wrong shape turned a delivered send into an error, which invites the same
+    # message twice (R3); and listing the trace while a read met a new
+    # counterpart stopped with RuntimeError (R4).
 
     TRACE_KEEP = 50
     TRACE_KEYS = 100
 
     def _trace_book(self, key):
-        """The record for one key, made when first needed and kept to a bound."""
-        trace = self.__dict__.setdefault("traces", {})
-        book = trace.get(key)
+        """The record for one key, made when first needed and kept to a bound. Called under the lock."""
+        traces = self.__dict__.setdefault("traces", {})
+        book = traces.get(key)
 
         if not isinstance(book, dict):
-            book = trace[key] = {"sent": [], "received": [], "last_read": None, "seen_by_them": None}
+            book = traces[key] = {"sent": [], "received": [], "last_read": None, "active": 0}
 
         book["active"] = int(time.time())
 
-        if len(trace) > self.TRACE_KEYS:
-            for stale in sorted(trace, key=lambda k: (trace[k] or {}).get("active") or 0)[:len(trace) - self.TRACE_KEYS]:
+        if len(traces) > self.TRACE_KEYS:
+            for stale in sorted(traces, key=lambda k: (traces[k] or {}).get("active") or 0)[:len(traces) - self.TRACE_KEYS]:
                 if stale != key:
-                    trace.pop(stale, None)
+                    traces.pop(stale, None)
 
         return book
 
@@ -2746,6 +2893,16 @@ class Runtime:
         except Exception as error:
             getattr(self, "log", lambda line: None)("trace.json: %s: %s" % (error.__class__.__name__, error))
 
+    def _trace_safely(self, what, update, *args):
+        """The trace is diagnostics: whatever goes wrong in it costs the trace, never the send or the read it records."""
+        try:
+            update(*args)
+        except Exception as error:
+            try:
+                getattr(self, "log", lambda line: None)("trace %s: not recorded: %s: %s" % (what, error.__class__.__name__, error))
+            except Exception:
+                pass
+
     def _conversation(self, key, answers=None):
         """The two fields a message carries about the conversation it is part of."""
         fields = {}
@@ -2753,11 +2910,16 @@ class Runtime:
         if answers is not None:
             fields["re"] = answers
 
-        book = (self.__dict__.get("traces") or {}).get(key)
-        last = (book or {}).get("last_read") if isinstance(book, dict) else None
+        # seen is the last message from this key that was read here and could be
+        # opened. A trace that cannot say leaves it out, and never stops a send.
+        try:
+            book = (self.__dict__.get("traces") or {}).get(key)
+            last = book.get("last_read") if isinstance(book, dict) else None
 
-        if isinstance(last, dict) and is_message_hash(last.get("sha256")):
-            fields["seen"] = last["sha256"]
+            if isinstance(last, dict) and is_message_hash(last.get("sha256")):
+                fields["seen"] = last["sha256"]
+        except Exception:
+            pass
 
         return fields
 
@@ -2779,26 +2941,35 @@ class Runtime:
             "sha256": result.get("sha256") if stored else None,
             "sealed": True,
         }
-        record.update(entry.get("shape") or {})
+
+        if isinstance(entry.get("shape"), dict):
+            record.update(entry["shape"])
+
+        record = trace_row(record, TRACE_SENT_FIELDS)
 
         with self.lock:
             book = self._trace_book(key)
-            kept = [r for r in book["sent"] if r.get("message_id") != record["message_id"]]
+            kept = [r for r in book["sent"] if r.get("message_id") != record.get("message_id")]
             book["sent"] = (kept + [record])[-self.TRACE_KEEP:]
             self._save_trace()
 
     def _trace_received(self, channel, entry):
-        """One verified message from a key, as it arrived here. Called under the lock."""
-        key = entry.get("from_key")
-        body = entry["body"] if isinstance(entry.get("body"), dict) else {}
-        re_hash = body.get("re") if is_message_hash(body.get("re")) else None
-        seen = body.get("seen") if is_message_hash(body.get("seen")) else None
-        book = self._trace_book(key)
+        """One verified message from a key, as it arrived here. Called under the lock.
 
-        if entry.get("sha256") and any(r.get("sha256") == entry["sha256"] for r in book["received"]):
+        Recorded whether or not it could be opened, since one that could not is
+        what a trace is for. Taken as read only when it could: last_read is what
+        the next message to this key names as seen, and it names a message this
+        side opened, not one that merely arrived. A replay is neither recorded
+        nor read: its first arrival was, and an old message sent again must not
+        move seen back to it.
+        """
+        if entry.get("replay"):
             return
 
-        book["received"] = (book["received"] + [{
+        key = entry.get("from_key")
+        opened = entry.get("format") in ("text", "json") and not entry.get("error")
+        body = entry["body"] if opened and isinstance(entry.get("body"), dict) else {}
+        row = trace_row({
             "at": entry.get("at"),
             "channel": channel.label,
             "w": channel.w,
@@ -2807,17 +2978,21 @@ class Runtime:
             "encrypted": entry.get("encrypted"),
             "format": entry.get("format"),
             "error": entry.get("error"),
-            "fields": sorted(body),
+            # What a message held is known only if it opened.
+            "fields": sorted(body) if opened else None,
             "text_chars": len(body["text"]) if isinstance(body.get("text"), str) else None,
-            "re": re_hash,
-            "seen": seen,
-        }])[-self.TRACE_KEEP:]
+            "re": body.get("re"),
+            "seen": body.get("seen"),
+        }, TRACE_RECEIVED_FIELDS)
+        book = self._trace_book(key)
 
-        if entry.get("sha256"):
-            book["last_read"] = {"sha256": entry["sha256"], "seq": entry.get("seq"), "w": channel.w, "at": entry.get("at")}
+        if row["sha256"] and any(r.get("sha256") == row["sha256"] for r in book["received"]):
+            return
 
-        if seen:
-            book["seen_by_them"] = {"sha256": seen, "at": int(time.time()), "in": {"seq": entry.get("seq"), "sha256": entry.get("sha256")}}
+        book["received"] = (book["received"] + [row])[-self.TRACE_KEEP:]
+
+        if opened and entry.get("verified") is True and is_message_hash(entry.get("sha256")):
+            book["last_read"] = trace_row({"sha256": entry["sha256"], "seq": entry.get("seq"), "w": channel.w, "at": entry.get("at")}, TRACE_READ_FIELDS)
 
         self._save_trace()
 
@@ -2829,12 +3004,18 @@ class Runtime:
         byte for byte, so the other side can hold its own trace against this one.
         """
         limit = max(1, min(int(limit or 20), self.TRACE_KEEP))
-        trace = self.__dict__.get("traces") or {}
+        key = None if who is None else self._trace_key(who)
+
+        # A copy, taken under the lock a read holds while it records: a read
+        # that met a new counterpart while this went through the record itself
+        # stopped it with RuntimeError (R4).
+        with self.lock:
+            traces = copy.deepcopy(self.__dict__.get("traces") or {})
 
         if who is None:
             everyone = []
 
-            for key, book in trace.items():
+            for key, book in traces.items():
                 if not isinstance(book, dict):
                     continue
 
@@ -2844,54 +3025,33 @@ class Runtime:
                     "key": key,
                     "sent": len(sent),
                     "received": len(received),
-                    "last_sent_at": sent[-1]["at"] if sent else None,
-                    "last_received_at": received[-1]["at"] if received else None,
-                    "unacknowledged": len(self._unacknowledged(book)),
+                    "last_sent_at": sent[-1].get("at") if sent else None,
+                    "last_received_at": received[-1].get("at") if received else None,
+                    "no_read_claim": len(trace_view(book, self.TRACE_KEEP)["no_read_claim"]),
                 })
 
             everyone.sort(key=lambda row: max(row["last_sent_at"] or 0, row["last_received_at"] or 0), reverse=True)
 
             return {"counterparts": everyone, "note": "Name one with who for the messages themselves, as hashes."}
 
-        key = self._trace_key(who)
-        book = trace.get(key) if key else None
+        book = traces.get(key) if key else None
 
         if not isinstance(book, dict):
             raise LookupError("nothing sent to or received from %s is recorded here" % who)
 
-        mine = {r.get("sha256"): r for r in book.get("sent") or [] if r.get("sha256")}
-        acknowledged = self._acknowledged(book)
-        sent = []
+        view = trace_view(book, limit)
 
-        for record in (book.get("sent") or [])[-limit:]:
-            row = dict(record)
-            row["seen_by_them"] = acknowledged.get(record.get("message_id"))
-            sent.append(row)
-
-        received = []
-
-        for record in (book.get("received") or [])[-limit:]:
-            row = dict(record)
-
-            for field, as_ in (("re", "answers"), ("seen", "acknowledges")):
-                if record.get(field):
-                    ours = mine.get(record[field])
-                    row[as_] = {"seq": ours.get("seq"), "sha256": ours["sha256"], "at": ours.get("at")} if ours else {"sha256": record[field], "note": "not one of the messages recorded here"}
-
-            received.append(row)
-
-        unacknowledged = self._unacknowledged(book)
-        outcome = {
+        return {
             "with": self.name_for_key(key) or key,
             "key": key,
-            "sent": sent,
-            "received": received,
-            "seen_by_them": book.get("seen_by_them"),
-            "unacknowledged": [r.get("message_id") for r in unacknowledged],
+            "sent": view["sent"],
+            "received": view["received"],
+            # What this side last read and opened from them: what the next
+            # message to them names as seen.
+            "last_read": book.get("last_read"),
+            "no_read_claim": view["no_read_claim"],
+            "note": view["note"],
         }
-        outcome["note"] = self._trace_note(book, unacknowledged)
-
-        return outcome
 
     def _trace_key(self, who):
         """A partner name, a key or a write address, as the key it stands for."""
@@ -2905,43 +3065,6 @@ class Runtime:
 
         with self.lock:
             return self.peers.get(who)
-
-    def _acknowledged(self, book):
-        """message_id -> whether the other side has said it read that far: True, False, or None when nothing said."""
-        sent = book.get("sent") or []
-        seen = (book.get("seen_by_them") or {}).get("sha256")
-
-        if not seen:
-            return {r.get("message_id"): None for r in sent}
-
-        at = next((i for i, r in enumerate(sent) if r.get("sha256") == seen), None)
-
-        if at is None:
-            # A message older than this record holds: everything here may be
-            # later, and nothing here can be said to be read.
-            return {r.get("message_id"): None for r in sent}
-
-        return {r.get("message_id"): i <= at for i, r in enumerate(sent)}
-
-    def _unacknowledged(self, book):
-        acknowledged = self._acknowledged(book)
-
-        return [r for r in book.get("sent") or [] if r.get("status") == 201 and acknowledged.get(r.get("message_id")) is False]
-
-    def _trace_note(self, book, unacknowledged):
-        sent, received = book.get("sent") or [], book.get("received") or []
-
-        if sent and not book.get("seen_by_them"):
-            said = "Nothing from them has said what it read of yours" if received else "Nothing has come back from them"
-
-            return (said + ". A client that does not send seen, or cannot open sealed messages, says nothing: every "
-                    "message here is sealed to their key, so a reader without it sees an envelope and no text. The "
-                    "sha256 of each message is what the service stored, byte for byte; ask them for the sha256 they read.")
-
-        if unacknowledged:
-            return "%d message(s) delivered after the last one they said they read. That is not lost: they may not have read yet." % len(unacknowledged)
-
-        return "Everything delivered is acknowledged as far as they have said." if sent else "Nothing sent to them is recorded here."
 
     def _poll_loop(self, channel):
         """One long-poll loop per channel, so mail on any channel is seen at once."""
