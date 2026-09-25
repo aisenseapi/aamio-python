@@ -446,7 +446,7 @@ def trace_view(book, limit):
         for field, as_ in (("re", "answers"), ("seen", "acknowledges")):
             if is_message_hash(record.get(field)):
                 ours = mine.get(record[field])
-                row[as_] = {"seq": ours.get("seq"), "sha256": ours["sha256"], "at": ours.get("at")} if ours else {"sha256": record[field], "note": "not one of the messages recorded here"}
+                row[as_] = {"seq": ours.get("seq"), "sha256": ours["sha256"], "at": ours.get("at")} if ours else {"sha256": record[field], "note": "no confirmed send in this record has this sha256"}
 
         received.append(row)
 
@@ -459,31 +459,54 @@ def trace_view(book, limit):
 
 
 def trace_note(sent, received, delivered, no_claim, elsewhere):
-    """What the record says, in words, and no more than it says."""
+    """What the record says, in words, and no more than it says.
+
+    A send the service did not confirm is not a send it did not store: the
+    answer can be lost after the message was stored. The first version said the
+    service stored none of the messages in a trace whose one send had an unknown
+    outcome and had been stored all the same, and whoever trusts that sends the
+    text again as new bytes, which is a second message. A claim naming such a
+    send was put down to a message older than the record or sent from elsewhere.
+    R5 of the follow-up review of 25 September 2026.
+    """
     if not sent:
         return "Nothing sent to them is recorded here."
 
+    named = any(is_message_hash(row.get("seen")) for row in received)
+    turned_away = sum(1 for row in sent if row.get("outcome") == "refused" and row.get("status") != 201)
+    unsettled = len(sent) - len(delivered) - turned_away
+
     if not delivered:
-        return "The service stored none of the messages recorded here: the status and outcome of each say what happened."
-
-    if not any(is_message_hash(row.get("seen")) for row in received):
+        note = "No message here has an answer from the service that confirms it was stored."
+    elif not named:
         said = "Nothing from them has named a message of yours as read" if received else "Nothing has come back from them"
-
-        return (said + ", so each is unknown, not unread. A client that does not send seen says nothing, and neither does one "
+        note = (said + ", so each is unknown, not unread. A client that does not send seen says nothing, and neither does one "
                 "that cannot open what it gets: every message here is sealed to their key, so a reader without it sees an "
                 "envelope and no text. The sha256 of each message is what the service stored, byte for byte; ask them for "
                 "the sha256 they read.")
+    else:
+        note = "%d delivered, and their runtime says it read and opened %d of them." % (len(delivered), len(delivered) - len(no_claim))
 
-    note = "%d delivered, and their runtime says it read and opened %d of them." % (len(delivered), len(delivered) - len(no_claim))
-
-    if no_claim:
-        note += (" For %d there is no claim kept here: that is unknown, not unread, since each message from them names only "
-                 "the last of yours it had read when it was written, and this record keeps fifty each way." % len(no_claim))
+        if no_claim:
+            note += (" For %d there is no claim kept here: that is unknown, not unread, since each message from them names only "
+                     "the last of yours it had read when it was written, and this record keeps fifty each way." % len(no_claim))
 
     if elsewhere:
-        note += " They also named %d message(s) not recorded here: older than this record, or not sent from this runtime." % len(elsewhere)
+        note += (" They named %d message(s) this record cannot match to a send the service confirmed: older than this record, "
+                 "sent from elsewhere, or sent from here without an answer that confirmed it." % len(elsewhere))
 
-    return note + " A claim covers the one message it names. It says their runtime opened it, not that anyone understood it or acted on it."
+    if unsettled:
+        note += (" For %d no answer settled whether the service stored it, so it may be stored already. Check each one's status "
+                 "and outcome first, and if it must go again, retry it from the outbox: the same bytes are marked a replay "
+                 "where the first arrived, and new bytes would be a second message." % unsettled)
+
+    if turned_away:
+        note += " The service turned away %d; the status of each says why." % turned_away
+
+    if named:
+        note += " A claim covers the one message it names. It says their runtime opened it, not that anyone understood it or acted on it."
+
+    return note
 
 
 class Channel:

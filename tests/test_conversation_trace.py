@@ -35,7 +35,8 @@ sys.path.insert(0, "tests")
 
 from aamio import mcp_server
 from aamio.crypto import Keys, thread_signing_input
-from aamio.runtime import Runtime
+from aamio.gate import GateStop
+from aamio.runtime import Runtime, SendFailed
 
 
 class Service:
@@ -138,6 +139,19 @@ def direct(sender, recipient, body, seal_to=None, channel="inbox"):
     status, result = sender.client.post(target, envelope, sender.keys.public, sender.keys.sign(thread_signing_input(target, envelope)))
     assert status == 201
     return result
+
+
+def answer_with(runtime, status, stored):
+    """The service's answer to the next writes, replaced after it did or did not store them. Returns the real post."""
+    real = runtime.client.post
+
+    def post(*args, **kwargs):
+        if stored:
+            real(*args, **kwargs)
+        return status, {"error": "the answer was lost on the way back" if status == 0 else "an answer the fixture chose", "fix": "see the outcome"}
+
+    runtime.client.post = post
+    return real
 
 
 def test_a_send_is_traced_as_the_service_stored_it():
@@ -266,9 +280,9 @@ def test_a_claim_to_a_message_not_recorded_here_is_not_everything_read():
     trace = a.trace("b")
 
     assert [row["seen_by_them"] for row in trace["sent"]] == [None] and trace["no_read_claim"] == [sent["message_id"]]
-    assert trace["received"][-1]["acknowledges"] == {"sha256": "f" * 64, "note": "not one of the messages recorded here"}
+    assert trace["received"][-1]["acknowledges"] == {"sha256": "f" * 64, "note": "no confirmed send in this record has this sha256"}
     assert "Everything" not in trace["note"]
-    assert "their runtime says it read and opened 0 of them" in trace["note"] and "1 message(s) not recorded here" in trace["note"]
+    assert "their runtime says it read and opened 0 of them" in trace["note"] and "They named 1 message(s) this record cannot match" in trace["note"]
 
 
 def test_a_later_claim_does_not_erase_an_earlier_one():
@@ -441,6 +455,83 @@ def test_trace_lists_from_a_copy_while_a_read_records_a_new_counterpart():
     assert not worker.is_alive() and isinstance(outcome[0], dict), outcome
     assert [row["key"] for row in outcome[0]["counterparts"]] == [b.keys.public], "the listing is of the record as it was"
     assert stranger.keys.public in a.traces, "and the read recorded the new counterpart"
+
+
+def test_a_send_stored_whose_answer_was_lost_is_not_called_unstored():
+    """R5: the service stored the message and its answer was lost; the note said the service stored none."""
+    service, a, b = pair()
+    target = b.channels["inbox"].w
+    answer_with(a, 0, stored=True)
+
+    with pytest.raises(SendFailed) as failed:
+        a.send(target, "stored, the answer lost", None)
+
+    assert failed.value.outcome == "unknown" and failed.value.status == 0
+    assert len(service.threads[target]["messages"]) == 1, "the service has it"
+    assert [entry["status"] for entry in a.outbox.values()] == ["unknown"]
+    trace = a.trace("b")
+    assert [(row["status"], row["outcome"], row["sha256"], row["seen_by_them"]) for row in trace["sent"]] == [(0, "unknown", None, None)]
+    assert trace["no_read_claim"] == [], "only a confirmed send can lack a claim"
+    note = trace["note"]
+    assert "stored none" not in note and note.startswith("No message here has an answer from the service that confirms it was stored.")
+    assert "For 1 no answer settled whether the service stored it, so it may be stored already" in note
+    assert "retry it from the outbox" in note and "new bytes would be a second message" in note
+
+
+def test_turned_away_attempted_and_stopped_are_each_said_for_what_they_are():
+    """R5: a note counts what the rows show, and a send that never left is not among them."""
+    service, a, b = pair()
+    target = b.channels["inbox"].w
+    real = answer_with(a, 403, stored=False)
+    with pytest.raises(SendFailed) as refused:
+        a.send(target, "turned away", None)
+    answer_with(a, 500, stored=True)
+    with pytest.raises(SendFailed) as attempted:
+        a.send(target, "stored, then a server error", None)
+    a.client.post = real
+    posts = a._post
+
+    def stopped(*args, **kwargs):
+        raise GateStop("the gate stopped it here, before anything left", "nothing left this machine")
+
+    a._post = stopped
+    with pytest.raises(GateStop):
+        a.send(target, "never left", None)
+    a._post = posts
+
+    assert (refused.value.outcome, attempted.value.outcome) == ("refused", "attempted")
+    assert sorted(entry["status"] for entry in a.outbox.values()) == ["attempted", "refused", "stopped"]
+    trace = a.trace("b")
+    assert [row["outcome"] for row in trace["sent"]] == ["refused", "attempted"], "a send that never left has no row"
+    note = trace["note"]
+    assert note.startswith("No message here has an answer from the service that confirms it was stored.") and "stored none" not in note
+    assert "For 1 no answer settled whether the service stored it" in note and "The service turned away 1" in note
+
+
+def test_a_claim_to_a_send_whose_answer_was_lost_is_not_put_down_to_someone_else():
+    """R5, mixed: they read the stored send whose answer was lost, and the trace said not recorded here, not sent from here."""
+    service, a, b = pair()
+    target = b.channels["inbox"].w
+    real = answer_with(a, 0, stored=True)
+    with pytest.raises(SendFailed):
+        a.send(target, "stored, the answer lost", None)
+    a.client.post = real
+    lost = service.threads[target]["messages"][-1]["sha256"]
+    read_all(b)
+    b.send(a.channels["inbox"].w, "I read it", None)
+    delivered = a.send(target, "a delivered one", None)
+    read_all(a)
+
+    trace = a.trace("b")
+
+    assert [(row["outcome"], row["seen_by_them"]) for row in trace["sent"]] == [("unknown", None), ("delivered", None)]
+    assert trace["no_read_claim"] == [delivered["message_id"]]
+    assert trace["received"][-1]["acknowledges"] == {"sha256": lost, "note": "no confirmed send in this record has this sha256"}
+    note = trace["note"]
+    assert "not sent from this runtime" not in note and "not recorded here" not in note
+    assert "They named 1 message(s) this record cannot match to a send the service confirmed" in note
+    assert "sent from here without an answer that confirmed it" in note
+    assert "For 1 no answer settled whether the service stored it" in note
 
 
 def test_re_is_a_message_hash_or_it_is_refused():

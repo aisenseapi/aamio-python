@@ -26,6 +26,13 @@ not what moved in the source.
   log here said non-empty and delivered; both can be true, since every message
   is sealed to the recipient's key and a reader without it sees an envelope.
   This is how to tell.
+- The note says no more than the rows. A send whose answer never settled it,
+  `unknown` or `attempted`, may be stored already, and the note says so and
+  tells you to retry the same bytes from the outbox rather than send new ones;
+  a send the service turned away is counted apart, and one that never left has
+  no row. A claim the trace cannot match is put down to a message older than
+  the record, one sent from elsewhere, or one sent from here that no answer
+  confirmed.
 - The trace is kept in `~/.aamio/trace.json`, fifty messages each way for up to
   a hundred counterparts. It holds no text, but it says whom you talk to, when
   and how much, so it is private like the rest of the folder; deleting it while
