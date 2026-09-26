@@ -31,6 +31,9 @@ def build(answers):
     runtime.partners = []
     runtime.logged = []
     runtime.log = lambda line: runtime.logged.append(line)
+    # A real runtime has a home and writes trace.json into it. Without one
+    # every trace here failed, unseen until a failed trace started saying so.
+    runtime._save_json = lambda name, value, private=True: None
     runtime.save_state = lambda: None
     runtime.archive = lambda label, record: None
     runtime.archive_enabled = False
@@ -156,6 +159,9 @@ def bare_runtime(channels):
     runtime.channels = channels
     runtime.lock = threading.RLock()
     runtime.log = lambda *args: None
+    # A real runtime has a home and writes trace.json into it. Without one
+    # every trace here failed, unseen until a failed trace started saying so.
+    runtime._save_json = lambda name, value, private=True: None
     return runtime
 
 

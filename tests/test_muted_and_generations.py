@@ -72,7 +72,9 @@ def build(service, partners, inbox_allow, listener=True):
     runtime.presence_at = 0.0
     runtime.log = lambda line: None
     runtime.save_state = lambda: None
-    runtime._save_json = lambda name, data: None
+    # private=True is how the real one is called for trace.json. Without it
+    # every trace in this fixture raised TypeError, and said so to nobody.
+    runtime._save_json = lambda name, data, private=True: None
     runtime.archive = lambda label, record: None
     runtime.archive_enabled = False
     runtime.stop = threading.Event()

@@ -15,7 +15,9 @@ a choice with a lifetime: keep, off, or so many days, with a ceiling on size.
 
 import json
 import os
+import re
 import subprocess
+import tempfile
 import sys
 import time
 
@@ -26,6 +28,46 @@ DEFAULT_POLICY = {"mode": "keep", "days": None, "max_mb": None}
 # the system itself, the administrators of the machine, and whoever created or
 # owns the file. Everything else is somebody else.
 WINDOWS_EXPECTED = {"S-1-5-18", "S-1-5-32-544", "S-1-3-0", "S-1-3-4"}
+
+# SDDL writes the well known accounts as two letters and everyone else as a
+# full SID. These are the ones that turn up on a folder; anything not here
+# stays as it was written, which reads as an unknown account and is reported.
+SDDL_SIDS = {
+    "BA": "S-1-5-32-544",  # Administrators
+    "SY": "S-1-5-18",      # SYSTEM
+    "CO": "S-1-3-0",       # Creator owner
+    "CG": "S-1-3-1",       # Creator group
+    "WD": "S-1-1-0",       # Everyone
+    "AU": "S-1-5-11",      # Authenticated users
+    "BU": "S-1-5-32-545",  # Users
+    "BG": "S-1-5-32-546",  # Guests
+    "PU": "S-1-5-32-547",  # Power users
+    "IU": "S-1-5-4",       # Interactive
+    "NU": "S-1-5-2",       # Network
+    "AN": "S-1-5-7",       # Anonymous
+    "LS": "S-1-5-19",      # Local service
+    "NS": "S-1-5-20",      # Network service
+    "RC": "S-1-5-12",      # Restricted code
+    "OW": "S-1-3-4",       # Owner rights. Missing here once, and a folder that
+                           # Get-Acl called private came back with a finding
+                           # against an account named "OW".
+    "AC": "S-1-15-2-1",    # All application packages
+    "AO": "S-1-5-32-548",  # Account operators
+    "SO": "S-1-5-32-549",  # Server operators
+    "PO": "S-1-5-32-550",  # Printer operators
+    "BO": "S-1-5-32-551",  # Backup operators
+    "RE": "S-1-5-32-552",  # Replicator
+    "RU": "S-1-5-32-554",  # Pre-Windows 2000 compatible access
+    "SU": "S-1-5-6",       # Service
+    "PS": "S-1-5-10",      # Principal self
+    "ED": "S-1-5-9",       # Enterprise domain controllers
+}
+
+# An alias this table does not know stays as the two letters it was written as,
+# which reads as an account nobody recognises and is reported. That is the safe
+# direction for a check about who can read your keys, and the test that runs both
+# readers over one folder is what turns a gap here into a failure rather than a
+# folder quietly called unsafe.
 WINDOWS_NAMES = {
     "S-1-1-0": "Everyone",
     "S-1-5-11": "Authenticated Users",
@@ -159,6 +201,68 @@ def _windows_rules(path):
     return me, [line for line in lines if not line.startswith("me|")]
 
 
+def _windows_rules_icacls(path):
+    """The same rules as Get-Acl, read with two .exe calls and no PowerShell module.
+
+    Returns what `_windows_rules` returns, so the same parser reads both and a
+    finding from here says what a finding from there says.
+    """
+    who = subprocess.run(["whoami.exe", "/user", "/fo", "csv", "/nh"],
+                         capture_output=True, text=True, timeout=30)
+
+    if who.returncode != 0:
+        raise OSError((who.stderr or who.stdout or "whoami failed").strip()[:200])
+
+    # "name","S-1-5-21-...". The SID is the last quoted field.
+    fields = [part.strip().strip(chr(34)) for part in who.stdout.strip().split(",")]
+    me = fields[-1] if fields else ""
+
+    if not me.startswith("S-1-"):
+        raise ValueError("whoami did not give a SID")
+
+    saved = os.path.join(tempfile.gettempdir(), "aamio-acl-%d" % os.getpid())
+
+    try:
+        run = subprocess.run(["icacls", path, "/save", saved],
+                             capture_output=True, text=True, timeout=30)
+
+        if run.returncode != 0:
+            raise OSError((run.stderr or run.stdout or "icacls failed").strip()[:200])
+
+        with open(saved, "rb") as handle:
+            # icacls writes UTF-16. The file names the folder, then its DACL.
+            sddl = handle.read().decode("utf-16", "replace")
+    finally:
+        try:
+            os.unlink(saved)
+        except OSError:
+            pass
+
+    at = sddl.find("D:")
+
+    if at < 0:
+        raise ValueError("icacls wrote no access control list for this folder")
+
+    lines = []
+
+    for ace in re.findall(r"\(([^()]*)\)", sddl[at:]):
+        parts = ace.split(";")
+
+        if len(parts) < 6:
+            continue
+
+        kind, rights, sid = parts[0].strip(), parts[2].strip(), parts[5].strip()
+
+        # A is allow, and only allow rules say who can read this. A deny rule
+        # that takes access away from someone is not a finding.
+        if kind.upper() != "A" or sid == "":
+            continue
+
+        lines.append("%s|%s|allow" % (SDDL_SIDS.get(sid.upper(), sid), rights or "unstated"))
+
+    return me, lines
+
+
 def check(home):
     """Who can read the home, as far as this platform lets us find out.
 
@@ -176,10 +280,28 @@ def check(home):
 
         try:
             me, rules = _windows_rules(home)
-        except (OSError, subprocess.SubprocessError, ValueError) as error:
-            result["how"] = "not checked: the access control list could not be read (%s)" % error.__class__.__name__
-            result["fix"] = "Run `icacls \"%s\"` and see that only you, SYSTEM and Administrators are listed." % home
-            return result
+        except (OSError, subprocess.SubprocessError, ValueError) as first:
+            # Get-Acl lives in Microsoft.PowerShell.Security, and on a machine
+            # where that does not load there is no such command. The check used
+            # to stop here and tell the reader to run icacls by hand, which is
+            # the one check about who can read the decrypted archive going quiet
+            # on an unknown number of machines while naming its own way out.
+            #
+            # icacls is an .exe and needs no module. It is asked for SDDL rather
+            # than for what it prints, because what it prints is account names
+            # and those are translated: a Norwegian Windows says
+            # NT-MYNDIGHET\Godkjente brukere where an English one says
+            # NT AUTHORITY\Authenticated Users. SDDL gives SIDs.
+            try:
+                me, rules = _windows_rules_icacls(home)
+                result["how"] = ("the folder's access control list, read with icacls after Get-Acl "
+                                 "was not available (%s). Mode bits say nothing on Windows." % first.__class__.__name__)
+            except (OSError, subprocess.SubprocessError, ValueError, UnicodeError) as second:
+                result["how"] = ("not checked: the access control list could not be read, "
+                                 "by Get-Acl (%s) or by icacls (%s)"
+                                 % (first.__class__.__name__, second.__class__.__name__))
+                result["fix"] = "Run `icacls \"%s\"` and see that only you, SYSTEM and Administrators are listed." % home
+                return result
 
         result["findings"] = windows_acl_findings(rules, me)
         result["private"] = not result["findings"]

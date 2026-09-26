@@ -625,7 +625,14 @@ class Runtime:
             # `aamio doctor` and `aamio init`.
             found = storage.check(self.home)
             for finding in found["findings"][:5]:
-                self.log("WARNING: %s: %s. %s" % (finding.get("path", self.home), finding["problem"], found.get("fix", "")))
+                # Who can read the decrypted archive is not a detail to mention
+                # once into a logger that may be a no-op. A caller that never set
+                # one was told nothing at all about its own folder.
+                self._note_trouble(
+                    "home",
+                    "unsafe",
+                    "%s: %s. %s" % (finding.get("path", self.home), finding["problem"], found.get("fix", "")),
+                )
         self._prune()
 
     def _prune(self):
@@ -637,7 +644,14 @@ class Runtime:
             with self.archive_lock:
                 gone = storage.prune(self.home, policy)
         except OSError as error:
-            self.log("archive not pruned: %s" % error)
+            # The archive keeps growing, in plain text, and the policy that was
+            # meant to bound it did not run. Worth hearing about once per reason.
+            self._note_trouble(
+                "archive",
+                "unpruned",
+                "the archive was not pruned: %s: %s. It keeps growing, and what is in it stays readable to whoever can read this folder."
+                % (error.__class__.__name__, error),
+            )
             return
         if gone["removed"]:
             self.log("archive: %d record(s) past their lifetime removed" % gone["removed"])
@@ -1642,6 +1656,10 @@ class Runtime:
             answer["proof_id"] = result.get("proof_id")
         if entry.get("gate_notes"):
             answer["notes"] = entry["gate_notes"]
+        # The call this whole round came from: answer a post and exit, with no
+        # logger and no second call to fetch attention.
+        if entry.get("trace_error"):
+            answer["trace_error"] = entry["trace_error"]
         if own_post:
             answer["warning"] = "You answered your own post. The answer is sealed to your own key, so it reaches nobody but you."
         return answer
@@ -1985,6 +2003,10 @@ class Runtime:
             sent["notes"] = entry["gate_notes"]
         if archive_error is not None:
             sent["archive_error"] = archive_error
+        # A script that sends once and exits never fetches attention, so the
+        # failure rides on the answer it does read. Codex, 26 September.
+        if entry.get("trace_error"):
+            sent["trace_error"] = entry["trace_error"]
         return sent
 
     def _archive_sent(self, record):
@@ -2226,7 +2248,7 @@ class Runtime:
         self._record_answer(entry, status, result)
         self.save_outbox()
         # After the outcome is saved, and unable to change it.
-        self._trace_safely("sent", self._trace_sent, entry, status, result)
+        self._trace_safely("sent", self._trace_sent, entry, status, result, on=entry)
 
         return status, result
 
@@ -2773,7 +2795,7 @@ class Runtime:
                 # claim to be from anyone and to have read anything. Whatever
                 # goes wrong in the trace costs the trace, never this batch.
                 if applying and entry["verified"] and sender_key:
-                    self._trace_safely("received", self._trace_received, channel, entry)
+                    self._trace_safely("received", self._trace_received, channel, entry, on=entry)
             entries.append(entry)
             with channel.lock:
                 channel.received.append(entry)
@@ -2909,22 +2931,57 @@ class Runtime:
 
         return book
 
-    def _save_trace(self):
+    def _save_trace(self, on=None):
         """Written when it changes. A trace that cannot be written costs the trace and nothing else."""
         try:
             self._save_json("trace.json", self.__dict__.get("traces") or {}, private=True)
         except Exception as error:
-            getattr(self, "log", lambda line: None)("trace.json: %s: %s" % (error.__class__.__name__, error))
+            self._untraced("trace.json: %s: %s" % (error.__class__.__name__, error), on)
 
-    def _trace_safely(self, what, update, *args):
-        """The trace is diagnostics: whatever goes wrong in it costs the trace, never the send or the read it records."""
+    def _untraced(self, line, on=None):
+        """A trace that did not happen, said in the two places a caller may be looking.
+
+        Costing the trace is the contract and it still holds. Costing it in
+        silence was not: four sends once left no record and no message, and a
+        logger nobody had wired is one way that happens. It is not established
+        that it was the way it happened those four times -- a sender process
+        running older code would look the same -- so this closes the silence
+        without claiming to have closed the case.
+
+        `attention` is read by the CLI and the MCP server without anyone wiring
+        anything, but it has to be fetched, and a script that sends once and
+        exits never fetches it. So `on`, when given, is the answer that call is
+        about to return, and the failure is marked on it the way an archive
+        that could not be written already marks the send it belongs to.
+
+        `line` reaches the log as it was written. Through `_note_trouble` it
+        arrives with its channel in front, as every other note does.
+        """
+        if isinstance(on, dict):
+            on["trace_error"] = line
+
         try:
-            update(*args)
-        except Exception as error:
+            self._note_trouble("trace", "untraced", line
+                               + " The sends and reads themselves are unaffected; what is behind is the record of them.")
+        except Exception:
+            # Never at the cost of the thing being traced, even here.
             try:
-                getattr(self, "log", lambda line: None)("trace %s: not recorded: %s: %s" % (what, error.__class__.__name__, error))
+                getattr(self, "log", lambda text: None)(line)
             except Exception:
                 pass
+
+    def _trace_safely(self, what, update, *args, on=None):
+        """The trace is diagnostics: whatever goes wrong in it costs the trace, never the send or the read it records.
+
+        `on` is the record this trace is about, and it is passed down rather
+        than kept on the runtime: `_deliver` holds no lock and the background
+        half of a send runs in its own thread, so a field on `self` would
+        belong to whichever send finished last.
+        """
+        try:
+            update(*args, on=on)
+        except Exception as error:
+            self._untraced("trace %s: not recorded: %s: %s" % (what, error.__class__.__name__, error), on)
 
     def _conversation(self, key, answers=None):
         """The two fields a message carries about the conversation it is part of."""
@@ -2946,7 +3003,7 @@ class Runtime:
 
         return fields
 
-    def _trace_sent(self, entry, status, result):
+    def _trace_sent(self, entry, status, result, on=None):
         """One answer to one send: what went where, as the service stored it."""
         key = entry.get("to_key")
 
@@ -2974,9 +3031,9 @@ class Runtime:
             book = self._trace_book(key)
             kept = [r for r in book["sent"] if r.get("message_id") != record.get("message_id")]
             book["sent"] = (kept + [record])[-self.TRACE_KEEP:]
-            self._save_trace()
+            self._save_trace(on)
 
-    def _trace_received(self, channel, entry):
+    def _trace_received(self, channel, entry, on=None):
         """One verified message from a key, as it arrived here. Called under the lock.
 
         Recorded whether or not it could be opened, since one that could not is
@@ -3017,7 +3074,7 @@ class Runtime:
         if opened and entry.get("verified") is True and is_message_hash(entry.get("sha256")):
             book["last_read"] = trace_row({"sha256": entry["sha256"], "seq": entry.get("seq"), "w": channel.w, "at": entry.get("at")}, TRACE_READ_FIELDS)
 
-        self._save_trace()
+        self._save_trace(on)
 
     def trace(self, who=None, limit=20):
         """What was sent to one counterpart and what came back, as hashes and shapes.
@@ -3153,7 +3210,15 @@ class Runtime:
                         channel.poller = threading.Thread(target=self._poll_loop, args=(channel,), daemon=True)
                         channel.poller.start()
             except Exception as error:
-                self.log("listener: %s" % error)
+                # The listener is what starts the pollers. One that keeps failing
+                # means a channel opened now is never read, and the inbox looks
+                # empty rather than unwatched.
+                self._note_trouble(
+                    "listener",
+                    "stopped",
+                    "the listener failed and will try again: %s: %s. A channel opened while this lasts is not being read."
+                    % (error.__class__.__name__, error),
+                )
             self.stop.wait(2)
 
     def start(self):

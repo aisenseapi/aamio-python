@@ -386,8 +386,17 @@ def test_a_damaged_trace_never_turns_a_delivered_send_into_an_error(damage):
     a.close()
 
 
+def untraced(runtime):
+    """What a caller who wired no logger is told: the note, or None."""
+    for note in runtime.attention_taken():
+        if (note["channel"], note["state"]) == ("trace", "untraced"):
+            return note["what"]
+
+    return None
+
+
 def test_a_trace_that_cannot_be_saved_or_updated_costs_the_trace_and_nothing_else():
-    """R3: the send, the outbox and the whole batch come through; the log says what the trace missed."""
+    """R3: the send, the outbox and the whole batch come through; the log and attention say what the trace missed."""
     service, a, b = pair()
     target = b.channels["inbox"].w
     logged = []
@@ -403,7 +412,17 @@ def test_a_trace_that_cannot_be_saved_or_updated_costs_the_trace_and_nothing_els
     a._save_json = no_room_for_the_trace
     first = a.send(target, "one", None)
     assert first["sha256"] and [entry["status"] for entry in a.outbox.values()] == ["delivered"]
-    assert any(line.startswith("trace.json: OSError") for line in logged)
+    assert any("trace.json: OSError" in line for line in logged)
+    # And to a caller who never set a logger, which is the default. Codex, 25
+    # September: four sends left no trace and no message, and the only thing
+    # wrong was that nobody was listening to the one place it was said.
+    told = untraced(a)
+    assert told and "OSError" in told, told
+    assert "unaffected" in told, "the note must say the send still happened: %s" % told
+    # And on the answer the call returns, which is the only thing a script that
+    # sends once and exits ever looks at. Codex, 26 September: attention has to be
+    # fetched, and that script never fetches it.
+    assert "OSError" in (first.get("trace_error") or ""),         "the send's own answer said nothing about the trace it lost: %r" % first
 
     def broken(key):
         raise RuntimeError("the trace is broken")
@@ -412,11 +431,16 @@ def test_a_trace_that_cannot_be_saved_or_updated_costs_the_trace_and_nothing_els
     second = a.send(target, "two", None)
     assert second["sha256"] and len(service.threads[target]["messages"]) == 2
     assert any("trace sent: not recorded: RuntimeError" in line for line in logged)
+    told = untraced(a)
+    assert told and "RuntimeError" in told, told
+    assert "RuntimeError" in (second.get("trace_error") or ""), second
 
     b._trace_book = broken
     got = read_all(b)
     assert [e["body"].get("text") for e in got] == ["one", "two"], "the whole batch arrives"
     assert any("trace received: not recorded: RuntimeError" in line for line in logged)
+    told = untraced(b)
+    assert told and "RuntimeError" in told, told
 
 
 def test_trace_lists_from_a_copy_while_a_read_records_a_new_counterpart():

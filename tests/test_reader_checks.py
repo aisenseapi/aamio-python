@@ -43,6 +43,9 @@ def build(answers, allow=None):
     runtime.peers = {}
     runtime.partners = [{"name": "alice", "key": ALICE.public}]
     runtime.log = lambda line: None
+    # A real runtime has a home and writes trace.json into it. Without one
+    # every trace here failed, unseen until a failed trace started saying so.
+    runtime._save_json = lambda name, value, private=True: None
     runtime.save_state = lambda: None
     runtime.archived = []
     runtime.archive = lambda label, record: runtime.archived.append(record)

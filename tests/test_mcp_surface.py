@@ -130,8 +130,39 @@ def test_a_model_can_say_how_many_bytes_come_back():
     dispatch(runtime, "aamio_read", {"max_bytes": 4096})
     dispatch(runtime, "aamio_read", {"limit": 3, "max_bytes": 4096})
 
-    assert asked == [(50, None), (50, 4096), (3, 4096)], (
+    assert asked == [(50, mcp_server.DEFAULT_MAX_BYTES), (50, 4096), (3, 4096)], (
         "the byte budget a model asked for did not reach the runtime: %s" % asked)
+
+
+def test_a_read_that_asks_for_no_budget_still_gets_one():
+    """Fifty messages of 65536 bytes is more than the conversation can carry, and the
+    tool said so itself while passing no budget at all. A caller that thought about
+    it is unaffected; one that did not is no longer the one that finds out."""
+    runtime, _ = runtime_holding([message(1, "stranger-one", "hello")])
+    asked = []
+    runtime.read = lambda wait, limit=50, max_bytes=None: (
+        asked.append(max_bytes), runtime.poll(runtime.channels["inbox"])[1])[1]
+
+    dispatch(runtime, "aamio_read", {})
+
+    assert asked == [mcp_server.DEFAULT_MAX_BYTES], asked
+    assert mcp_server.DEFAULT_MAX_BYTES >= 512, "the service refuses less than 512"
+
+
+def test_a_runtime_that_does_not_take_a_budget_is_left_as_it_was():
+    """The reason there was no default, kept: a wrapper or a subclass may have the
+    older signature, and a default that reached it would be a TypeError in place of
+    a read."""
+    runtime, _ = runtime_holding([message(1, "stranger-one", "hello")])
+    asked = []
+    # No max_bytes at all, as an older wrapper would be.
+    runtime.read = lambda wait, limit=50: (
+        asked.append(limit), runtime.poll(runtime.channels["inbox"])[1])[1]
+
+    answer = dispatch(runtime, "aamio_read", {})
+
+    assert asked == [50], asked
+    assert answer.get("isError") is not True, answer
 
     tool = next(t for t in mcp_server.TOOLS if t["name"] == "aamio_read")
     assert "max_bytes" in tool["inputSchema"]["properties"], (
