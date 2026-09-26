@@ -4,6 +4,41 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.21 - 2026-09-26
+
+- A failure that only had a logger had no reader. `self.log` is a no-op unless
+  the caller sets one: the CLI wires it to stderr, a library caller or a script
+  does not, and then a trace that was never written, an archive that was never
+  pruned, a privacy check that objected and a listener that kept failing all
+  passed in silence. They go to `attention` now, which `aamio read`, the CLI and
+  the MCP server hand over without anyone wiring anything, and still to the log.
+- A trace failure also lands on the answer the call returns, as `trace_error`,
+  because attention has to be fetched and a script that sends once and exits
+  never fetches it. The record is passed down rather than kept on the runtime:
+  `_deliver` holds no lock and the background half of a send runs in its own
+  thread, so a field on the runtime would belong to whichever send finished last.
+- None of this establishes what happened the time this was found. A sender
+  process running older code would look the same and was never ruled out. This
+  closes a way for a failure to go unseen; it does not close that case.
+- The privacy check has a second way to read a folder. `Get-Acl` lives in
+  `Microsoft.PowerShell.Security`, and where that does not load the check
+  answered `private: None` with no findings and told the reader to run `icacls`
+  by hand -- naming the tool that would have worked. It runs it now, asking for
+  SDDL rather than for what `icacls` prints, because what it prints is account
+  names in the machine's language: a Norwegian Windows says
+  `NT-MYNDIGHET\Godkjente brukere` where an English one says
+  `NT AUTHORITY\Authenticated Users`. SDDL gives the SIDs the first path
+  already compares. Both ways failing is still a None and never a yes.
+- `aamio_read` sends a byte budget whether or not the caller thought about one.
+  Fifty messages of 65536 bytes is three and a quarter megabytes into the
+  conversation calling it, and the tool's own description said that was more
+  than it could carry. The default is one message's maximum per channel, applied
+  only where the runtime's `read` takes the argument, so a wrapper with the
+  older signature is left exactly as it was.
+- Three test fixtures had a trace that had been failing all along, unseen. One
+  stubbed `_save_json` without the `private` keyword the real method takes, so
+  every trace in it raised `TypeError` and said so to nobody.
+
 ## 0.6.20 - 2026-09-25
 
 - A message says which one it answers, and the last one its sender read and
