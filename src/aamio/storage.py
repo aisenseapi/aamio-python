@@ -220,9 +220,11 @@ def _windows_rules_icacls(path):
     if not me.startswith("S-1-"):
         raise ValueError("whoami did not give a SID")
 
-    saved = os.path.join(tempfile.gettempdir(), "aamio-acl-%d" % os.getpid())
-
-    try:
+    # Resolve once so a relative path and its exported name refer to the same
+    # target. icacls /save writes only the final name (empty for a drive root).
+    path = os.path.abspath(path)
+    with tempfile.TemporaryDirectory(prefix="aamio-acl-") as folder:
+        saved = os.path.join(folder, "acl.txt")
         run = subprocess.run(["icacls", path, "/save", saved],
                              capture_output=True, text=True, timeout=30)
 
@@ -231,34 +233,40 @@ def _windows_rules_icacls(path):
 
         with open(saved, "rb") as handle:
             # icacls writes UTF-16. The file names the folder, then its DACL.
-            sddl = handle.read().decode("utf-16", "replace")
-    finally:
-        try:
-            os.unlink(saved)
-        except OSError:
-            pass
+            exported = handle.read().decode("utf-16").splitlines()
 
-    at = sddl.find("D:")
+    if len(exported) != 2 or os.path.normcase(exported[0]) != os.path.normcase(os.path.basename(path)):
+        raise ValueError("icacls did not export exactly the requested folder")
 
-    if at < 0:
-        raise ValueError("icacls wrote no access control list for this folder")
+    sddl = exported[1]
+    # Recognise the complete DACL, not just any parenthesised fragments in a
+    # truncated/unknown record. NO_ACCESS_CONTROL is not an empty private ACL.
+    # A root can also export S: (for example its mandatory integrity label).
+    # It does not grant access; only the D: rules belong in this check.
+    matched = re.fullmatch(r"D:(?:P|AI|AR)*(?P<aces>(?:\([^()]*\))*)"
+                           r"(?:S:(?:P|AI|AR)*(?:\([^()]*\))*)?", sddl)
+    if matched is None:
+        raise ValueError("icacls wrote an incomplete or unsupported access control list")
 
     lines = []
 
-    for ace in re.findall(r"\(([^()]*)\)", sddl[at:]):
+    for ace in re.findall(r"\(([^()]*)\)", matched.group("aces")):
         parts = ace.split(";")
 
-        if len(parts) < 6:
-            continue
+        if len(parts) != 6:
+            raise ValueError("icacls wrote an unsupported access rule")
 
         kind, rights, sid = parts[0].strip(), parts[2].strip(), parts[5].strip()
 
+        if kind not in ("A", "D") or not rights or not sid or parts[3] or parts[4]:
+            raise ValueError("icacls wrote an incomplete or unsupported access rule")
+
         # A is allow, and only allow rules say who can read this. A deny rule
         # that takes access away from someone is not a finding.
-        if kind.upper() != "A" or sid == "":
+        if kind == "D":
             continue
 
-        lines.append("%s|%s|allow" % (SDDL_SIDS.get(sid.upper(), sid), rights or "unstated"))
+        lines.append("%s|%s|allow" % (SDDL_SIDS.get(sid.upper(), sid), rights))
 
     return me, lines
 

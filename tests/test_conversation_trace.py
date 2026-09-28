@@ -413,14 +413,13 @@ def test_a_trace_that_cannot_be_saved_or_updated_costs_the_trace_and_nothing_els
     first = a.send(target, "one", None)
     assert first["sha256"] and [entry["status"] for entry in a.outbox.values()] == ["delivered"]
     assert any("trace.json: OSError" in line for line in logged)
-    # And to a caller who never set a logger, which is the default. Codex, 25
-    # September: four sends left no trace and no message, and the only thing
-    # wrong was that nobody was listening to the one place it was said.
+    # And to a caller who never set a logger, which is the default. A write
+    # failure must be visible even when nobody listens to the logger.
     told = untraced(a)
     assert told and "OSError" in told, told
     assert "unaffected" in told, "the note must say the send still happened: %s" % told
     # And on the answer the call returns, which is the only thing a script that
-    # sends once and exits ever looks at. Codex, 26 September: attention has to be
+    # sends once and exits ever looks at. Attention has to be
     # fetched, and that script never fetches it.
     assert "OSError" in (first.get("trace_error") or ""),         "the send's own answer said nothing about the trace it lost: %r" % first
 

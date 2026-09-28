@@ -1,16 +1,15 @@
 """A logger that is a no-op by default must not be the only place a failure is said.
 
-Codex, 25 September 2026. Four `board_answer()` calls delivered, no `trace.json`,
+Reported on 25 September 2026: four `board_answer()` calls delivered, no `trace.json`,
 no error, no exception. The mechanism was fine: a later manual call wrote the file.
 What was wrong is that the failure had nowhere to go.
 
     self.log = log or (lambda line: None)
 
 The CLI wires that to stderr. A library caller, a script, an agent loop does not,
-and then `except Exception: self.log(...)` is a failure with no reader. Codex
-reproduced exactly the symptom combination with a simulated write failure and
-named this as the explanation, while saying plainly it had not proved it was the
-cause of those four -- a stale sender process was still possible.
+and then `except Exception: self.log(...)` is a failure with no reader. A
+simulated write failure reproduced the symptom combination, but did not prove
+the cause of those four -- a stale sender process was still possible.
 
 This is the rule the whole round rests on: a real failure goes to `attention`,
 which `aamio read`, the CLI and the MCP server hand over without anyone wiring
@@ -81,7 +80,7 @@ def test_a_trace_update_that_raises_reaches_the_caller_and_costs_nothing_else():
     note = states(runtime).get(("trace", "untraced"))
     assert note is not None, "a trace update that raised said nothing to the caller"
     assert "sent" in note and "ValueError" in note, note
-    # Codex, 26 September: attention has to be fetched, and a script that sends
+    # Attention has to be fetched, and a script that sends
     # once and exits never fetches it. The record the call is about carries it too.
     assert "ValueError" in (entry.get("trace_error") or ""), entry
 

@@ -1923,7 +1923,15 @@ class Runtime:
         if isinstance(to, str) and re.fullmatch(r"[a-z2-7]{20}", to):
             key = self.peers.get(to)
             if key is None:
-                raise LookupError("no key known for address %s; look the partner up or reply to a message" % to)
+                # What to do instead, said where it stops. An address pasted into
+                # text or data is the dead end an agent on MCP walks into: the
+                # tool that opens a channel returns an address, and nothing here
+                # learns whose it is from reading it (item 5 of the round-2 list).
+                raise LookupError(
+                    "no key known for address %s. A runtime learns whose an address is from presence, or from reply_to or channel in a "
+                    "verified message; one pasted into text or data binds nothing. Send to the partner by name, answer a message at its "
+                    "reply_to, or ask the owner to hand the address over with aamio board channel KEY --reply-to ADDRESS" % to
+                )
             return self._send(to, key, None, text, data, reply_to, answers=answers)
         w, key = self.address_for(to)
         return self._send(w, key, to, text, data, reply_to, answers=answers)

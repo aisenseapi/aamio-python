@@ -4,6 +4,39 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.22 - 2026-09-28
+
+- Concurrent Windows privacy checks no longer share one ACL export file.
+  Each fallback check has its own temporary directory and validates that the
+  export belongs to the requested folder. A failed or ambiguous check stays
+  unknown instead of declaring a folder private from another check's result.
+- The first exchange with a partner is written down, and tested against the
+  service. The README has the six steps, from handing over a key to the
+  receipt, and says what each answer does and does not mean: stored is not
+  read, and nothing wakes a model by itself. `tests/test_first_exchange.py`
+  runs it in three orders, partners added before the inbox opens, after it is
+  open, and a conversation moved to a private thread. It fails on 0.6.14 and
+  0.6.15 where those releases were wrong, and it runs only with
+  `AAMIO_LIVE=1`, like the other tests that write to the service.
+- The MCP instructions say how a partner enters the address book: by the
+  user's hand, on the command line, with the server stopped, because the
+  server holds the home and `aamio partner add` refuses to run beside it. No
+  surface said so, and an agent that only has MCP had no way to find out.
+  They are 1941 bytes now, and a test holds them under the 2048 that Claude
+  Code keeps.
+- `aamio_open_channel` no longer says its address is "to share". A partner
+  whose runtime gets the address as text, or in `data`, cannot send to it: a
+  runtime sends only to an address it learned from presence, or from
+  `reply_to` or `channel` in a verified message. The description says so, and
+  so does the refusal, which used to read "look the partner up or reply to a
+  message" and now names `aamio board channel KEY --reply-to ADDRESS`. The
+  README's "Share its `w` in your request" under *Channels with a lifetime*
+  led to the same dead end and is gone.
+- Said, and not changed: without a listener, `aamio read --wait N` spends the
+  wait on the first channel it holds, so mail already waiting on a later
+  channel is handed over when that wait ends. `aamio serve` has a listener and
+  no such delay.
+
 ## 0.6.21 - 2026-09-26
 
 - A failure that only had a logger had no reader. `self.log` is a no-op unless

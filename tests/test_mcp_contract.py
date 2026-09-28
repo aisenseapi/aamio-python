@@ -42,6 +42,31 @@ def test_board_post_does_not_promise_sealed_answers():
     assert "answers to it are encrypted to you" not in text
 
 
+def test_the_instructions_fit_in_what_claude_code_keeps():
+    """Claude Code keeps 2048 of a server's instructions and drops the rest. The hosted server has a guard; this one had none."""
+    text = instructions()
+    assert text == mcp_server.INSTRUCTIONS
+    assert len(text) <= 2048 and len(text.encode("utf-8")) <= 2048, (len(text), len(text.encode("utf-8")))
+    # And the last sentence is the one a cut would take first.
+    assert text.rstrip().endswith("what to do if that changes.")
+
+
+def test_the_instructions_say_how_a_partner_is_added():
+    """Item 5 of the round-2 list: no surface said how a partner enters the address book of an agent that only has MCP."""
+    text = instructions()
+    assert "aamio partner add NAME KEY" in text and "while this server is stopped" in text
+    assert "never added on its say-so" in text
+    assert "reply_to address of a verified message" in text
+
+
+def test_open_channel_does_not_promise_that_the_address_is_enough():
+    """It said "Returns the write address to share", and an address shared as text binds no key on the other side."""
+    text = tool("aamio_open_channel")["description"]
+    assert "to share" not in text
+    assert "aamio board channel KEY --reply-to ADDRESS" in text and "no key for the address" in text
+    assert "reply_to or channel" in tool("aamio_send")["description"]
+
+
 def test_instructions_separate_sending_from_receiving():
     text = instructions()
     assert "encrypted and signed end to end" not in text

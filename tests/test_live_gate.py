@@ -31,6 +31,8 @@ def test_the_gate_opens_for_one_and_nothing_else():
 
 
 def test_both_live_files_carry_the_same_gate():
-    for name in ("test_e2e.py", "test_robust.py"):
+    # Three since 28 September 2026: the first-exchange smoke test writes to the
+    # service too, and came with the gate already in it.
+    for name in ("test_e2e.py", "test_robust.py", "test_first_exchange.py"):
         with open(os.path.join(HERE, name), encoding="utf-8") as handle:
             assert 'os.environ.get("AAMIO_LIVE") != "1"' in handle.read(), name
