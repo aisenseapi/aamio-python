@@ -20,9 +20,11 @@ AAMIO_LIVE=1, exactly. Run as a script, the file is the intent:
 
     python tests/test_first_exchange.py [--json result.json]
 
-It writes to the service: a few threads, one presence record per runtime and a
-few messages, and it deletes the threads at the end. It is a smoke test a person
-starts before a release, not a gate. A service that is down is not a failed release.
+It writes to the service: ten threads, one presence record per runtime and a
+few messages, and it deletes the threads at the end. The service counts what one
+address opens and closes, so each of those waits its turn in live_pace.py and a
+run takes a minute or two. It is a smoke test a person starts before a release,
+not a gate. A service that is down is not a failed release.
 """
 
 import json
@@ -48,6 +50,18 @@ if pytest is not None:
 import aamio  # noqa: E402
 from aamio.client import AamioClient  # noqa: E402
 from aamio.runtime import Runtime, SendFailed  # noqa: E402
+
+# Every open and close of a thread waits its turn, so the live tests together
+# stay inside what the service allows one address. live_pace.py says why.
+# Where that file is missing, as in a package unpacked with only the tests,
+# they run as they did before.
+try:
+    import live_pace  # noqa: E402
+except ImportError:
+    live_pace = None
+
+if live_pace is not None and (os.environ.get("AAMIO_LIVE") == "1" or __name__ == "__main__"):
+    live_pace.install()
 
 WAIT = 20
 OBSERVED = {}

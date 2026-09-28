@@ -40,6 +40,18 @@ if pytest is not None:
 from aamio.crypto import thread_signing_input  # noqa: E402
 from aamio.runtime import Runtime, SendFailed  # noqa: E402
 
+# Every open and close of a thread waits its turn, so the live tests together
+# stay inside what the service allows one address. live_pace.py says why.
+# Where that file is missing, as in a package unpacked with only the tests,
+# they run as they did before.
+try:
+    import live_pace  # noqa: E402
+except ImportError:
+    live_pace = None
+
+if live_pace is not None and (os.environ.get("AAMIO_LIVE") == "1" or __name__ == "__main__"):
+    live_pace.install()
+
 
 def shut(*runtimes):
     for runtime in runtimes:

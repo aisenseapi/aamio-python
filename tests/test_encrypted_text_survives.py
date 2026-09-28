@@ -1,6 +1,6 @@
 """Decryption working and the content not being JSON are two different things.
 
-Codex, 20 September 2026. Encrypt and sign the words `for your eyes`, without
+A review, 20 September 2026. Encrypt and sign the words `for your eyes`, without
 wrapping them as JSON. The envelope opens, the bytes are exactly those words, and
 `json.loads` then raises -- and both were inside one `try`, so the answer was
 

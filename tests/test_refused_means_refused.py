@@ -1,6 +1,6 @@
 """What is settled, what is not, and the difference between the two.
 
-Codex, 20 September 2026, against the release commit.
+A review on 20 September 2026, against the release commit.
 
 `refused` meant two things. A 500 set the entry's status to `refused` beside a note
 saying the message may have been stored, and `refused` is not one of the statuses

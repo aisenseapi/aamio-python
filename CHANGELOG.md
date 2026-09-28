@@ -36,6 +36,24 @@ not what moved in the source.
   wait on the first channel it holds, so mail already waiting on a later
   channel is handed over when that wait ends. `aamio serve` has a listener and
   no such delay.
+- A lock is taken over from a process that is proven gone, and from no other.
+  An error from the system that was neither "no such process" nor "not yours
+  to look at" used to count as gone, and two runtimes could then hold one
+  home. It counts as unknown now: the lock is left alone and the command stops
+  with "could not determine whether aamio (pid N) is still using" the home.
+  aamio-php 0.3.8 does the same.
+- The note for a message larger than the byte budget says what its reader can
+  do. It carried the service's advice word for word, which names the header
+  `X-Max-Bytes` and a cursor to step past the message with, and whoever reads
+  the note set `max_bytes` and holds neither. It names `max_bytes` and
+  `--max-bytes` now, and says that what was written after the message waits
+  behind it.
+- The live tests wait their turn. The service takes thirty opens and closes
+  of threads a minute from one address, the three live files made 43 once the
+  first exchange had its test, and three tests failed on the 429 when the
+  whole suite ran. `tests/live_pace.py` holds them to twenty a minute, counted
+  in a file the live tests of aamio-php keep too. A run takes about two and a
+  half minutes, and no longer takes the quota from whoever shares the address.
 
 ## 0.6.21 - 2026-09-26
 

@@ -355,7 +355,7 @@ def test_the_advice_and_the_retry_mechanism_cannot_disagree():
     This used to read send_advice and then write in a comment that outbox_retry skips
     exactly the same list. The comment was the only thing holding the second half, so
     when retry changed its filter a 429 came back retryable: true, do not change the
-    content -- and retry refused to send those same bytes. Codex, 20 September 2026.
+    content -- and retry refused to send those same bytes. A review, 20 September 2026.
     """
     from aamio.runtime import SEND_DETERMINISTIC, SEND_TRY_LATER, outbox_retryable, send_advice
 

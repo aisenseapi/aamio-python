@@ -1,6 +1,6 @@
 """The message, followed to what the agent actually receives.
 
-Codex, 20 September 2026, on the first attempt at the storage fix: "Grønne deltester
+A review on 20 September 2026, of the first attempt at the storage fix: "Grønne deltester
 er ikke tilstrekkelig her; testene må følge meldingen helt frem til det agenten
 faktisk mottar." The tests before this one asked `poll` what it returned and stopped
 there. `poll` returned the message and the reader still got an empty inbox, and the
@@ -206,7 +206,7 @@ def sending(transport):
 
 
 def test_a_message_the_service_broke_on_can_be_sent_again():
-    """Codex, 20 September 2026, on the first half of this fix.
+    """A review on 20 September 2026, of the first half of this fix.
 
     attempted was added to the list of what has no settled outcome, and outbox_retry
     went on accepting only unknown and refused. So the one kind of message that most
@@ -257,7 +257,7 @@ def test_a_message_the_service_refused_is_not_sent_again():
     assert again == [], "outbox_retry answers with a list of what it sent: %s" % (again,)
 
 def test_a_rate_window_lets_the_same_bytes_through_later():
-    """Codex, 20 September 2026. 429 is the one refusal that says try again:
+    """A review, 20 September 2026. 429 is the one refusal that says try again:
     the service turned the request away without reading it, so the message was never
     stored and the same bytes are what should go. Retry refused to send them, and the
     local MCP told the caller to change the content -- the opposite of the advice the
@@ -294,7 +294,7 @@ def test_a_refusal_that_will_not_change_is_still_not_sent_again():
     assert transport.post_count == 1, "a message that will be refused again was sent again"
 
 def test_work_that_ran_out_of_time_sent_nothing_and_says_so():
-    """Codex, 20 September 2026. gate_solve answers None when the deadline passes,
+    """A review, 20 September 2026. gate_solve answers None when the deadline passes,
     and the flag that means bytes were on their way was set anyway. Zero POSTs, and
     forget said attempted, already_sending: true.
     """

@@ -1,6 +1,6 @@
 """A budget must not reorder what it could not hand over.
 
-Codex, 20 September 2026, on the release commit. Four messages on one channel, read
+A review on 20 September 2026, of the release commit. Four messages on one channel, read
 with a budget that fits the first: they came back 1, then 3, 2, 4.
 
 The message that did not fit was taken off the queue and put back at its end, behind
@@ -182,7 +182,7 @@ def test_a_read_always_tells_the_service_how_many_it_wants():
 # ------------------------------------------ and what the description promises --
 
 def test_the_local_tool_does_not_promise_a_hard_ceiling_it_does_not_keep():
-    """Codex, 20 September 2026: the tool said "at most this many bytes" and two
+    """A review, 20 September 2026: the tool said "at most this many bytes" and two
     things here are not at most.
 
     The budget is spent per channel, because a budget divided between channels would

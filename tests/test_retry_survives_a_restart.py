@@ -1,6 +1,6 @@
 """A retry interrupted by a restart must not be called unsent.
 
-Codex, 20 September 2026, on published 0.6.10. The sequence:
+A review on 20 September 2026, of published 0.6.10. The sequence:
 
   1. a send gets no answer, so its outcome is unknown: the message may be on the
      other side;

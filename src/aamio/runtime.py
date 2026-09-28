@@ -46,36 +46,63 @@ def home_dir() -> str:
 def pid_alive(pid):
     """Whether a process with this pid is running, without touching it.
 
+    True is alive, False is proven gone, and None is an answer that proves
+    neither. A lock is taken over on False and on nothing else.
+
     os.kill(pid, 0) asks that on POSIX. On Windows it is TerminateProcess:
     it ended whatever process held the pid, and then reported it as alive.
     A lock file outlives its process and Windows hands pids out again
     quickly, so the process ended was as often somebody else's program as
     an old aamio. There the question goes to OpenProcess instead.
-    """
-    if os.name == "nt":
-        import ctypes
 
+    Every error but the one that says there is no such process used to count
+    as gone. An error that says something else says nothing about the process.
+    """
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid > 0xFFFFFFFF:
+        # Zero and below are process groups to kill(), not processes, and a
+        # number no system hands out is not a process that is gone.
+        return None
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
+    return _pid_alive_posix(pid)
+
+
+def _pid_alive_windows(pid, kernel32=None, last_error=None):
+    """The question as OpenProcess answers it. The two arguments are for a test to stand in for Windows."""
+    import ctypes
+
+    if kernel32 is None:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.OpenProcess.restype = ctypes.c_void_p
-        handle = kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            # Access denied means the process is there and not ours to look at.
-            return ctypes.get_last_error() == 5
-        try:
-            code = ctypes.c_ulong()
-            if not kernel32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code)):
-                return True
-            return code.value == 259  # STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(ctypes.c_void_p(handle))
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        error = (last_error or ctypes.get_last_error)()
+        # Access denied means the process is there and not ours to look at.
+        if error == 5:
+            return True
+        # Invalid parameter is the answer for a pid no process holds.
+        if error == 87:
+            return False
+        return None
     try:
-        os.kill(pid, 0)
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code)):
+            return None
+        return code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
+def _pid_alive_posix(pid, kill=None):
+    """The question as kill(pid, 0) answers it. The argument is for a test to stand in for the system."""
+    try:
+        (kill or os.kill)(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    except OSError:
-        return False
+    except (OSError, OverflowError):
+        return None
     return True
 
 
@@ -789,7 +816,16 @@ class Runtime:
             try:
                 alive = pid_alive(held["pid"])
             except Exception:
-                alive = True
+                alive = None
+
+            if alive is None:
+                # Not known to be gone is not gone: taking the lock here would
+                # let two runtimes write one home.
+                raise RuntimeError(
+                    "could not determine whether aamio (pid %s) is still using %s; the lock is left untouched. Process inspection was "
+                    "unavailable or inconclusive. Stop the other runtime or restore process inspection, or use a different AAMIO_HOME. "
+                    "Do not remove the lock unless you have independently confirmed its owner has stopped." % (held["pid"], self.home)
+                )
 
             if alive and isinstance(held.get("at"), (int, float)):
                 # The lock is written after its owner started. A process that
@@ -2012,7 +2048,7 @@ class Runtime:
         if archive_error is not None:
             sent["archive_error"] = archive_error
         # A script that sends once and exits never fetches attention, so the
-        # failure rides on the answer it does read. Codex, 26 September.
+        # failure rides on the answer it does read. A review, 26 September.
         if entry.get("trace_error"):
             sent["trace_error"] = entry["trace_error"]
         return sent
@@ -2739,11 +2775,14 @@ class Runtime:
         if isinstance(too_large, dict):
             seq = too_large.get("seq")
             size = too_large.get("bytes")
+            # The advice is this runtime's own. The service's speaks of the
+            # header this read sent and of stepping past the message with after,
+            # and whoever reads this note set max_bytes and holds no cursor.
             self._note(
                 channel,
                 "too_large",
-                "message %s on this channel is %s bytes and does not fit the byte budget this read asked for, so it was not sent. It is still there and every read at this budget will leave it. %s"
-                % (seq, size, too_large.get("fix") or "Read again with a larger max_bytes, or without one."),
+                "message %s on this channel is %s bytes and does not fit the byte budget this read asked for, so it was not sent. It is still there, what was written after it waits behind it, and every read at this budget will leave it. Read again with a larger budget to take it: max_bytes, or --max-bytes on the command line."
+                % (seq, size),
                 seqs=[seq] if seq is not None else None,
             )
 

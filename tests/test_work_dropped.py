@@ -1,6 +1,6 @@
 """What was dropped is not sent afterwards, even when the work was already running.
 
-Found by a Codex project review, 20 September 2026 (F1), hours after
+Found by a project review, 20 September 2026 (F1), hours after
 aamio_outbox_forget went in saying "nothing is sent for it afterwards". A send
 whose proof of work is too long to wait for runs in a background thread. forget
 popped the entry from the outbox; the thread held the entry object and posted

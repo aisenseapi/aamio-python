@@ -1,6 +1,6 @@
 """A disk that will not take the cursor must not turn a message into silence.
 
-Codex, 20 September 2026.
+A review, 20 September 2026.
 
 The cursor and the replay hashes are saved in one write, and that write happens
 before the caller sees a message -- deliberately, so a crash cannot redeliver. But

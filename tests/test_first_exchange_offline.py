@@ -125,7 +125,11 @@ def test_the_command_line_stops_beside_a_runtime_that_holds_the_home():
             run = subprocess.run([sys.executable, "-m", "aamio", "--home", home, "--host", "http://127.0.0.1:9"] + command,
                                  capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
             assert run.returncode == 1 and run.stdout == "", (command, run.returncode, run.stdout, run.stderr)
-            assert "another aamio (pid %d) is using" % os.getpid() in run.stderr, run.stderr
+            # Where the system will not say whether this process lives, the
+            # command stops as well, and says that instead.
+            held = "another aamio (pid %d) is using" % os.getpid() in run.stderr
+            cannot_tell = "could not determine whether aamio (pid %d) is still using" % os.getpid() in run.stderr and "the lock is left untouched" in run.stderr
+            assert held or cannot_tell, run.stderr
 
         assert holder.partner_list() == []
         assert not os.path.exists(os.path.join(home, "partners.json")) or friend not in open(os.path.join(home, "partners.json"), encoding="utf-8").read()

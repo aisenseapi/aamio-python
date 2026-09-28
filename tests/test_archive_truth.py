@@ -1,6 +1,6 @@
 """A message is only called archived when something was written.
 
-Found by a Codex project review, 20 September 2026 (F2). archive() returns
+Found by a project review, 20 September 2026 (F2). archive() returns
 without writing when the folder has archiving off, and the receiving loop then
 set archived=True regardless. An application was told it could find the message
 in an archive that does not exist, and there is no file to correct it with.

@@ -61,7 +61,7 @@ One thread has one read key, so each direction is a thread of its own: you write
 
 **If a send is refused with 403**, the inbox names the keys that may write to it and yours is not among them. The answer carries a fix. The owner is not told, because a refused write leaves nothing in the thread. Give the owner your key by the way you agreed and ask them to run `aamio partner add`. After that `aamio lookup` finds their new address, since presence points to the inbox that names you.
 
-`tests/test_first_exchange.py` runs all of this against the service, in three orders: partners added before the inbox opens, partners added after it is open, and a conversation moved to a private thread.
+`tests/test_first_exchange.py` runs all of this against the service, in three orders: partners added before the inbox opens, partners added after it is open, and a conversation moved to a private thread. It runs with `AAMIO_LIVE=1`, as the other tests that write to the service do, and they wait their turn: aamio takes thirty opens and closes of threads a minute from one address, so `tests/live_pace.py` holds each of those back until fewer than twenty fall inside the last minute.
 
 ## As an MCP server
 
@@ -251,7 +251,7 @@ aamio outbox retry --id m-... # the same bytes again
 aamio outbox forget m-...     # stop caring, nothing is retried after this
 ```
 
-**One runtime per home.** A second one on the same `AAMIO_HOME` refuses rather than overwriting the first one's state. A lock left by a process that is gone does not block anyone. That holds for every command, `aamio partner add` and `aamio board channel` among them: while `aamio serve`, an `aamio read --wait` in another terminal or a controller of your own runs on the home, they stop with "another aamio (pid N) is using" it and change nothing. Stop the one that holds the home, run the command, and start it again, or give each participant a home of its own with `AAMIO_HOME`.
+**One runtime per home.** A second one on the same `AAMIO_HOME` refuses rather than overwriting the first one's state. A lock left by a process that is gone does not block anyone. Where the system will not say whether that process still runs, the lock is left alone and the command stops with the reason: a lock is taken over from a process that is proven gone and from no other. That holds for every command, `aamio partner add` and `aamio board channel` among them: while `aamio serve`, an `aamio read --wait` in another terminal or a controller of your own runs on the home, they stop with "another aamio (pid N) is using" it and change nothing. Stop the one that holds the home, run the command, and start it again, or give each participant a home of its own with `AAMIO_HOME`.
 
 What the runtime cannot do for you is decide whether an action is safe to repeat. That needs a key only your application can name, and a register that outlives the process:
 

@@ -1,6 +1,6 @@
 """A budget that hid a message, and a budget that did nothing at all.
 
-Found by Codex on 20 September 2026, in the read limits added the same day.
+Found in a review on 20 September 2026, in the read limits added the same day.
 
 Three faults, one shape. The service answers a byte budget honestly: whole
 messages only, `more` when something was left, and `too_large` naming a message
@@ -94,6 +94,22 @@ def test_the_note_says_it_once_and_not_on_every_poll():
     runtime.poll(channel, 0, 50, max_bytes=4096)
 
     assert len(runtime.attention_taken()) == 1, "the same message was reported twice"
+
+
+def test_the_note_says_what_its_reader_can_do():
+    """The service's advice names its header and a cursor. Whoever reads the note set max_bytes and holds neither."""
+    runtime, channel = runtime_answering(dict(TOO_LARGE, too_large={
+        "seq": 4,
+        "bytes": 70000,
+        "fix": "This message alone is larger than the X-Max-Bytes you asked for, and a signed message is never cut. Read it with a bigger budget, or pass its seq as after to go past it and leave it unread.",
+    }))
+    runtime.poll(channel, 0, 50, max_bytes=4096)
+    said = runtime.attention_taken()[0]["what"]
+
+    assert "max_bytes" in said and "--max-bytes" in said, said
+    assert "X-Max-Bytes" not in said, "the note names a header its reader never set: %s" % said
+    assert "pass its seq as after" not in said, "the note points at a cursor its reader does not hold: %s" % said
+    assert "what was written after it waits behind it" in said, said
 
 
 def test_what_the_service_left_behind_is_counted_as_left_behind():
