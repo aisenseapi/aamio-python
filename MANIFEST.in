@@ -1,0 +1,5 @@
+# The test suite ships whole in the source package, helpers included.
+# setuptools takes only the files named test*.py of its own accord, and since
+# 0.6.4 fifteen of them import tests/signing.py, so pytest in an unpacked
+# package could not collect them. The live tests import tests/live_pace.py.
+include tests/*.py

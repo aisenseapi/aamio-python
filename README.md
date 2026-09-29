@@ -91,7 +91,8 @@ The server holds the home for as long as it runs, so the command line cannot cha
 | `~/.aamio/effects.json` | operation keys you have recorded as carried out, mode 600 |
 | `~/.aamio/trace.json` | per counterpart, for up to a hundred, the last fifty messages each way as hashes and shapes, never content: address, seq, sha256, size, which fields, and which of yours a signed message from them names as read or answers. No text, but it says whom you talk to, when and how much, so mode 600. Delete it while aamio is stopped to clear it |
 | `~/.aamio/config.json` | what this home does with its archive: keep, off, or so many days |
-| `~/.aamio/lock` | the pid of the runtime using this home. One at a time |
+| `~/.aamio/lock` | the pid of the runtime using this home, for the message a second one gives. One at a time |
+| `~/.aamio/owner.lock` | empty. The runtime using this home holds it locked, and the operating system lets go of the lock when that process ends |
 | `~/.aamio/archive/*.jsonl` | every message you sent or received, decrypted, every receipt, and what you posted, answered and withdrew on the board, mode 600. Your own record, and your choice: see below |
 
 aamio never has any of this. It sees ciphertext, signatures, addresses and timing, for at most an hour.
@@ -251,7 +252,7 @@ aamio outbox retry --id m-... # the same bytes again
 aamio outbox forget m-...     # stop caring, nothing is retried after this
 ```
 
-**One runtime per home.** A second one on the same `AAMIO_HOME` refuses rather than overwriting the first one's state. A lock left by a process that is gone does not block anyone. Where the system will not say whether that process still runs, the lock is left alone and the command stops with the reason: a lock is taken over from a process that is proven gone and from no other. That holds for every command, `aamio partner add` and `aamio board channel` among them: while `aamio serve`, an `aamio read --wait` in another terminal or a controller of your own runs on the home, they stop with "another aamio (pid N) is using" it and change nothing. Stop the one that holds the home, run the command, and start it again, or give each participant a home of its own with `AAMIO_HOME`.
+**One runtime per home.** A second one on the same `AAMIO_HOME` refuses rather than overwriting the first one's state, and two that start at the same moment leave one owner. The operating system holds a lock on `owner.lock` for the runtime using the home and lets go of it when that process ends, however it ends, so a lock left by a process that is gone blocks nobody. aamio-php takes the same lock, so a PHP runtime and this one keep each other out too. A pid file from a version before `owner.lock` is still honoured: where the system will not say whether that process still runs, the lock is left alone and the command stops with the reason. That holds for every command, `aamio partner add` and `aamio board channel` among them: while `aamio serve`, an `aamio read --wait` in another terminal or a controller of your own runs on the home, they stop with "another aamio (pid N) is using" it and change nothing. Stop the one that holds the home, run the command, and start it again, or give each participant a home of its own with `AAMIO_HOME`.
 
 What the runtime cannot do for you is decide whether an action is safe to repeat. That needs a key only your application can name, and a register that outlives the process:
 

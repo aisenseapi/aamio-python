@@ -139,9 +139,13 @@ def process_started_at(pid):
         return None
 
 
-# Homes locked by this process. The file on disk catches another process;
-# this catches two runtimes in one, which is just as bad for the state.
+# Homes locked by this process, for a plainer message. The lock on OWNER_LOCK
+# keeps out a second runtime in this process as well as in another one.
 _LOCKED_HOMES = set()
+
+# The file in a home that the operating system holds locked for its owner.
+# aamio-php takes the same lock on the same file.
+OWNER_LOCK = "owner.lock"
 
 
 # What an HTTP status says about sending the same bytes again.
@@ -801,49 +805,103 @@ class Runtime:
     def _take_lock(self):
         """One live runtime per home. Two would overwrite each other's state.
 
-        The file holds the pid, and a pid that is gone is not an owner. This
-        catches the ordinary mistake, two sidecars on one home, not a shared
+        The operating system holds a lock on owner.lock for as long as this
+        runtime runs, and lets go of it when the process ends, however it
+        ends. Taking it is one step. With the pid file alone, taking the home
+        was three steps, a read, a check and a write, and two runtimes started
+        at once both read that nobody had it and both went on (a review, 29
+        September 2026). This catches two sidecars on one home, not a shared
         network filesystem.
+
+        The pid file is still written: it names the owner in the message a
+        second runtime gives, and it is all that versions from before
+        owner.lock look at. os_lock in it says that its writer held the lock,
+        so a runtime that holds the lock now knows that writer is gone.
         """
         real = os.path.realpath(self.home)
 
         if real in _LOCKED_HOMES:
             raise RuntimeError("another aamio in this process is already using %s" % self.home)
 
-        held = self._load_json("lock", None)
+        self._owner_fd = None
 
-        if isinstance(held, dict) and isinstance(held.get("pid"), int) and held["pid"] != os.getpid():
-            try:
-                alive = pid_alive(held["pid"])
-            except Exception:
-                alive = None
+        try:
+            self._owner_fd = storage.hold(self._path(OWNER_LOCK))
+            unlockable = False
+        except OSError as error:
+            # A system that cannot lock here: the pid file alone, as before.
+            unlockable = True
+            self.log("%s could not be locked here (%s), so only the pid in the lock file keeps a second runtime out" % (self._path(OWNER_LOCK), error.__class__.__name__))
 
-            if alive is None:
-                # Not known to be gone is not gone: taking the lock here would
-                # let two runtimes write one home.
-                raise RuntimeError(
-                    "could not determine whether aamio (pid %s) is still using %s; the lock is left untouched. Process inspection was "
-                    "unavailable or inconclusive. Stop the other runtime or restore process inspection, or use a different AAMIO_HOME. "
-                    "Do not remove the lock unless you have independently confirmed its owner has stopped." % (held["pid"], self.home)
-                )
+        if self._owner_fd is None and not unlockable:
+            held = self._lock_holder()
+            # The owner writes its pid just after it takes the lock, so a
+            # moment may pass with none, or an old one, there to name.
+            named = " (pid %s)" % held["pid"] if isinstance(held, dict) and isinstance(held.get("pid"), int) else ""
+            raise RuntimeError("another aamio%s is using %s. Stop it, or use a different AAMIO_HOME." % (named, self.home))
 
-            if alive and isinstance(held.get("at"), (int, float)):
-                # The lock is written after its owner started. A process that
-                # started later got the pid after the owner was gone.
-                started = process_started_at(held["pid"])
-                if started is not None and started > held["at"] + 2:
-                    alive = False
+        try:
+            self._check_older_owner()
+            self._save_json("lock", {"pid": os.getpid(), "at": int(time.time()), "host": self.host, "os_lock": self._owner_fd is not None})
+        except BaseException:
+            self._let_go_of_owner_lock()
+            raise
 
-            if alive:
-                raise RuntimeError(
-                    "another aamio (pid %s) is using %s. Stop it, or use a different AAMIO_HOME. If no aamio is running, "
-                    "the one that took the lock stopped without letting go of it: delete %s and start again." % (held["pid"], self.home, self._path("lock"))
-                )
-
-        self._save_json("lock", {"pid": os.getpid(), "at": int(time.time()), "host": self.host})
         _LOCKED_HOMES.add(real)
 
         return True
+
+    def _lock_holder(self):
+        """What the pid file says, for a message. Nothing when it cannot be read."""
+        try:
+            return self._load_json("lock", None)
+        except Exception:
+            return None
+
+    def _check_older_owner(self):
+        """An owner the operating system's lock cannot see: a version from before owner.lock, or a system that cannot lock."""
+        held = self._load_json("lock", None)
+
+        if not (isinstance(held, dict) and isinstance(held.get("pid"), int) and held["pid"] != os.getpid()):
+            return
+
+        if self._owner_fd is not None and held.get("os_lock") is True:
+            # Written by a runtime that held owner.lock. This one holds it now,
+            # so that one has let go of it or ended: no pid needs asking about.
+            return
+
+        try:
+            alive = pid_alive(held["pid"])
+        except Exception:
+            alive = None
+
+        if alive is None:
+            # Not known to be gone is not gone: taking the lock here would
+            # let two runtimes write one home.
+            raise RuntimeError(
+                "could not determine whether aamio (pid %s) is still using %s; the lock is left untouched. Process inspection was "
+                "unavailable or inconclusive. Stop the other runtime or restore process inspection, or use a different AAMIO_HOME. "
+                "Do not remove the lock unless you have independently confirmed its owner has stopped." % (held["pid"], self.home)
+            )
+
+        if alive and isinstance(held.get("at"), (int, float)):
+            # The lock is written after its owner started. A process that
+            # started later got the pid after the owner was gone.
+            started = process_started_at(held["pid"])
+            if started is not None and started > held["at"] + 2:
+                alive = False
+
+        if alive:
+            raise RuntimeError(
+                "another aamio (pid %s) is using %s. Stop it, or use a different AAMIO_HOME. If no aamio is running, "
+                "the one that took the lock stopped without letting go of it: delete %s and start again." % (held["pid"], self.home, self._path("lock"))
+            )
+
+    def _let_go_of_owner_lock(self):
+        fd, self._owner_fd = getattr(self, "_owner_fd", None), None
+
+        if fd is not None:
+            storage.let_go(fd)
 
     def _release_lock(self):
         if not getattr(self, "owns_lock", False):
@@ -854,6 +912,9 @@ class Runtime:
                 os.unlink(self._path("lock"))
             except OSError:
                 pass
+        # After the pid file, so a runtime that takes the lock the moment it is
+        # free finds no pid file of this one's to wonder about.
+        self._let_go_of_owner_lock()
         _LOCKED_HOMES.discard(os.path.realpath(self.home))
         self.owns_lock = False
 

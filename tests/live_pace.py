@@ -14,11 +14,20 @@ back: reads, writes and presence have counters of their own, and a wide margin.
 The count is kept in a file in the temp folder, not in this process. The live
 tests of aamio-php keep the same file, so the two suites run one after the
 other are counted as the one client the service sees. A turn is taken only once
-it is written there, under a lock both keep: the first version went on without
-the lock when it could not get it at once, and four runs on one file let 21
-through a window of 20. Where the folder for the file does not exist nobody can
-keep it, and this process counts its own, with a warning. A lock or a file out
-of reach for longer than PATIENCE stops the test with the reason.
+it is written there, under a lock both keep.
+
+The lock is one the operating system holds on the file beside the count, TURN,
+and lets go of when its process ends, however that comes. So it is never taken
+over, and nothing has to guess whether its holder is gone. The first version
+made a folder for a lock and took over one older than ten seconds, and two
+things went wrong with that. A lock let go of between a failed attempt and the
+look after it was taken for one that could not be made, and the turn went on
+without it. And a writer that was only slow lost its lock to another run while
+it wrote (a review, 29 September 2026). Both let 21 through a window of 20.
+
+Where the folder for the file does not exist nobody can keep it, and this
+process counts its own, with a warning. A lock or a file out of reach for
+longer than PATIENCE stops the test with the reason.
 """
 
 import collections
@@ -36,13 +45,51 @@ LIMIT = 20
 # One second more than the service's window, so a stamp that has left this
 # window has left that one.
 WINDOW = 61.0
-# A lock this old was left by a run that was stopped while it held it.
-STALE = 10.0
 # How long a turn waits for the lock, or for a file another program has open,
-# before it stops the test and says why. Longer than STALE, so a lock left by a
-# run that was stopped is taken over first.
+# before it stops the test and says why.
 PATIENCE = 30.0
+# Beside the count: the file whose lock says whose turn it is. aamio-php
+# locks the same file.
+TURN = ".turn"
 THREAD = re.compile(r"^/[a-z2-7]{20}$")
+
+
+def lock_file(fd):
+    """Locks an open file for this process without waiting, or raises OSError.
+
+    One byte with msvcrt on Windows, flock elsewhere. PHP's flock() takes the
+    same lock: on Windows it locks the whole file, which covers the byte. The
+    runtime's own lock on a home is the same mechanism, in aamio.storage.hold;
+    this copy keeps the helper free of the package, for the processes the
+    tests start with nothing but this folder on their path.
+    """
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def unlock_file(fd):
+    """Lets go of the lock and closes the file, which would let go of it anyway."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def ledger_path():
@@ -92,7 +139,8 @@ class Pace:
                 waited += hold
 
     def _take_or_hold(self):
-        held = self._lock()
+        turn = self._lock()
+        held = turn is not None
 
         try:
             now = self.clock()
@@ -120,36 +168,35 @@ class Pace:
             return None
         finally:
             if held:
-                self._unlock()
-
-    # The lock is a folder, because making one either happens or does not on
-    # every system and in every language that keeps this file.
+                unlock_file(turn)
 
     def _lock(self):
-        """True once the lock is held, and False only where there is no folder to keep the count in."""
-        folder = self.path + ".lock"
+        """The open TURN file once its lock is held, and None only where there is no folder to keep the count in.
+
+        A lock held by another run is waited for as long as that run holds it,
+        up to PATIENCE, and never taken away: however old, it is held by a
+        process that is still there, since the lock of one that ended is gone.
+        """
         deadline = time.monotonic() + self.patience
 
         while True:
             try:
-                os.mkdir(folder)
-
-                return True
-            except FileExistsError as error:
-                reason = error
-
-                if self._stale(folder):
-                    continue
+                fd = os.open(self.path + TURN, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
             except FileNotFoundError:
                 # No folder for the file, so no other run can keep it either.
-                self._keep_alone("%s does not exist" % os.path.dirname(folder))
+                self._keep_alone("%s does not exist" % os.path.dirname(self.path + TURN))
 
-                return False
+                return None
             except OSError as error:
-                # On Windows a lock another process has just let go of can
-                # refuse to be made again for a moment, with access denied.
-                # That is a lock in the way, not a count nobody can keep.
                 reason = error
+            else:
+                try:
+                    lock_file(fd)
+
+                    return fd
+                except OSError as error:
+                    os.close(fd)
+                    reason = error
 
             if time.monotonic() >= deadline:
                 raise RuntimeError(
@@ -158,32 +205,6 @@ class Pace:
                 )
 
             time.sleep(0.05)
-
-    @staticmethod
-    def _stale(folder):
-        """Takes a lock away from a run that was stopped while it held it. True when it was taken away."""
-        try:
-            if time.time() - os.path.getmtime(folder) <= STALE:
-                return False
-
-            os.rmdir(folder)
-        except OSError:
-            return False
-
-        return True
-
-    def _unlock(self):
-        # A lock that stays is taken over after STALE seconds, so this tries a
-        # few times and then leaves it to that.
-        for _ in range(20):
-            try:
-                os.rmdir(self.path + ".lock")
-
-                return
-            except FileNotFoundError:
-                return
-            except OSError:
-                time.sleep(0.01)
 
     def _keep_alone(self, why):
         if not self.alone:

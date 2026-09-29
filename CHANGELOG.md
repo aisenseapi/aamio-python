@@ -53,9 +53,24 @@ not what moved in the source.
   first exchange had its test, and three tests failed on the 429 when the
   whole suite ran. `tests/live_pace.py` holds them to twenty a minute, counted
   in a file the live tests of aamio-php keep too. A turn is taken only once it
-  is written there, and a count out of reach for thirty seconds stops the test
-  with the reason. A run takes about two and a half minutes, and no longer
+  is written there, under a lock the operating system holds, so a run that is
+  slow to write keeps its turn however long it takes. A count out of reach for
+  thirty seconds stops the test with the reason, and without the helper no live
+  run starts at all. A run takes about two and a half minutes, and no longer
   takes the quota from whoever shares the address.
+- Two runtimes started on one home at the same moment leave one owner. Taking
+  the home was three steps, a read of the pid file, a check and a write, and
+  two runtimes that both read before either wrote both went on, each with its
+  own idea of the state. The operating system now holds a lock on
+  `owner.lock` for the runtime using the home, taken in one step, and lets go
+  of it when that process ends, however it ends. aamio-php 0.3.8 takes the
+  same lock, so the two keep each other out of one home. The pid file is still
+  written, for the message a second runtime gives and for older versions, and
+  a pid file whose writer held the lock is taken over without asking about
+  its pid.
+- The source package carries the helpers its tests import. setuptools took
+  only the files named `test*.py`, and since 0.6.4 fifteen of them import
+  `tests/signing.py`, so pytest in an unpacked package could not collect them.
 
 ## 0.6.21 - 2026-09-26
 

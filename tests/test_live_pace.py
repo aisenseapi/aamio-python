@@ -9,10 +9,12 @@ processes on one file, because the first version held in every test here and
 let 21 through a window of 20 when four runs met at the lock.
 """
 
+import contextlib
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -143,47 +145,120 @@ def test_where_the_file_cannot_be_kept_the_count_is_kept_here(tmp_path):
     assert not os.path.exists(str(tmp_path / "no such folder"))
 
 
-def test_a_lock_that_will_not_be_made_for_a_moment_is_waited_for(tmp_path, monkeypatch):
-    """Access denied from mkdir is a lock another process has just let go of, on Windows.
+HOLDER = r'''
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+import live_pace
+fd = os.open(sys.argv[2] + live_pace.TURN, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+live_pace.lock_file(fd)
+print("held", flush=True)
+time.sleep(float(sys.argv[3]))
+if sys.argv[4] == "ends":
+    os._exit(0)
+live_pace.unlock_file(fd)
+'''
 
-    The first version took that as a count nobody can keep, went on without the
-    lock and wrote nothing: the turn was one the other runs could not see.
-    """
+
+@contextlib.contextmanager
+def another_run_holding(ledger, seconds, then="lets go"):
+    """A process that holds the turn for so many seconds, then lets go of it, or ends with it held."""
+    child = subprocess.Popen([sys.executable, "-c", HOLDER, HERE, str(ledger), str(seconds), "ends" if then == "ends" else "lets go"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    try:
+        assert child.stdout.readline().strip() == "held", child.stderr.read()
+        yield child
+    finally:
+        child.kill()
+        child.wait()
+
+
+def turn_is_free(ledger):
+    """Whether the turn can be taken now, asked by taking it and letting go at once."""
+    fd = os.open(str(ledger) + live_pace.TURN, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+
+    try:
+        live_pace.lock_file(fd)
+    except OSError:
+        os.close(fd)
+
+        return False
+
+    live_pace.unlock_file(fd)
+
+    return True
+
+
+def test_a_turn_another_run_holds_for_a_moment_is_waited_for(tmp_path):
     clock = Clock()
     ledger = tmp_path / "ledger.json"
-    plain = os.mkdir
-    refused = []
-
-    def mkdir(path, *rest, **named):
-        if str(path).endswith(".lock") and len(refused) < 3:
-            refused.append(path)
-            raise PermissionError(13, "Access is denied", str(path))
-
-        return plain(path, *rest, **named)
-
-    monkeypatch.setattr(live_pace.os, "mkdir", mkdir)
     pace = pace_at(ledger, clock)
 
-    assert pace.take() == 0.0
-    assert len(refused) == 3, "it went on before the lock was made"
+    with another_run_holding(ledger, 1.0):
+        began = time.monotonic()
+        assert pace.take() == 0.0
+        waited = time.monotonic() - began
+
+    assert waited >= 0.7, "it went on while the other run held the turn: %.2f s" % waited
     assert json.loads(ledger.read_text(encoding="utf-8")) == [pace.last], "the turn was taken without being written"
     assert pace.alone is False
-    assert not os.path.exists(str(ledger) + ".lock")
+    assert turn_is_free(ledger)
 
 
-def test_a_lock_in_the_way_for_longer_than_patience_stops_the_test_and_takes_no_turn(tmp_path):
+def test_a_turn_held_for_longer_than_patience_stops_the_test_and_is_not_taken_away(tmp_path):
+    """However old the lock looks. The first version took a lock over at ten seconds, from a run that was only slow."""
     clock = Clock()
     ledger = tmp_path / "ledger.json"
-    os.mkdir(str(ledger) + ".lock")
     pace = pace_at(ledger, clock, patience=0.3)
 
-    with pytest.raises(RuntimeError, match="was out of reach for 0.3 seconds") as stopped:
-        pace.take()
+    with another_run_holding(ledger, 30) as holder:
+        long_ago = time.time() - 7200
+        os.utime(str(ledger) + live_pace.TURN, (long_ago, long_ago))
+
+        with pytest.raises(RuntimeError, match="was out of reach for 0.3 seconds") as stopped:
+            pace.take()
+
+        assert holder.poll() is None, "the run that held the turn was disturbed"
+        assert not turn_is_free(ledger), "the other run's turn was taken away"
 
     assert "AAMIO_LIVE_LEDGER" in str(stopped.value)
     assert (pace.taken, pace.own, pace.last) == (0, [], None), "a turn was taken without the lock"
     assert not ledger.exists()
-    assert os.path.isdir(str(ledger) + ".lock"), "somebody else's lock was taken away before it was stale"
+
+
+def test_a_run_that_is_slow_to_write_keeps_its_turn(tmp_path):
+    """The review's case: a writer that is only slow, with the lock in hand, while another run asks for a turn."""
+    ledger = tmp_path / "ledger.json"
+    entered, resume = threading.Event(), threading.Event()
+
+    class SlowWriter(live_pace.Pace):
+        def _write(self, stamps):
+            entered.set()
+            assert resume.wait(10)
+            super()._write(stamps)
+
+    first = SlowWriter(path=str(ledger), limit=2)
+    worker = threading.Thread(target=first.take)
+    worker.start()
+
+    try:
+        assert entered.wait(5)
+        long_ago = time.time() - 7200
+        os.utime(str(ledger) + live_pace.TURN, (long_ago, long_ago))
+        second = live_pace.Pace(path=str(ledger), limit=2, patience=0.5)
+
+        with pytest.raises(RuntimeError, match="was out of reach"):
+            second.take()
+
+        assert second.taken == 0
+    finally:
+        resume.set()
+        worker.join(10)
+
+    # Once the first has written, the next run takes its turn after it, and both are counted.
+    third = live_pace.Pace(path=str(ledger), limit=2)
+    assert third.take() == 0.0
+    assert first.taken == 1 and sorted(json.loads(ledger.read_text(encoding="utf-8"))) == sorted([first.last, third.last])
 
 
 def test_a_file_that_is_there_and_will_not_open_is_not_taken_for_empty(tmp_path):
@@ -197,7 +272,7 @@ def test_a_file_that_is_there_and_will_not_open_is_not_taken_for_empty(tmp_path)
         pace.take()
 
     assert (pace.taken, pace.own) == (0, [])
-    assert not os.path.exists(str(ledger) + ".lock"), "the lock was kept after the test was stopped"
+    assert turn_is_free(ledger), "the lock was kept after the test was stopped"
 
 
 def test_a_turn_that_could_not_be_written_is_not_taken(tmp_path):
@@ -213,20 +288,21 @@ def test_a_turn_that_could_not_be_written_is_not_taken(tmp_path):
 
     assert (pace.taken, pace.own, pace.last) == (0, [], None), "a turn nobody else can see was taken"
     assert json.loads(ledger.read_text(encoding="utf-8")) == [clock.now - 1]
-    assert not os.path.exists(str(ledger) + ".lock")
+    assert turn_is_free(ledger)
 
 
-def test_a_lock_left_by_a_run_that_was_stopped_is_taken_over(tmp_path):
+def test_the_lock_of_a_run_that_ended_goes_with_it(tmp_path):
     clock = Clock()
     ledger = tmp_path / "ledger.json"
-    lock = str(ledger) + ".lock"
-    os.mkdir(lock)
-    long_ago = time.time() - 120
-    os.utime(lock, (long_ago, long_ago))
-    pace = pace_at(ledger, clock)
+
+    with another_run_holding(ledger, 0.2, then="ends") as holder:
+        holder.wait(30)
+
+    pace = pace_at(ledger, clock, patience=0.5)
+    began = time.monotonic()
 
     assert pace.take() == 0.0
-    assert not os.path.exists(lock), "the lock was left behind again"
+    assert time.monotonic() - began < 0.5, "it waited for a run that had ended"
     assert len(json.loads(ledger.read_text(encoding="utf-8"))) == 1
 
 
@@ -237,7 +313,7 @@ def test_the_lock_is_let_go_of_after_every_turn(tmp_path):
 
     for _ in range(5):
         pace.take()
-        assert not os.path.exists(str(ledger) + ".lock")
+        assert turn_is_free(ledger)
 
 
 @pytest.mark.parametrize("method, url, waits", [
@@ -339,4 +415,4 @@ def test_three_processes_on_one_file_never_hold_more_than_the_limit_in_a_window(
 
     assert len(stamps) == 3 * turns
     assert most <= limit, "%d turns inside one window of %.1f seconds, where the limit is %d" % (most, window, limit)
-    assert not os.path.exists(ledger + ".lock")
+    assert turn_is_free(ledger)

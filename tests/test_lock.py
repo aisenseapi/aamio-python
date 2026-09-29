@@ -12,6 +12,7 @@ lock whose pid had since gone to another program was refused for as long as
 that program ran. And the MCP server closed twice.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -268,7 +269,9 @@ def test_a_lock_whose_owner_cannot_be_inspected_is_left_alone(home, monkeypatch,
     assert "Do not remove the lock unless" in str(refused.value)
     assert open(lock, encoding="utf-8").read() == written, "the lock was rewritten by the runtime that was refused"
     files = sorted(name for name in os.listdir(home) if os.path.isfile(os.path.join(home, name)))
-    assert files == ["lock"], "the refused runtime wrote a file into a home it does not hold"
+    # owner.lock is the lock it tried, empty, and let go of: nothing else is written.
+    assert files == ["lock", "owner.lock"], "the refused runtime wrote a file into a home it does not hold"
+    assert os.path.getsize(os.path.join(home, "owner.lock")) == 0
 
     # And once the owner is proven gone, the same lock is taken over as before.
     monkeypatch.setattr(runtime_module, "pid_alive", lambda pid: False)
@@ -294,3 +297,179 @@ def test_the_command_line_says_why_it_stopped_when_it_cannot_tell(home, monkeypa
     said = capsys.readouterr()
     assert said.out == ""
     assert "could not determine whether aamio (pid %d) is still using" % other in said.err
+
+
+# A review on 29 September 2026: taking the home was three steps, a read of the
+# pid file, a check and a write, and two runtimes started at once both read that
+# nobody had it and both went on. The operating system's lock on owner.lock is
+# one step.
+
+SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+
+
+def test_two_runtimes_started_at_once_in_one_process_do_not_both_own_the_home(home):
+    import threading
+
+    both_read = threading.Barrier(2, timeout=5)
+    plain = Runtime._load_json
+
+    def load_json(self, name, default):
+        found = plain(self, name, default)
+
+        if name == "lock":
+            # Both have read the pid file before either writes it: the order
+            # in which both went on.
+            try:
+                both_read.wait()
+            except threading.BrokenBarrierError:
+                pass
+
+        return found
+
+    owners, refused = [], []
+
+    def start():
+        try:
+            owners.append(Runtime(home=home, host="https://fake.test", archive=False))
+        except RuntimeError as error:
+            refused.append(str(error))
+
+    Runtime._load_json = load_json
+
+    try:
+        threads = [threading.Thread(target=start) for _ in range(2)]
+
+        for thread in threads:
+            thread.start()
+
+        for thread in threads:
+            thread.join()
+    finally:
+        Runtime._load_json = plain
+
+        for runtime in owners:
+            runtime.close()
+
+    assert len(owners) == 1, "%d runtimes own one home" % len(owners)
+    assert len(refused) == 1 and "another aamio" in refused[0], refused
+
+
+STARTER = r'''
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+from aamio.runtime import Runtime
+home, go, done = sys.argv[2], sys.argv[3], sys.argv[4]
+while not os.path.exists(go):
+    time.sleep(0.005)
+try:
+    runtime = Runtime(home=home, host="https://fake.test", archive=False)
+except RuntimeError as error:
+    print("refused: " + str(error).replace("\n", " "), flush=True)
+    sys.exit(0)
+print("owned", flush=True)
+while not os.path.exists(done):
+    time.sleep(0.01)
+runtime.close()
+'''
+
+
+def test_runtimes_started_at_once_in_separate_processes_leave_one_owner(home, tmp_path):
+    go, done = str(tmp_path / "go"), str(tmp_path / "done")
+    children = [subprocess.Popen([sys.executable, "-c", STARTER, SRC, home, go, done], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                for _ in range(4)]
+
+    try:
+        # All four wait at the line; then they all go at once.
+        time.sleep(1.0)
+        open(go, "w").close()
+        said = [child.stdout.readline().strip() for child in children]
+    finally:
+        open(done, "w").close()
+
+        for child in children:
+            child.wait(timeout=60)
+
+    assert said.count("owned") == 1, said
+    assert all(line.startswith("refused: another aamio") for line in said if line != "owned"), said
+
+
+CRASHER = r'''
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from aamio.runtime import Runtime
+Runtime(home=sys.argv[2], host="https://fake.test", archive=False)
+print("held", flush=True)
+os._exit(0)
+'''
+
+
+def test_an_owner_that_ended_without_letting_go_is_taken_over_without_asking_about_its_pid(home, monkeypatch):
+    import aamio.runtime as runtime_module
+
+    child = subprocess.run([sys.executable, "-c", CRASHER, SRC, home], capture_output=True, text=True, timeout=60)
+    assert child.stdout.strip() == "held", child.stderr
+    left = json.loads(open(os.path.join(home, "lock"), encoding="utf-8").read())
+    assert left.get("os_lock") is True and isinstance(left.get("pid"), int), left
+
+    asked = []
+
+    def cannot_tell(pid):
+        asked.append(pid)
+
+        return None
+
+    # Where the pid could not be asked about at all, the lock still says enough.
+    monkeypatch.setattr(runtime_module, "pid_alive", cannot_tell)
+    runtime = Runtime(home=home, host="https://fake.test", archive=False)
+
+    try:
+        assert runtime.owns_lock is True
+        assert asked == [], "a pid was asked about where the lock already said its owner was gone"
+        assert json.loads(open(os.path.join(home, "lock"), encoding="utf-8").read())["pid"] == os.getpid()
+    finally:
+        runtime.close()
+
+
+def test_a_pid_file_from_before_owner_lock_still_keeps_a_runtime_out(home):
+    """A version from before owner.lock holds no lock, and writes a pid file without os_lock."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+
+    try:
+        time.sleep(0.3)
+
+        with open(os.path.join(home, "lock"), "w", encoding="utf-8") as handle:
+            handle.write('{"pid": %d, "at": %d}' % (child.pid, int(time.time())))
+
+        with pytest.raises(RuntimeError, match=r"another aamio \(pid %d\) is using" % child.pid):
+            Runtime(home=home, host="https://fake.test", archive=False)
+    finally:
+        child.kill()
+        child.wait()
+
+    # The refusal let go of owner.lock: once that pid is gone the home is free.
+    runtime = Runtime(home=home, host="https://fake.test", archive=False)
+
+    try:
+        assert runtime.owns_lock is True
+    finally:
+        runtime.close()
+
+
+def test_where_the_system_cannot_lock_the_pid_file_alone_keeps_the_home(home, monkeypatch):
+    import errno
+
+    from aamio import storage
+
+    def cannot(path):
+        raise OSError(errno.ENOLCK, "No locks available", path)
+
+    said = []
+    monkeypatch.setattr(storage, "hold", cannot)
+    runtime = Runtime(home=home, host="https://fake.test", archive=False, log=said.append)
+
+    try:
+        assert runtime.owns_lock is True
+        assert json.loads(open(os.path.join(home, "lock"), encoding="utf-8").read())["os_lock"] is False
+        assert any("could not be locked here" in line for line in said), said
+    finally:
+        runtime.close()

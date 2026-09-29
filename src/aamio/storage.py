@@ -13,6 +13,7 @@ something and by the access control list where they do not. And the archive is
 a choice with a lifetime: keep, off, or so many days, with a ceiling on size.
 """
 
+import errno
 import json
 import os
 import re
@@ -107,6 +108,64 @@ def open_private(path, append=False):
             pass
 
     return handle
+
+
+def hold(path):
+    """A lock on a file that the operating system holds for this process, taken in one step.
+
+    Returns the open descriptor while it is held, and None when another open
+    file holds it, in this process or in another. Raises OSError where the file
+    cannot be opened or this system cannot lock it. The lock goes with the
+    descriptor: let_go() lets go of it, and so does the end of the process,
+    however that comes, so no lock outlives its owner.
+
+    One byte with msvcrt on Windows, flock elsewhere. PHP's flock() takes the
+    same lock: on Windows it locks the whole file, which covers the byte, so
+    aamio-php and this runtime keep each other out of one home.
+
+    The file is never removed. A lock on a file that was removed and made
+    again is a lock on another file, and each of two runtimes would hold one.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+
+    try:
+        if is_windows():
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        os.close(fd)
+
+        # A lock violation on Windows, a lock that would block elsewhere.
+        if error.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, getattr(errno, "EDEADLOCK", errno.EACCES)):
+            return None
+
+        raise
+
+    return fd
+
+
+def let_go(fd):
+    """Lets go of a lock from hold(), and closes the file, which would let go of it anyway."""
+    try:
+        if is_windows():
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def sync_dir(path):
