@@ -52,8 +52,10 @@ not what moved in the source.
   of threads a minute from one address, the three live files made 43 once the
   first exchange had its test, and three tests failed on the 429 when the
   whole suite ran. `tests/live_pace.py` holds them to twenty a minute, counted
-  in a file the live tests of aamio-php keep too. A run takes about two and a
-  half minutes, and no longer takes the quota from whoever shares the address.
+  in a file the live tests of aamio-php keep too. A turn is taken only once it
+  is written there, and a count out of reach for thirty seconds stops the test
+  with the reason. A run takes about two and a half minutes, and no longer
+  takes the quota from whoever shares the address.
 
 ## 0.6.21 - 2026-09-26
 

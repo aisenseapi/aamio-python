@@ -4,11 +4,14 @@ The service allows one address thirty opens and closes of threads a minute. On
 28 September 2026 the live tests made 43 and three of them failed on the 429,
 none on the code. live_pace.py holds them to twenty a window, counted in a file
 the live tests of aamio-php keep too. What is checked here is the counting: a
-clock that is moved by hand, and a sleep that moves it.
+clock that is moved by hand, and a sleep that moves it. And, at the end, three
+processes on one file, because the first version held in every test here and
+let 21 through a window of 20 when four runs met at the lock.
 """
 
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -111,11 +114,11 @@ def test_the_file_is_one_the_php_tests_can_keep_too(tmp_path):
     assert all(clock.now - stamp < 61.0 for stamp in kept), "what has left the window is still in the file"
 
 
-@pytest.mark.parametrize("found", ["", "not json", "{}", '{"stamps": [1]}', "[true, null, \"12\", {}]", "null"])
+@pytest.mark.parametrize("found", ["", "not json", "{}", '{"stamps": [1]}', "[true, null, \"12\", {}]", "null", "[1e999, -1e999, NaN, 1" + "0" * 400 + "]", "\udcff"])
 def test_a_file_that_is_not_a_list_of_seconds_is_an_empty_one(tmp_path, found):
     clock = Clock()
     ledger = tmp_path / "ledger.json"
-    ledger.write_text(found, encoding="utf-8")
+    ledger.write_bytes(found.encode("utf-8", "surrogateescape"))
     pace = pace_at(ledger, clock)
 
     for _ in range(20):
@@ -131,11 +134,86 @@ def test_where_the_file_cannot_be_kept_the_count_is_kept_here(tmp_path):
     clock = Clock()
     pace = pace_at(tmp_path / "no such folder" / "ledger.json", clock)
 
-    for _ in range(20):
-        assert pace.take() == 0.0
+    with pytest.warns(RuntimeWarning, match="does not exist, so this process counts its own"):
+        for _ in range(20):
+            assert pace.take() == 0.0
 
+    assert pace.alone is True
     assert pace.take() > 60.0, "a count that could not be written was not kept at all"
     assert not os.path.exists(str(tmp_path / "no such folder"))
+
+
+def test_a_lock_that_will_not_be_made_for_a_moment_is_waited_for(tmp_path, monkeypatch):
+    """Access denied from mkdir is a lock another process has just let go of, on Windows.
+
+    The first version took that as a count nobody can keep, went on without the
+    lock and wrote nothing: the turn was one the other runs could not see.
+    """
+    clock = Clock()
+    ledger = tmp_path / "ledger.json"
+    plain = os.mkdir
+    refused = []
+
+    def mkdir(path, *rest, **named):
+        if str(path).endswith(".lock") and len(refused) < 3:
+            refused.append(path)
+            raise PermissionError(13, "Access is denied", str(path))
+
+        return plain(path, *rest, **named)
+
+    monkeypatch.setattr(live_pace.os, "mkdir", mkdir)
+    pace = pace_at(ledger, clock)
+
+    assert pace.take() == 0.0
+    assert len(refused) == 3, "it went on before the lock was made"
+    assert json.loads(ledger.read_text(encoding="utf-8")) == [pace.last], "the turn was taken without being written"
+    assert pace.alone is False
+    assert not os.path.exists(str(ledger) + ".lock")
+
+
+def test_a_lock_in_the_way_for_longer_than_patience_stops_the_test_and_takes_no_turn(tmp_path):
+    clock = Clock()
+    ledger = tmp_path / "ledger.json"
+    os.mkdir(str(ledger) + ".lock")
+    pace = pace_at(ledger, clock, patience=0.3)
+
+    with pytest.raises(RuntimeError, match="was out of reach for 0.3 seconds") as stopped:
+        pace.take()
+
+    assert "AAMIO_LIVE_LEDGER" in str(stopped.value)
+    assert (pace.taken, pace.own, pace.last) == (0, [], None), "a turn was taken without the lock"
+    assert not ledger.exists()
+    assert os.path.isdir(str(ledger) + ".lock"), "somebody else's lock was taken away before it was stale"
+
+
+def test_a_file_that_is_there_and_will_not_open_is_not_taken_for_empty(tmp_path):
+    clock = Clock()
+    ledger = tmp_path / "ledger.json"
+    # A folder where the file should be opens on no system.
+    ledger.mkdir()
+    pace = pace_at(ledger, clock, patience=0.3)
+
+    with pytest.raises(RuntimeError, match="could not be read for 0.3 seconds"):
+        pace.take()
+
+    assert (pace.taken, pace.own) == (0, [])
+    assert not os.path.exists(str(ledger) + ".lock"), "the lock was kept after the test was stopped"
+
+
+def test_a_turn_that_could_not_be_written_is_not_taken(tmp_path):
+    clock = Clock()
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps([clock.now - 1]), encoding="utf-8")
+    # The file the new count goes to first, before it replaces the old one.
+    (tmp_path / ("ledger.json.%d.tmp" % os.getpid())).mkdir()
+    pace = pace_at(ledger, clock, patience=0.3)
+
+    with pytest.raises(RuntimeError, match="could not be written for 0.3 seconds"):
+        pace.take()
+
+    assert (pace.taken, pace.own, pace.last) == (0, [], None), "a turn nobody else can see was taken"
+    assert json.loads(ledger.read_text(encoding="utf-8")) == [clock.now - 1]
+    assert not os.path.exists(str(ledger) + ".lock")
 
 
 def test_a_lock_left_by_a_run_that_was_stopped_is_taken_over(tmp_path):
@@ -227,3 +305,38 @@ def test_every_live_file_takes_its_turn():
         assert "import live_pace" in text and "live_pace.install()" in text, "%s writes to the service and does not wait its turn" % name
 
     assert test_live_gate.TESTS, "the gate has its own list, and it is not empty"
+
+
+CHILD = r'''
+import json, random, sys, time
+sys.path.insert(0, sys.argv[1])
+import live_pace
+pace = live_pace.Pace(limit=int(sys.argv[3]), window=float(sys.argv[4]), path=sys.argv[2])
+stamps = []
+for _ in range(int(sys.argv[5])):
+    pace.take()
+    stamps.append(pace.last)
+    time.sleep(random.uniform(0.0, 0.01))
+print(json.dumps(stamps))
+'''
+
+
+def test_three_processes_on_one_file_never_hold_more_than_the_limit_in_a_window(tmp_path):
+    """The rule itself, on the stamps as they were written, with real processes meeting at the lock."""
+    ledger = str(tmp_path / "ledger.json")
+    limit, window, turns = 4, 0.5, 8
+    children = [subprocess.Popen([sys.executable, "-c", CHILD, HERE, ledger, str(limit), str(window), str(turns)],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(3)]
+    stamps = []
+
+    for child in children:
+        out, err = child.communicate(timeout=120)
+        assert child.returncode == 0, err
+        stamps.extend(json.loads(out))
+
+    stamps.sort()
+    most = max(sum(1 for later in stamps[index:] if later - first < window) for index, first in enumerate(stamps))
+
+    assert len(stamps) == 3 * turns
+    assert most <= limit, "%d turns inside one window of %.1f seconds, where the limit is %d" % (most, window, limit)
+    assert not os.path.exists(ledger + ".lock")
