@@ -810,8 +810,9 @@ class Runtime:
         ends. Taking it is one step. With the pid file alone, taking the home
         was three steps, a read, a check and a write, and two runtimes started
         at once both read that nobody had it and both went on (a review, 29
-        September 2026). This catches two sidecars on one home, not a shared
-        network filesystem.
+        September 2026). Where owner.lock cannot be opened or locked, as on a
+        network filesystem without locks, nothing proves the home free, and
+        the runtime stops with the reason instead of going on without it.
 
         The pid file is still written: it names the owner in the message a
         second runtime gives, and it is all that versions from before
@@ -827,13 +828,18 @@ class Runtime:
 
         try:
             self._owner_fd = storage.hold(self._path(OWNER_LOCK))
-            unlockable = False
         except OSError as error:
-            # A system that cannot lock here: the pid file alone, as before.
-            unlockable = True
-            self.log("%s could not be locked here (%s), so only the pid in the lock file keeps a second runtime out" % (self._path(OWNER_LOCK), error.__class__.__name__))
+            # Held by nobody and not by this one either, so nothing proves the
+            # home is free. 0.6.22 went on with the pid file alone here, which
+            # two runtimes started at once could both take, and said so only
+            # to a logger that does nothing unless the caller sets one (a
+            # review, 30 September 2026).
+            raise RuntimeError(
+                "cannot establish exclusive ownership of %s: %s could not be opened or locked (%s). Restore file access or "
+                "locking support, or use a different AAMIO_HOME on a local disk." % (self.home, self._path(OWNER_LOCK), error)
+            ) from error
 
-        if self._owner_fd is None and not unlockable:
+        if self._owner_fd is None:
             held = self._lock_holder()
             # The owner writes its pid just after it takes the lock, so a
             # moment may pass with none, or an old one, there to name.
@@ -842,7 +848,7 @@ class Runtime:
 
         try:
             self._check_older_owner()
-            self._save_json("lock", {"pid": os.getpid(), "at": int(time.time()), "host": self.host, "os_lock": self._owner_fd is not None})
+            self._save_json("lock", {"pid": os.getpid(), "at": int(time.time()), "host": self.host, "os_lock": True})
         except BaseException:
             self._let_go_of_owner_lock()
             raise
@@ -859,13 +865,13 @@ class Runtime:
             return None
 
     def _check_older_owner(self):
-        """An owner the operating system's lock cannot see: a version from before owner.lock, or a system that cannot lock."""
+        """An owner the operating system's lock cannot see: a version from before owner.lock, which writes the pid file alone."""
         held = self._load_json("lock", None)
 
         if not (isinstance(held, dict) and isinstance(held.get("pid"), int) and held["pid"] != os.getpid()):
             return
 
-        if self._owner_fd is not None and held.get("os_lock") is True:
+        if held.get("os_lock") is True:
             # Written by a runtime that held owner.lock. This one holds it now,
             # so that one has let go of it or ended: no pid needs asking about.
             return

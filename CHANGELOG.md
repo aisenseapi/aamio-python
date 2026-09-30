@@ -4,6 +4,17 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.23 - 2026-09-30
+
+- A home whose `owner.lock` cannot be opened or locked is not taken. 0.6.22
+  went on with the pid file alone when the lock failed for any reason but
+  another runtime holding it, and two runtimes started at once could then
+  both take the home again, as they could before 0.6.22. The only word of it
+  went to a logger that does nothing unless the caller sets one. The runtime
+  now stops with "cannot establish exclusive ownership" and the reason, and a
+  home on a filesystem without locks has to move to a local disk. aamio-php
+  0.3.9 does the same.
+
 ## 0.6.22 - 2026-09-29
 
 - Concurrent Windows privacy checks no longer share one ACL export file.

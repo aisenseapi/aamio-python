@@ -455,7 +455,16 @@ def test_a_pid_file_from_before_owner_lock_still_keeps_a_runtime_out(home):
         runtime.close()
 
 
-def test_where_the_system_cannot_lock_the_pid_file_alone_keeps_the_home(home, monkeypatch):
+# A review on 30 September 2026: where owner.lock could not be opened or locked,
+# 0.6.22 went on with the pid file alone, and two runtimes started at once could
+# both take the home again. Nothing proves a home free then, so it is not taken.
+
+
+def written_files(home):
+    return sorted(name for name in os.listdir(home) if os.path.isfile(os.path.join(home, name)))
+
+
+def test_where_the_system_cannot_lock_the_home_is_not_taken(home, monkeypatch):
     import errno
 
     from aamio import storage
@@ -463,13 +472,94 @@ def test_where_the_system_cannot_lock_the_pid_file_alone_keeps_the_home(home, mo
     def cannot(path):
         raise OSError(errno.ENOLCK, "No locks available", path)
 
-    said = []
     monkeypatch.setattr(storage, "hold", cannot)
-    runtime = Runtime(home=home, host="https://fake.test", archive=False, log=said.append)
+
+    with pytest.raises(RuntimeError, match="cannot establish exclusive ownership") as refused:
+        Runtime(home=home, host="https://fake.test", archive=False)
+
+    assert "No locks available" in str(refused.value) and "AAMIO_HOME" in str(refused.value)
+    assert "another aamio" not in str(refused.value), "a system that cannot lock was reported as another runtime"
+    assert written_files(home) == [], "a runtime that did not take the home wrote into it"
+
+
+def test_an_owner_lock_that_will_not_open_stops_before_anything_is_written(home):
+    blocker = os.path.join(home, "owner.lock")
+    os.mkdir(blocker)
+    partners = os.path.join(home, "partners.json")
+
+    with open(partners, "wb") as handle:
+        handle.write(b"[]\n")
+
+    with pytest.raises(RuntimeError, match="cannot establish exclusive ownership"):
+        Runtime(home=home, host="https://fake.test", archive=False)
+
+    assert os.path.isdir(blocker), "what stood where the lock should be was removed"
+    assert written_files(home) == ["partners.json"]
+    assert open(partners, "rb").read() == b"[]\n"
+
+
+def test_two_runtimes_that_cannot_lock_do_not_both_own_the_home(home):
+    """The review's case: both read that the pid file is missing before either writes it."""
+    import threading
+
+    os.mkdir(os.path.join(home, "owner.lock"))
+    both_read = threading.Barrier(2, timeout=2)
+    plain = Runtime._load_json
+
+    def load_json(self, name, default):
+        found = plain(self, name, default)
+
+        if name == "lock":
+            try:
+                both_read.wait()
+            except threading.BrokenBarrierError:
+                pass
+
+        return found
+
+    owners, refused = [], []
+
+    def start():
+        try:
+            owners.append(Runtime(home=home, host="https://fake.test", archive=False))
+        except RuntimeError as error:
+            refused.append(str(error))
+
+    Runtime._load_json = load_json
 
     try:
-        assert runtime.owns_lock is True
-        assert json.loads(open(os.path.join(home, "lock"), encoding="utf-8").read())["os_lock"] is False
-        assert any("could not be locked here" in line for line in said), said
+        threads = [threading.Thread(target=start) for _ in range(2)]
+
+        for thread in threads:
+            thread.start()
+
+        for thread in threads:
+            thread.join()
     finally:
-        runtime.close()
+        Runtime._load_json = plain
+
+        for runtime in owners:
+            runtime.close()
+
+    assert owners == [], "%d runtimes took a home nothing could lock" % len(owners)
+    assert len(refused) == 2 and all("cannot establish exclusive ownership" in said for said in refused), refused
+    assert not os.path.exists(os.path.join(home, "lock"))
+
+
+def test_closing_a_runtime_again_leaves_the_next_owners_pid_file_alone(home):
+    """Two runtimes in one process share a pid, so only ownership can tell whose pid file it is."""
+    first = Runtime(home=home, host="https://fake.test", archive=False)
+    first.close()
+    second = Runtime(home=home, host="https://fake.test", archive=False)
+
+    try:
+        marker = os.path.join(home, "lock")
+        before = open(marker, "rb").read()
+        first.close()
+        first.release()
+        assert open(marker, "rb").read() == before, "a runtime that had let go touched the next owner's pid file"
+
+        with pytest.raises(RuntimeError, match="another aamio"):
+            Runtime(home=home, host="https://fake.test", archive=False)
+    finally:
+        second.close()
