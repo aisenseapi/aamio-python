@@ -1484,9 +1484,20 @@ class Runtime:
 
     # --------------------------------------------------------- channels --
 
-    def open_channel(self, label, ttl, allow_names=None, gate=None):
+    def open_channel(self, label, ttl, allow_names=None, gate=None, to=None, note=None):
+        """A channel with its own lifetime and, with to, its address handed to whoever is to write there.
+
+        to is a partner's name or key, or a write address a verified message
+        gave as reply_to or channel. That key goes on the allowlist beside the
+        partners in allow, and the address goes to it sealed and signed, which
+        is what makes the other runtime bind it: an address pasted into text or
+        data binds nothing. Until 30 September 2026 only the command line could
+        hand an address over, with aamio board channel.
+        """
         if label in self.channels or label.startswith("inbox"):
             raise ValueError("channel exists or reserved: " + label)
+        if note is not None and to is None:
+            raise ValueError("note travels with the address to whoever to names, so without to there is nothing to carry it")
         keys = []
         for name in allow_names or []:
             partner = self.partner_by_name(name)
@@ -1496,6 +1507,19 @@ class Runtime:
 
         if gate is not None:
             gate = check_gate(gate)
+
+        handover = None
+
+        if to is not None:
+            # Where the address goes and whose key seals it, before anything is
+            # opened: a partner who is not online, an address nobody bound, or
+            # an inbox whose gate cannot be met stops here, with no channel
+            # left open behind it.
+            reply_to, key, _ = self._recipient(to)
+            self._can_hand_over(reply_to)
+            if key not in keys:
+                keys.append(key)
+            handover = (reply_to, key)
 
         status, data, read_key, w = self.client.open_thread(int(ttl), keys or None, gate)
         if status != 201:
@@ -1508,7 +1532,61 @@ class Runtime:
         # with no conditions answered exactly like one whose gate went nowhere.
         # It is not kept here: the inbox holds it and GET /{w}/gate serves it,
         # and a second copy on this machine could only disagree with the first.
-        return {"label": label, "w": w, "expire_at": channel.expire_at, "allow": [self.name_for_key(k) or k for k in keys], "gate": gate}
+        opened = {"label": label, "w": w, "expire_at": channel.expire_at, "allow": [self.name_for_key(k) or k for k in keys], "gate": gate}
+
+        if handover is None:
+            return opened
+
+        # The listener gives the channel a poller when it next looks, within
+        # two seconds, and that first poll reads from the start, so an answer
+        # to the handover that comes sooner waits for it and is not lost.
+        reply_to, key = handover
+        self._hand_over(channel, key, reply_to, note)
+        opened.update({"handed_to": self.name_for_key(key) or key, "address_sent_to": reply_to})
+
+        return opened
+
+    def _can_hand_over(self, reply_to):
+        """Whether the inbox at reply_to takes a handover from here, asked before a channel is opened for it.
+
+        Its gate is read as a send reads it. Work that takes longer than a
+        caller with a time limit may wait stops here: a send can do its work in
+        the background, and a handover that did would leave the channel open
+        while the address was still on its way.
+        """
+        advice = self._plan_for(reply_to)
+        budget = getattr(self, "work_budget", None)
+
+        if budget is not None and advice.get("expected_seconds", 0) > budget:
+            raise GateStop(
+                "the inbox at %s asks for %d bits of proof of work, about %s here, longer than this call may take, so no channel was opened"
+                % (reply_to, advice["bits"], describe_seconds(advice["expected_seconds"])),
+                "Hand the channel over from the command line, where the work has the time it needs: aamio board channel KEY --reply-to ADDRESS.",
+            )
+
+    def _hand_over(self, channel, key, reply_to, note=None):
+        """The channel's address sent to reply_to, sealed to key and signed, through the outbox like any send."""
+        body = {"channel": channel.w, "expire_at": channel.expire_at}
+        if note:
+            body["text"] = str(note)
+        body.update(self._conversation(key))
+        envelope = self.keys.seal(key, json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        opened = {"label": channel.label, "w": channel.w, "expire_at": channel.expire_at}
+        # The message that carries the address is a send, and goes through the
+        # outbox like one. It was posted directly, and a refusal was a
+        # RuntimeError: a traceback on the command line, with the channel open
+        # and the address delivered to nobody.
+        entry = self._outbox_add(reply_to, key, envelope, body)
+        try:
+            status, handed = self._deliver(entry)
+        except GateStop as stop:
+            # The channel is open whatever stopped the message, and the caller
+            # has to hear that as well as why.
+            stop.opened = opened
+            raise
+        if status != 201:
+            raise SendFailed(entry["status"], entry["id"], status, handed, opened=opened)
+        return handed
 
     def close_channel(self, label):
         channel = self.channels.get(label)
@@ -1957,21 +2035,8 @@ class Runtime:
         self.save_state()
         if self.listener is not None:
             self._start_poller(channel)
-        handed = None
         if reply_to:
-            body = {"channel": w, "expire_at": channel.expire_at}
-            if note:
-                body["text"] = str(note)
-            body.update(self._conversation(key))
-            envelope = self.keys.seal(key, json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-            # The message that carries the address is a send, and goes through
-            # the outbox like one. It was posted directly, and a refusal was a
-            # RuntimeError: a traceback on the command line, with the channel
-            # open and the address delivered to nobody.
-            entry = self._outbox_add(reply_to, key, envelope, body)
-            status, handed = self._deliver(entry)
-            if status != 201:
-                raise SendFailed(entry["status"], entry["id"], status, handed, opened={"label": label, "w": w, "expire_at": channel.expire_at})
+            self._hand_over(channel, key, reply_to, note)
         return {"label": label, "w": w, "expire_at": channel.expire_at, "with": self.name_for_key(key) or key, "address_sent_to": reply_to}
 
     # ----------------------------------------------------------- lookup --
@@ -2018,6 +2083,17 @@ class Runtime:
         """
         if answers is not None and not is_message_hash(answers):
             raise ValueError("re is the sha256 of the message this answers: 64 lowercase hex characters, as read shows it")
+        w, key, partner = self._recipient(to)
+        return self._send(w, key, partner, text, data, reply_to, answers=answers)
+
+    def _recipient(self, to):
+        """Where a message for to goes, the key it is sealed to, and the partner's name when it is one.
+
+        to is a partner's name or key, reached at the address presence gives,
+        or a write address whose key this runtime knows: from presence, or from
+        reply_to or channel in a verified message. A send and a handover find
+        their recipient the same way.
+        """
         if is_key(str(to)):
             partner = self.partner_by_key(to)
             if partner is None:
@@ -2033,11 +2109,12 @@ class Runtime:
                 raise LookupError(
                     "no key known for address %s. A runtime learns whose an address is from presence, or from reply_to or channel in a "
                     "verified message; one pasted into text or data binds nothing. Send to the partner by name, answer a message at its "
-                    "reply_to, or ask the owner to hand the address over with aamio board channel KEY --reply-to ADDRESS" % to
+                    "reply_to, or ask the owner to hand the address over: aamio_open_channel with to, or aamio board channel KEY --reply-to ADDRESS "
+                    "on the command line" % to
                 )
-            return self._send(to, key, None, text, data, reply_to, answers=answers)
+            return to, key, None
         w, key = self.address_for(to)
-        return self._send(w, key, to, text, data, reply_to, answers=answers)
+        return w, key, to
 
     def _send(self, w, key, partner, text=None, data=None, reply_to=None, archived_data=None, answers=None):
         """One message sealed to key and written to w.
@@ -3349,13 +3426,15 @@ class Runtime:
             self.ensure_inbox()
             self.publish_presence()
             collected = []
-            waited = False
             left_waiting = 0
             held_back = []
             not_asked = []
-            for channel in list(self.channels.values()):
-                if channel.muted:
-                    continue
+            not_asked_after = []
+            budget = {} if max_bytes is None else {"max_bytes": max_bytes}
+
+            def ask(channel, seconds, passed_over):
+                """One channel asked, for what this call still has room for; how it answered, or None."""
+                nonlocal left_waiting
                 # A channel is only asked for what this call still has room
                 # for. poll moves the cursor and saves it before the caller
                 # sees a message, so whatever was fetched beyond the limit and
@@ -3363,29 +3442,52 @@ class Runtime:
                 # back: 60 waiting, 50 handed over, the last ten gone.
                 room = limit - len(collected)
                 if room <= 0:
-                    not_asked.append(channel.label)
-                    continue
+                    passed_over.append(channel.label)
+                    return None
                 try:
-                    state, entries = self.poll(channel, 0 if waited else wait, room,
-                                               **({} if max_bytes is None else {"max_bytes": max_bytes}))
+                    state, entries = self.poll(channel, seconds, room, **budget)
                 except Exception as error:
                     self._note(channel, "unread", "this channel could not be read: %s. Messages from the other channels are still returned." % error.__class__.__name__)
-                    continue
-                # A channel that answered 410 or nothing at all used to eat the
-                # whole wait, so a read with wait 25 came back at once and the
-                # inbox was only ever asked with wait 0. A gone one did wait:
-                # the service holds a read of a missing thread for a write.
-                waited = waited or state in ("ok", "gone")
+                    return None
                 collected.extend(entries)
                 left_waiting += channel.left_waiting
 
                 if channel.more_at_service:
                     held_back.append(channel.label)
 
-            if held_back:
-                self._note_trouble("read", "more", "the service had more waiting on %s than the byte budget this read asked for, so it sent what fits and kept the rest. Read again for it: the cursor stands at the last message handed over." % ", ".join(held_back))
+                return state
 
-            if left_waiting or not_asked:
+            # Every channel is asked at once before anything waits, so mail
+            # already waiting on any of them comes now. The wait used to go to
+            # the first channel before the others were asked, and a reply
+            # waiting on a private thread sat behind a quiet inbox for the
+            # whole wait, until 30 September 2026.
+            answered = []
+            for channel in list(self.channels.values()):
+                if channel.muted:
+                    continue
+                # A channel that answered 410 or nothing at all never gets the
+                # wait: it used to eat it, so a read with wait 25 came back at
+                # once and the inbox was only ever asked with wait 0. A gone
+                # one does: the service holds a read of a missing thread for a
+                # write.
+                if ask(channel, 0, not_asked) in ("ok", "gone"):
+                    answered.append(channel)
+
+            # Only when nothing was waiting anywhere does the read wait, on the
+            # first channel that answered, usually the inbox. The others are
+            # asked once more when it ends, so what reached them meanwhile comes
+            # with this answer, at the end of the wait: only the first channel
+            # can end the wait early.
+            if not collected and wait and answered:
+                ask(answered[0], wait, not_asked_after)
+                for channel in answered[1:]:
+                    ask(channel, 0, not_asked_after)
+
+            if held_back:
+                self._note_trouble("read", "more", "the service had more waiting on %s than the byte budget this read asked for, so it sent what fits and kept the rest. Read again for it: the cursor stands at the last message handed over." % ", ".join(dict.fromkeys(held_back)))
+
+            if left_waiting or not_asked or not_asked_after:
                 # Nothing is lost, and the caller still has to hear it: a read
                 # that stopped at its limit is not a read of everything.
                 self._note_trouble("read", "more", "this read stopped at its limit of %d message(s). %s Nothing was passed over: every cursor stands at the last message this read dealt with, so read again for the rest." % (
@@ -3393,6 +3495,7 @@ class Runtime:
                     " ".join(part for part in (
                         "%d more that the service had already returned were left where they are." % left_waiting if left_waiting else "",
                         "%d channel(s) were not asked this time: %s." % (len(not_asked), ", ".join(not_asked)) if not_asked else "",
+                        "%d channel(s) were asked before the wait and not after it: %s." % (len(not_asked_after), ", ".join(not_asked_after)) if not_asked_after else "",
                     ) if part),
                 ))
             return collected

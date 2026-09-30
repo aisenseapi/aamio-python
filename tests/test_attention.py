@@ -116,7 +116,11 @@ def test_a_read_that_stops_at_its_limit_says_so():
 
 
 def test_a_dead_channel_does_not_eat_the_whole_wait():
-    """The first channel used to spend the wait whether or not it answered."""
+    """The first channel used to spend the wait whether or not it answered.
+
+    Every channel is asked at once before anything waits, since 30 September
+    2026, and the wait goes to the first one that answered.
+    """
     asked = []
 
     def read(w, read_key, after, wait, **limits):
@@ -132,7 +136,7 @@ def test_a_dead_channel_does_not_eat_the_whole_wait():
     runtime.client = SimpleNamespace(read=read)
     runtime.read(wait=25)
 
-    assert asked == [("d" * 20, 25), ("i" * 20, 25)]
+    assert asked == [("d" * 20, 0), ("i" * 20, 0), ("i" * 20, 25)]
 
 
 def test_a_board_that_did_not_answer_is_not_a_post_that_does_not_exist():

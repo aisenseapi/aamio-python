@@ -4,6 +4,43 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.24 - 2026-09-30
+
+- A partner can be added over MCP, and only by the user. `aamio_partner_add`
+  takes a name from the model and no key: it asks the user for the key in a
+  form their app shows, MCP elicitation, and the key the user gives is the one
+  added. Before 2026-07-28 the question goes to the app while the call waits;
+  from 2026-07-28 the call answers with the question and a requestState this
+  process signs, which is good once and for fifteen minutes, and the app calls
+  again with the answer. A key passed beside the name is refused, a key already
+  in the book under another name is not moved, and a declined or closed form
+  adds nothing. An app that does not say it can show a form, or a revision
+  without elicitation, gets the command line's way instead: stop the server,
+  run `aamio partner add NAME KEY`, start it again. Until now that was the only
+  way, and an agent on MCP alone could not finish a first exchange.
+- `aamio_open_channel` hands the address over with `to`: a partner's name, or
+  an address a verified message gave as `reply_to` or `channel`. That key may
+  write to the channel, and the address goes to it sealed and signed, with
+  `note` beside it, which is what makes the other runtime bind it. Until now
+  that took `aamio board channel` on the command line, with the server
+  stopped. Who and where are settled before anything is opened, so a partner
+  who is not online, an address nobody bound, or an inbox whose gate cannot be
+  met in time stops there with no thread left open. If the message carrying
+  the address does not go, the answer says the channel is open under `opened`.
+- A read without a listener asks every channel at once before it waits. It
+  used to spend the whole wait on the first channel, usually the inbox, and
+  mail already waiting on a private thread came only when that wait ended, up
+  to 25 seconds later. Now it comes at once; only when nothing is waiting does
+  the read wait on the first channel, and the others are asked again when it
+  ends, so what reached them meanwhile comes with the same answer. `aamio
+  serve` has a listener and was never affected.
+- The MCP instructions say both ways a partner enters the address book, and
+  that a key in a message, on the board or in the conversation is never added
+  on its say-so. 1954 bytes, under the 2048 that Claude Code keeps.
+- The stdio server answers a ping while it waits on the user, serves what came
+  in meanwhile afterwards and in order, and does not answer a response or a
+  request that was cancelled while it waited.
+
 ## 0.6.23 - 2026-09-30
 
 - A home whose `owner.lock` cannot be opened or locked is not taken. 0.6.22
