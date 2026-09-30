@@ -216,9 +216,17 @@ def send_advice(outcome, status):
     )
 
 
-def refused_once(reason):
-    """A stop's reason told of a message that went once and was refused, where it was written for one that never left."""
-    return reason.replace("nothing was sent", "it was not sent again").replace("Nothing was sent", "It was not sent again")
+def refused_once(stop):
+    """What a stop after a 428 says: the message went once and was refused, and why it was not sent again.
+
+    Built from the stop's why and fix, which say nothing about the message, and
+    never from its reason, which was written for one that had not left. The
+    reason was reworded here by replacing one phrase, and a stop that put it
+    another way still said it sent nothing (a check of 30 September 2026).
+    """
+    why = stop.why[:1].upper() + stop.why[1:]
+
+    return "The message went once and the inbox refused it with 428, and it was not sent again. %s. %s" % (why, stop.fix)
 
 
 class SendFailed(RuntimeError):
@@ -758,6 +766,15 @@ class Runtime:
                 else:
                     entry["status"] = "stopped"
                     entry["note"] = "the process stopped before its proof of work was done, so nothing was sent"
+
+            # An attempt left open before this process, by this version or an
+            # older one, stays open: a stop or a refusal from now on settles a
+            # later attempt, not that one. Only an answer marked it, so an entry
+            # loaded from sending, or saved before the mark existed, had none,
+            # and a 428 on its retry called a message that may have landed
+            # refused (a check of 30 September 2026).
+            if outbox_open(entry):
+                entry["ever_open"] = True
         self.presence_at = 0.0
         # The last attempt and the last success are two different times: a
         # failed publish used to count as a fresh one, and the new address
@@ -2433,7 +2450,7 @@ class Runtime:
                 # A stop here used to read as one before anything left, so the
                 # message was called never sent, or left open to a retry, and it
                 # had gone (a health check of 30 September 2026).
-                result = dict(result, fix=refused_once(stop.reason))
+                result = dict(result, fix=refused_once(stop))
 
         return status, result
 
@@ -2485,8 +2502,8 @@ class Runtime:
         # replacement for something that was never sent.
         if nonce is None:
             raise GateStop(
-                "the inbox asks for %d bits of work and the time it still takes writes ran out before a nonce was found, so nothing was sent" % bits,
-                "Nothing left this machine. Open a thread with a longer life, or send this to an inbox whose gate asks for less: the same bytes are still here under this message id.",
+                "the inbox asks for %d bits of work and the time it still takes writes ran out before a nonce was found" % bits,
+                "Open a thread with a longer life, or send this to an inbox whose gate asks for less: the same bytes are still here under this message id.",
             )
 
         # The work is done and nothing has left yet.
@@ -2495,12 +2512,6 @@ class Runtime:
         if entry is not None:
             entry["status"] = "sending"
             self.save_outbox()
-
-        if nonce is None:
-            raise GateStop(
-                "The proof of work of %d bits was not done before the inbox stops taking writes, so the work was stopped and nothing was sent." % bits,
-                "The estimate before it started said it would fit, and this time it took longer, which happens: the work is a lottery. Ask the owner for a longer inbox, or send from a machine with more compute.",
-            )
 
         return self.client.post(w, body_text, self.keys.public, signature, "text/plain", nonce)
 

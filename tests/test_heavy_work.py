@@ -31,7 +31,8 @@ def test_work_that_would_not_be_done_in_time_is_not_started():
         # A minute: no loop like this one does 32 bits in that, on any machine.
         plan({"require": {"pow": {"bits": 32, "covers": 1}}}, "w" * 20, None, 60)
 
-    assert "32 bits" in stop.value.reason and "not started" in stop.value.reason and "nothing was sent" in stop.value.reason
+    assert "32 bits" in stop.value.reason and "not started" in stop.value.reason and stop.value.reason.endswith("Nothing was sent.")
+    assert "sent" not in stop.value.why, "why is only about the gate, so it holds after a post as well as before one"
     assert "machine with more compute" in stop.value.fix
 
 

@@ -13,6 +13,8 @@ was sent. The checks below hold both runtimes to the same story.
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -136,7 +138,7 @@ def test_over_mcp_a_428_is_told_as_a_refusal_not_as_nothing_sent():
     said = mcp_server.dispatch(runtime, "aamio_send", {"to": address, "text": "hello"})["structuredContent"]
 
     assert said["error_code"] == "send_refused" and said["status"] == 428 and said["outcome"] == "refused"
-    assert said["retryable"] is False and "nothing was sent" not in said["error"]
+    assert said["retryable"] is False and "nothing" not in said["error"].lower()
 
 
 def test_a_428_whose_work_runs_out_before_the_second_post_is_still_the_refusal(monkeypatch):
@@ -154,6 +156,83 @@ def test_a_428_whose_work_runs_out_before_the_second_post_is_still_the_refusal(m
     [entry] = runtime.outbox.values()
     assert refused.outcome == "refused" and refused.status == 428 and len(runtime.client.posts) == 1
     assert outbox_outcome(entry) == "refused" and "it was not sent again" in refused.detail["fix"]
+    assert "nothing" not in refused.detail["fix"].lower()
+
+
+# Every way the gate named by a 428 can stop the second post. The stop texts
+# once carried "nothing was sent" in more than one wording, and the 428 path
+# reworded only one of them: "sent nothing" came through about a message that
+# had gone (a check of 30 September 2026).
+STOPS_AFTER_A_428 = {
+    "a part of the gate this client does not know": {"gate": {"toll": {"coins": 1}}},
+    "a requirement this client does not know": {"gate": {"require": {"captcha": {"site": "x"}}}},
+    "more work than any inbox may ask for": {"gate": {"require": {"pow": {"bits": 40}}}},
+    "work that would not be done in time": {"gate": {"require": {"pow": {"bits": 32}}}, "seconds_left": 1},
+}
+
+
+@pytest.mark.parametrize("what", sorted(STOPS_AFTER_A_428))
+def test_every_stop_after_a_428_says_it_went_once_and_never_that_nothing_was_sent(what):
+    answer = dict(REFUSED_FOR_WORK[1], seconds_left=600)
+    answer.update(STOPS_AFTER_A_428[what])
+    service, runtime, address = sender([(428, answer)])
+
+    with pytest.raises(SendFailed) as failed:
+        runtime.send(address, "hello", None)
+
+    fix = failed.value.detail["fix"]
+    assert failed.value.outcome == "refused" and failed.value.status == 428 and len(runtime.client.posts) == 1
+    assert fix.startswith("The message went once and the inbox refused it with 428, and it was not sent again.")
+    assert "nothing" not in fix.lower(), fix
+
+
+# ------------------------------------------ left open before this process --
+
+# Saved as an older runtime saved them, with no mark for an attempt left open:
+# only an answer set it, so a send loaded from in flight had none, and neither
+# had anything written before the mark existed. A 428 on the retry then called
+# the message refused, and it left the pending list though the first attempt
+# may have landed (a check of 30 September 2026).
+LEFT_OPEN = {
+    "unknown after a restart": {"status": "unknown", "note": "the process stopped while this was in flight"},
+    "in flight when the process stopped": {"status": "sending"},
+    "attempted after a 500": {"status": "attempted", "last_status": 500},
+    "refused after a 500, as before 20 September": {"status": "refused", "last_status": 500},
+}
+
+
+@pytest.mark.parametrize("what", sorted(LEFT_OPEN))
+def test_an_attempt_left_open_before_a_restart_stays_open_after_a_428(what):
+    service, runtime, address = sender([(0, {"error": "no answer"})])
+    with pytest.raises(SendFailed):
+        runtime.send(address, "hello", None)
+    [entry] = runtime.outbox.values()
+    for mark in ("ever_open", "posting"):
+        entry.pop(mark, None)
+    entry.update(LEFT_OPEN[what])
+    runtime.save_outbox()
+
+    again = reopened(service, runtime)
+    again.client = Scripted([REFUSED_FOR_WORK])
+    loaded = again.outbox[entry["id"]]
+
+    assert loaded.get("ever_open") is True
+    assert again.outbox_retry(entry["id"])[0]["http"] == 428 and len(again.client.posts) == 1
+    assert loaded["status"] == "attempted" and outbox_outcome(loaded) == "attempted"
+    assert [p["id"] for p in again.outbox_pending()] == [entry["id"]]
+
+
+def test_what_was_settled_before_a_restart_stays_settled():
+    """The mark is for what was left open. A refusal that settled a message is not reopened by a restart."""
+    service, runtime, address = sender([(410, {"error": "This thread has expired."})])
+    with pytest.raises(SendFailed):
+        runtime.send(address, "hello", None)
+    [entry] = runtime.outbox.values()
+
+    again = reopened(service, runtime)
+    loaded = again.outbox[entry["id"]]
+
+    assert "ever_open" not in loaded and outbox_outcome(loaded) == "refused" and again.outbox_pending() == []
 
 
 def test_an_earlier_attempt_left_open_stays_open_whatever_the_428_after_it():

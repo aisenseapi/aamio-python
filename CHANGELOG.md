@@ -48,9 +48,16 @@ not what moved in the source.
 - A message too large for any inbox is refused before it is stored or sent,
   with its sealed size. It went out and came back 413.
 - A message that went once and was refused with 428 is told as refused, status
-  428, when this client does not meet the gate the refusal names, with why in
-  `fix`. It was left open to a retry, with a text saying nothing was sent. An
-  earlier attempt that got no answer stays open whatever the 428 after it.
+  428, when this client does not meet the gate the refusal names. Its `fix`
+  says the message went once and was not sent again, then why and what to do
+  instead. It was left open to a retry, with a text saying nothing was sent.
+  Where a gate stops a send before anything leaves, the reason now ends with
+  "Nothing was sent." as a sentence of its own, and says only why before it.
+- An attempt left open stays open whatever refusal comes after it, across a
+  restart too. A send in flight when the process stopped, and one left
+  `unknown` or `attempted` by an earlier version, carried no mark of that, and
+  a 428 on its retry called it refused and took it off `aamio_pending`, though
+  the first attempt may have landed.
 - A send whose outbox entry could not be written is taken out of the outbox
   again, and one whose save just before the post failed is settled as never
   sent. Either used to wait in memory as a send in flight until the next save

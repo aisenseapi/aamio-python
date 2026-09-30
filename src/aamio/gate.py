@@ -40,16 +40,25 @@ KNOWN = {"require": ("per_key", "pow", "write_until"), "advise": ("pow",)}
 
 
 class GateStop(ValueError):
-    """The inbox asks for something this client cannot or will not do, so nothing was sent.
+    """The inbox asks for something this client cannot or will not do.
 
-    reason is what the inbox asked and why that stops the send; fix is what the
-    caller can do instead. Both are for a reader deciding what to do next.
+    why is what the inbox asked and why that stops the send, and says nothing
+    about the message. reason adds what that meant for a message that had not
+    left: nothing was sent. fix is what the caller can do instead. All three are
+    for a reader deciding what to do next.
+
+    A stop after a post the inbox refused with 428 is told from why, since that
+    message went once. The texts used to carry nothing was sent inside them, a
+    428 reworded that one phrase, and a stop that put it another way came
+    through saying it sent nothing about a message that had gone (a check of
+    30 September 2026).
     """
 
-    def __init__(self, reason, fix):
-        super().__init__(reason)
-        self.reason = reason
+    def __init__(self, why, fix):
+        self.why = why.rstrip(". ")
+        self.reason = "%s. Nothing was sent." % self.why
         self.fix = fix
+        super().__init__(self.reason)
 
 
 def pow_input(w, key, body_sha256, nonce):
@@ -216,7 +225,7 @@ def plan(gate, w=None, host=None, seconds_left=None):
     for bucket, conditions in gate.items():
         if bucket not in KNOWN:
             raise GateStop(
-                "This inbox's gate has a part called %s that this client does not know, so it cannot tell whether a write would be refused, and sent nothing." % bucket,
+                "This inbox's gate has a part called %s that this client does not know, so it cannot tell whether a write would be refused" % bucket,
                 "Update the aamio client, which may know it. %s shows the whole gate." % where,
             )
 
@@ -229,7 +238,7 @@ def plan(gate, w=None, host=None, seconds_left=None):
 
             if bucket == "require":
                 raise GateStop(
-                    "This inbox requires %s, a condition this client does not know how to meet, so nothing was sent." % name,
+                    "This inbox requires %s, a condition this client does not know how to meet" % name,
                     "Update the aamio client, which may know it, or reach the owner another way. %s shows the whole gate." % where,
                 )
 
@@ -243,7 +252,7 @@ def plan(gate, w=None, host=None, seconds_left=None):
 
         if bits > POW_REQUIRE_MAX_BITS:
             raise GateStop(
-                "This inbox requires proof of work of %d bits, and this client computes at most %d, the most aamio lets any inbox require. Nothing was sent." % (bits, POW_REQUIRE_MAX_BITS),
+                "This inbox requires proof of work of %d bits, and this client computes at most %d, the most aamio lets any inbox require" % (bits, POW_REQUIRE_MAX_BITS),
                 "The inbox asks for more than the service allows, so no client will meet it. Reach the owner another way.",
             )
 
@@ -251,7 +260,7 @@ def plan(gate, w=None, host=None, seconds_left=None):
 
         if seconds_left is not None and expected > seconds_left:
             raise GateStop(
-                "This inbox requires proof of work of %d bits, which takes about %s on this machine, and it takes writes for %s more. The work would not be done before it closes, so it was not started and nothing was sent." % (bits, describe(expected), describe(seconds_left)),
+                "This inbox requires proof of work of %d bits, which takes about %s on this machine, and it takes writes for %s more. The work would not be done before it closes, so it was not started" % (bits, describe(expected), describe(seconds_left)),
                 "Ask the owner for a longer inbox or less work, or send from a machine with more compute. An inbox that asks this much may mean to meet only writers who have it.",
             )
 
