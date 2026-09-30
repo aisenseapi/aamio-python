@@ -1592,8 +1592,11 @@ class Runtime:
         address was then refused, or counted in aamio-php as one that might
         have landed (a review, 30 September 2026).
         """
-        _, envelope = self._invitation(key, "a" * 20, int(time.time()) + int(ttl), note)
-        size = len(envelope.encode("utf-8"))
+        body, _ = self._invitation(key, "a" * 20, int(time.time()) + int(ttl), note)
+        # seen can appear before the handover, if a message from this key is read
+        # meanwhile, and it is always 64 characters: counted as there already.
+        body.setdefault("seen", "0" * 64)
+        size = len(self.keys.seal(key, json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).encode("utf-8"))
 
         if size > MESSAGE_MAX_BYTES:
             raise ValueError(
