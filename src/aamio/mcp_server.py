@@ -558,6 +558,11 @@ def dispatch(runtime: Runtime, name: str, arguments: dict, ask=None):
         retryable, fix = send_advice(error.outcome, error.status)
         opened = getattr(error, "opened", None)
 
+        # A channel whose address never left: sending again would need the
+        # address, and nobody has it.
+        if opened and error.outcome == "never_sent":
+            fix = "Nothing left this machine, so nobody has been given its address. Close it with aamio_close_channel, put right what the error says, and open a new one with to."
+
         return result_of({
             "error": str(error),
             "error_code": "send_" + error.outcome,
@@ -584,9 +589,14 @@ def dispatch(runtime: Runtime, name: str, arguments: dict, ask=None):
         }, True)
     except (ValueError, LookupError, RuntimeError) as error:
         return result_of({"error": str(error)}, True)
-    except (TypeError, AttributeError, OSError) as error:
-        # An argument of the wrong type, or a file that would not write. Either
-        # is this call's failure, and the server stays up for the next one.
+    except OSError as error:
+        # A file that would not read or write. This call's failure, and the
+        # server stays up for the next one. It was answered as a wrong argument,
+        # which sent a caller to check what it had sent (a review, 30 September).
+        return result_of({"error": "%s: %s" % (error.__class__.__name__, error), "fix": "A file in this runtime's home could not be read or written, so the call stopped there, and the error names it. Check the disk and the home's permissions, then call again."}, True)
+    except (TypeError, AttributeError) as error:
+        # An argument of the wrong type. This call's failure, and the server
+        # stays up for the next one.
         return result_of({"error": "%s: %s" % (error.__class__.__name__, error), "fix": "Check each argument against the tool's inputSchema and call again."}, True)
 
 
@@ -718,6 +728,10 @@ class Wire:
     and reads until the answer comes. What arrives meanwhile is kept and served
     afterwards, in order: a ping is answered at once, and a cancellation of the
     call that waits ends the wait, withdraws the question, and answers nothing.
+    A cancellation of any other call is kept until what was waiting has been
+    served, and that call is not served. It was applied to whole lines only,
+    and a call inside a batch, kept whole or already being served, went ahead
+    when its cancellation had come first (a review, 30 September 2026).
     """
 
     def __init__(self, stdin, stdout, respond=None):
@@ -727,6 +741,8 @@ class Wire:
         self.respond = respond
         self.held = collections.deque()
         self.asked = 0
+        # Ids of calls cancelled during a wait, until the backlog is served.
+        self.cancelled = []
 
     def send(self, message):
         self.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
@@ -734,7 +750,22 @@ class Wire:
 
     def next_line(self):
         """The next line to serve: one kept while a question waited, else a new one. Empty when the input has ended."""
-        return self.held.popleft() if self.held else self.stdin.readline()
+        if self.held:
+            return self.held.popleft()
+        # Everything that came in while a question waited has been served, so
+        # the cancellations it brought have nothing left to stop.
+        self.cancelled = []
+        return self.stdin.readline()
+
+    def skips(self, message):
+        """Whether message is a call cancelled while a question waited. One that is, is not served."""
+        if not isinstance(message, dict) or not isinstance(message.get("method"), str) or "id" not in message:
+            return False
+        for index, rid in enumerate(self.cancelled):
+            if type(rid) is type(message["id"]) and rid == message["id"]:
+                del self.cancelled[index]
+                return True
+        return False
 
     def ask(self, method, params, waiting):
         """One request to the client, and the response to it, while the client's own request waiting waits."""
@@ -768,8 +799,10 @@ class Wire:
                 raise Cancelled("the call was cancelled while the user was being asked")
 
             if cancelled is not None:
-                # A request kept for later that is cancelled now is not served.
-                self.held = collections.deque(kept for kept in self.held if not self._is_request(kept, cancelled))
+                # Kept, and asked about before each call is served: the call may
+                # be in a line kept for later, inside a batch, or next in the
+                # batch this wait interrupted.
+                self.cancelled.append(cancelled)
                 continue
 
             if message.get("method") == "ping" and "id" in message and self.respond is not None:
@@ -779,14 +812,6 @@ class Wire:
                 continue
 
             self.held.append(line)
-
-    @staticmethod
-    def _is_request(line, rid):
-        try:
-            message = json.loads(line)
-        except ValueError:
-            return False
-        return isinstance(message, dict) and "method" in message and message.get("id") == rid
 
 
 def serve(runtime: Runtime):
@@ -823,7 +848,10 @@ def serve(runtime: Runtime):
         except ValueError:
             reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
         else:
-            replies = [safely(runtime, m, session) for m in message] if isinstance(message, list) else [safely(runtime, message, session)]
+            # One at a time and asked about just before, since serving one call
+            # can wait on the user, and a later call in the same batch can be
+            # cancelled meanwhile.
+            replies = [safely(runtime, m, session) for m in (message if isinstance(message, list) else [message]) if not wire.skips(m)]
             replies = [r for r in replies if r is not None]
             if not replies:
                 continue

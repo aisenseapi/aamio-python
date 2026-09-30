@@ -334,6 +334,54 @@ def test_a_request_kept_for_later_and_cancelled_meanwhile_is_not_served(monkeypa
     assert replies[2]["result"]["structuredContent"]["action"] == "decline"
 
 
+def test_a_call_cancelled_inside_a_batch_that_came_during_the_wait_is_not_served(monkeypatch):
+    """A review of 30 September 2026: the batch was kept as one line, and the call in it went ahead."""
+    service, a, b = pair()
+    batch = [
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "aamio_open_channel", "arguments": {"label": "cancelled", "ttl": 120}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "ping"},
+    ]
+    lines = [opening(), legacy_call(), batch, {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 3}}, answering({"action": "decline"})]
+
+    replies = served(a, lines, monkeypatch)
+
+    assert [r.get("id") for r in replies[:3]] == [1, "aamio-1", 2], replies
+    assert len(replies) == 4 and [r.get("id") for r in replies[3]] == [4], "only the ping of the batch is answered"
+    assert "cancelled" not in a.channels, "the cancelled call opened nothing"
+
+
+def test_a_call_cancelled_later_in_the_batch_being_served_is_not_served(monkeypatch):
+    """The wait interrupts a batch: the call after the one that waits is cancelled meanwhile."""
+    service, a, b = pair()
+    batch = [
+        legacy_call(),
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "aamio_open_channel", "arguments": {"label": "cancelled", "ttl": 120}}},
+    ]
+    lines = [opening(), batch, {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 3}}, answering({"action": "decline"})]
+
+    replies = served(a, lines, monkeypatch)
+
+    assert [r.get("id") for r in replies[:2]] == [1, "aamio-1"], replies
+    assert len(replies) == 3 and [r.get("id") for r in replies[2]] == [2], replies[2:]
+    assert "cancelled" not in a.channels
+
+
+def test_a_cancellation_does_not_outlive_the_backlog_it_came_with(monkeypatch):
+    """A cancellation for a call nobody sent stops nothing that comes after what waited has been served."""
+    service, a, b = pair()
+    lines = [
+        opening(),
+        legacy_call(),
+        {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 9}},
+        answering({"action": "decline"}),
+        {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "aamio_partners", "arguments": {}}},
+    ]
+
+    replies = served(a, lines, monkeypatch)
+
+    assert [r.get("id") for r in replies] == [1, "aamio-1", 2, 9], replies
+
+
 def test_input_that_ends_during_the_wait_answers_nothing_and_ends_the_server(monkeypatch):
     service, a, b = pair()
 

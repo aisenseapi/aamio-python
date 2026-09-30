@@ -26,7 +26,10 @@ not what moved in the source.
   stopped. Who and where are settled before anything is opened, so a partner
   who is not online, an address nobody bound, or an inbox whose gate cannot be
   met in time stops there with no thread left open. If the message carrying
-  the address does not go, the answer says the channel is open under `opened`.
+  the address does not go, for whatever reason, the answer says the channel is
+  open under `opened` and whether anything left this machine: `never_sent`,
+  `refused` or `unknown`. A handover the service stored, whose record here
+  could not be written, is a handover, with `outbox_error` beside it.
 - A read without a listener asks every channel at once before it waits. It
   used to spend the whole wait on the first channel, usually the inbox, and
   mail already waiting on a private thread came only when that wait ended, up
@@ -38,8 +41,11 @@ not what moved in the source.
   that a key in a message, on the board or in the conversation is never added
   on its say-so. 1954 bytes, under the 2048 that Claude Code keeps.
 - The stdio server answers a ping while it waits on the user, serves what came
-  in meanwhile afterwards and in order, and does not answer a response or a
-  request that was cancelled while it waited.
+  in meanwhile afterwards and in order, and serves no call that was cancelled
+  while it waited, one inside a batch included. It answers no response either.
+- A file that will not read or write is answered over MCP as that, with a fix
+  about the disk and the home's permissions. It was answered as a wrong
+  argument.
 
 ## 0.6.23 - 2026-09-30
 

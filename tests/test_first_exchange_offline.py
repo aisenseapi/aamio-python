@@ -32,7 +32,7 @@ sys.path.insert(0, "tests")
 
 from aamio import mcp_server
 from aamio.crypto import Keys, key_hash
-from aamio.runtime import Runtime
+from aamio.runtime import Runtime, outbox_outcome
 from test_conversation_trace import answer_with, pair, read_all, runtime_for
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -175,6 +175,82 @@ def test_a_handover_that_does_not_land_says_the_channel_is_open():
     assert said["operation"] == "open_channel" and said["outcome"] == "refused" and said["opened"]["label"] == "tender"
     assert said["fix"].startswith("The channel tender is open and listed by aamio_channels: only the message carrying its address did not go.")
     assert "tender" in a.channels and said["opened"]["w"] in service.threads
+
+
+def test_a_handover_that_fails_before_anything_leaves_says_the_channel_is_open_and_nothing_went():
+    """A review of 30 September 2026: a file that would not write left the open channel out of the answer,
+    and the fix told the caller to check its arguments."""
+    service, a, b = pair()
+
+    def no_room(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    a._outbox_add = no_room
+    said = call(a, "aamio_open_channel", {"label": "partial", "ttl": 120, "to": "b"})["structuredContent"]
+
+    assert said["outcome"] == "never_sent" and said["error_code"] == "send_never_sent" and said["operation"] == "open_channel"
+    assert said["opened"]["label"] == "partial" and "partial" in a.channels and said["opened"]["w"] in service.threads
+    assert said["fix"].startswith("The channel partial is open and listed by aamio_channels")
+    assert "Close it with aamio_close_channel" in said["fix"] and "Check each argument" not in said["fix"]
+    assert "No space left on device" in said["error"] and said["message_id"] is None
+    assert service.threads[b.channels["inbox"].w]["messages"] == [], "and nothing reached the partner"
+
+
+def test_a_record_that_fails_before_the_post_stops_the_message_and_says_so():
+    """The entry exists and was never posted: it is settled as never sent, so pending and retry agree with the answer."""
+    service, a, b = pair()
+    real = a.save_outbox
+
+    def fails_once_sending():
+        if any(entry.get("status") == "sending" and entry.get("attempts") for entry in a.outbox.values()):
+            raise OSError(13, "Permission denied")
+        return real()
+
+    a.save_outbox = fails_once_sending
+    said = call(a, "aamio_open_channel", {"label": "partial", "ttl": 120, "to": "b"})["structuredContent"]
+    a.save_outbox = real
+
+    entry = a.outbox[said["message_id"]]
+    assert said["outcome"] == "never_sent" and said["opened"]["label"] == "partial"
+    assert entry["status"] == "stopped" and outbox_outcome(entry) == "never_sent" and not entry.get("posting")
+    assert a.outbox_pending() == [] and a.outbox_retry(said["message_id"]) == [], "nothing unsettled to show, nothing to send again"
+    assert service.threads[b.channels["inbox"].w]["messages"] == []
+
+
+def test_a_handover_that_landed_and_could_not_be_recorded_is_a_handover():
+    """The service stored it: the address went, and only the record here is missing, which the answer says."""
+    service, a, b = pair()
+    real = a.save_outbox
+
+    def fails_after_delivery():
+        if any(entry.get("status") == "delivered" for entry in a.outbox.values()):
+            raise OSError(28, "No space left on device")
+        return real()
+
+    a.save_outbox = fails_after_delivery
+    answer = call(a, "aamio_open_channel", {"label": "landed", "ttl": 120, "to": "b"})
+    a.save_outbox = real
+
+    assert answer["isError"] is False, answer
+    assert answer["structuredContent"]["address_sent_to"] == b.channels["inbox"].w
+    assert "No space left on device" in answer["structuredContent"]["outbox_error"]
+    assert [e["body"].get("channel") for e in read_all(b)] == [answer["structuredContent"]["w"]]
+
+
+def test_a_handover_whose_post_broke_on_the_way_is_unknown_and_keeps_its_id():
+    service, a, b = pair()
+    real = a.client.post
+
+    def stored_then_broke(*args, **kwargs):
+        real(*args, **kwargs)
+        raise ConnectionResetError(10054, "reset by the remote host")
+
+    a.client.post = stored_then_broke
+    said = call(a, "aamio_open_channel", {"label": "unsure", "ttl": 120, "to": "b"})["structuredContent"]
+
+    assert said["outcome"] == "unknown" and said["error_code"] == "send_unknown" and said["opened"]["label"] == "unsure"
+    assert said["message_id"] in a.outbox and a.outbox[said["message_id"]].get("posting") is True
+    assert "aamio_outbox_retry" in said["fix"] and said["retryable"] is None
 
 
 def test_without_a_listener_every_channel_is_asked_before_the_wait():

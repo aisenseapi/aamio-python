@@ -177,6 +177,12 @@ def send_advice(outcome, status):
     True   the message is fine; the moment was not
     None   it cannot be decided from what we know
     """
+    if outcome == "never_sent":
+        return False, (
+            "Nothing left this machine for this message, so it was not delivered and will not be: the error says what "
+            "stopped it. Put that right, then send it as a new message. There is nothing to retry."
+        )
+
     if outcome == "unknown":
         return None, (
             "No answer came back, so this message may already have been delivered. Keep its message_id. "
@@ -1541,8 +1547,8 @@ class Runtime:
         # two seconds, and that first poll reads from the start, so an answer
         # to the handover that comes sooner waits for it and is not lost.
         reply_to, key = handover
-        self._hand_over(channel, key, reply_to, note)
-        opened.update({"handed_to": self.name_for_key(key) or key, "address_sent_to": reply_to})
+        told = self._hand_over(channel, key, reply_to, note)
+        opened.update({"handed_to": self.name_for_key(key) or key, "address_sent_to": reply_to}, **told)
 
         return opened
 
@@ -1565,28 +1571,54 @@ class Runtime:
             )
 
     def _hand_over(self, channel, key, reply_to, note=None):
-        """The channel's address sent to reply_to, sealed to key and signed, through the outbox like any send."""
-        body = {"channel": channel.w, "expire_at": channel.expire_at}
-        if note:
-            body["text"] = str(note)
-        body.update(self._conversation(key))
-        envelope = self.keys.seal(key, json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        """The channel's address sent to reply_to, sealed to key and signed, through the outbox like any send.
+
+        Returns what the caller's answer should carry besides: nothing, or that
+        the address went and the record of it did not reach the disk.
+
+        Whatever stops it, the channel is open by now, and the failure says so
+        and says whether anything left this machine. Only a refusal and a gate
+        used to: a file that would not write, found in a review of 30 September
+        2026, left an open channel out of the answer.
+        """
         opened = {"label": channel.label, "w": channel.w, "expire_at": channel.expire_at}
-        # The message that carries the address is a send, and goes through the
-        # outbox like one. It was posted directly, and a refusal was a
-        # RuntimeError: a traceback on the command line, with the channel open
-        # and the address delivered to nobody.
-        entry = self._outbox_add(reply_to, key, envelope, body)
+        entry = None
         try:
+            body = {"channel": channel.w, "expire_at": channel.expire_at}
+            if note:
+                body["text"] = str(note)
+            body.update(self._conversation(key))
+            envelope = self.keys.seal(key, json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            # The message that carries the address is a send, and goes through
+            # the outbox like one. It was posted directly, and a refusal was a
+            # RuntimeError: a traceback on the command line, with the channel
+            # open and the address delivered to nobody.
+            entry = self._outbox_add(reply_to, key, envelope, body)
             status, handed = self._deliver(entry)
         except GateStop as stop:
             # The channel is open whatever stopped the message, and the caller
             # has to hear that as well as why.
             stop.opened = opened
             raise
+        except Exception as error:
+            why = "%s: %s" % (error.__class__.__name__, error)
+            # posting is set in the moment before the bytes leave, so without it
+            # nothing did, and the entry says so, as a stop before the post does.
+            if entry is None or not entry.get("posting"):
+                if entry is not None:
+                    entry["status"] = "unknown" if entry.get("ever_open") else "stopped"
+                    entry["error"] = why
+                raise SendFailed("never_sent", entry["id"] if entry is not None else None, 0, why, opened=opened) from error
+            settled = outbox_outcome(entry)
+            if settled == "delivered":
+                # The service stored it, and only the record here did not reach the disk.
+                return {"outbox_error": why}
+            # A refusal the service answered settles it, and anything else that
+            # left may have landed.
+            raise SendFailed("refused" if settled == "refused" else "unknown", entry["id"], entry.get("last_status") or 0, why, opened=opened) from error
         if status != 201:
             raise SendFailed(entry["status"], entry["id"], status, handed, opened=opened)
-        return handed
+        return {}
 
     def close_channel(self, label):
         channel = self.channels.get(label)
@@ -2035,9 +2067,8 @@ class Runtime:
         self.save_state()
         if self.listener is not None:
             self._start_poller(channel)
-        if reply_to:
-            self._hand_over(channel, key, reply_to, note)
-        return {"label": label, "w": w, "expire_at": channel.expire_at, "with": self.name_for_key(key) or key, "address_sent_to": reply_to}
+        told = self._hand_over(channel, key, reply_to, note) if reply_to else {}
+        return dict({"label": label, "w": w, "expire_at": channel.expire_at, "with": self.name_for_key(key) or key, "address_sent_to": reply_to}, **told)
 
     # ----------------------------------------------------------- lookup --
 
