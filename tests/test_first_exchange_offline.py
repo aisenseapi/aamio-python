@@ -177,16 +177,29 @@ def test_a_handover_that_does_not_land_says_the_channel_is_open():
     assert "tender" in a.channels and said["opened"]["w"] in service.threads
 
 
+def reopened(service, runtime):
+    """The same home in a new process, as after a restart."""
+    runtime.close()
+    return runtime_for(service, "again", home=runtime.home)
+
+
 def test_a_handover_that_fails_before_anything_leaves_says_the_channel_is_open_and_nothing_went():
     """A review of 30 September 2026: a file that would not write left the open channel out of the answer,
-    and the fix told the caller to check its arguments."""
-    service, a, b = pair()
+    and the fix told the caller to check its arguments.
 
-    def no_room(*args, **kwargs):
+    The outbox is the real one, and only its file will not write, so the entry is made and then
+    cannot be kept. It is taken out again: left in memory, the next save that worked wrote it as a
+    send in flight, and a restart made it unknown and offered to send it again (the second look,
+    the same day)."""
+    service, a, b = pair()
+    real = a.save_outbox
+
+    def no_room():
         raise OSError(28, "No space left on device")
 
-    a._outbox_add = no_room
+    a.save_outbox = no_room
     said = call(a, "aamio_open_channel", {"label": "partial", "ttl": 120, "to": "b"})["structuredContent"]
+    a.save_outbox = real
 
     assert said["outcome"] == "never_sent" and said["error_code"] == "send_never_sent" and said["operation"] == "open_channel"
     assert said["opened"]["label"] == "partial" and "partial" in a.channels and said["opened"]["w"] in service.threads
@@ -194,6 +207,30 @@ def test_a_handover_that_fails_before_anything_leaves_says_the_channel_is_open_a
     assert "Close it with aamio_close_channel" in said["fix"] and "Check each argument" not in said["fix"]
     assert "No space left on device" in said["error"] and said["message_id"] is None
     assert service.threads[b.channels["inbox"].w]["messages"] == [], "and nothing reached the partner"
+    assert a.outbox == {} and a.outbox_pending() == [], "no entry is left behind for a message nothing was sent for"
+
+    # The advice followed: the channel closed and a new one handed over, which saves the outbox.
+    call(a, "aamio_close_channel", {"label": "partial"})
+    assert call(a, "aamio_open_channel", {"label": "again", "ttl": 120, "to": "b"})["isError"] is False
+    after = reopened(service, a)
+    assert after.outbox_pending() == [] and len(after.outbox) == 1, "after a restart only the handover that went is there"
+
+
+def test_a_send_whose_outbox_will_not_write_leaves_nothing_to_send_later():
+    """The same for an ordinary send, which shares the outbox: the caller hears an error, and nothing waits to go out."""
+    service, a, b = pair()
+    real = a.save_outbox
+
+    def no_room():
+        raise OSError(28, "No space left on device")
+
+    a.save_outbox = no_room
+    said = call(a, "aamio_send", {"to": "b", "text": "not today"})
+    a.save_outbox = real
+
+    assert said["isError"] is True and "disk" in said["structuredContent"]["fix"]
+    assert a.outbox == {} and service.threads[b.channels["inbox"].w]["messages"] == []
+    assert reopened(service, a).outbox_pending() == []
 
 
 def test_a_record_that_fails_before_the_post_stops_the_message_and_says_so():
@@ -215,6 +252,50 @@ def test_a_record_that_fails_before_the_post_stops_the_message_and_says_so():
     assert entry["status"] == "stopped" and outbox_outcome(entry) == "never_sent" and not entry.get("posting")
     assert a.outbox_pending() == [] and a.outbox_retry(said["message_id"]) == [], "nothing unsettled to show, nothing to send again"
     assert service.threads[b.channels["inbox"].w]["messages"] == []
+
+    # Written by the next save that works, it stays settled across a restart.
+    a.save_outbox()
+    after = reopened(service, a)
+    assert outbox_outcome(after.outbox[said["message_id"]]) == "never_sent" and after.outbox_pending() == []
+
+
+def test_a_send_whose_record_fails_just_before_the_post_is_stopped_and_stays_so():
+    """The entry was written, and the save before the post was not: nothing left, and nothing waits to go."""
+    service, a, b = pair()
+    real = a.save_outbox
+
+    def fails_once_sending():
+        if any(entry.get("status") == "sending" and entry.get("attempts") for entry in a.outbox.values()):
+            raise OSError(13, "Permission denied")
+        return real()
+
+    a.save_outbox = fails_once_sending
+    said = call(a, "aamio_send", {"to": "b", "text": "not today"})
+    a.save_outbox = real
+
+    [entry] = a.outbox.values()
+    assert said["isError"] is True and entry["status"] == "stopped" and outbox_outcome(entry) == "never_sent"
+    assert a.outbox_pending() == [] and service.threads[b.channels["inbox"].w]["messages"] == []
+    a.save_outbox()
+    assert reopened(service, a).outbox_pending() == [], "and a restart does not offer to send it"
+
+
+def test_a_note_too_long_to_carry_the_address_opens_nothing():
+    """The second look of 30 September 2026: a note of 70 000 characters opened the channel, and the message
+    carrying the address could not be sent. Asked before anything is opened now."""
+    service, a, b = pair()
+    threads = len(service.threads)
+
+    said = call(a, "aamio_open_channel", {"label": "long", "ttl": 120, "to": "b", "note": "x" * 70000})
+
+    assert said["isError"] is True and "no channel was opened" in said["structuredContent"]["error"]
+    assert "65536" in said["structuredContent"]["error"] and "Shorten the note" in said["structuredContent"]["error"]
+    assert len(service.threads) == threads and "long" not in a.channels and a.outbox == {}
+
+    # A note that fits goes, with the address beside it.
+    fits = call(a, "aamio_open_channel", {"label": "short", "ttl": 120, "to": "b", "note": "x" * 40000})
+    assert fits["isError"] is False, fits
+    assert [e["body"].get("text") for e in read_all(b)] == ["x" * 40000]
 
 
 def test_a_handover_that_landed_and_could_not_be_recorded_is_a_handover():

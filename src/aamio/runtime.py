@@ -37,6 +37,10 @@ ANSWER_MARGIN = 600
 PRESENCE_TTL = 120
 PRESENCE_REFRESH = 60
 RENEW_BEFORE = 180
+# The most one message may be, as the service takes it. The service refuses
+# more with 413; this copy is only for asking before a channel is opened for a
+# message that could not carry its address.
+MESSAGE_MAX_BYTES = 65536
 
 
 def home_dir() -> str:
@@ -1523,6 +1527,7 @@ class Runtime:
             # left open behind it.
             reply_to, key, _ = self._recipient(to)
             self._can_hand_over(reply_to)
+            self._handover_fits(key, int(ttl), note)
             if key not in keys:
                 keys.append(key)
             handover = (reply_to, key)
@@ -1570,6 +1575,32 @@ class Runtime:
                 "Hand the channel over from the command line, where the work has the time it needs: aamio board channel KEY --reply-to ADDRESS.",
             )
 
+    def _invitation(self, key, w, expire_at, note=None):
+        """The body that carries a channel's address, and the envelope it is sealed in."""
+        body = {"channel": w, "expire_at": expire_at}
+        if note:
+            body["text"] = str(note)
+        body.update(self._conversation(key))
+        return body, self.keys.seal(key, json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+    def _handover_fits(self, key, ttl, note=None):
+        """Whether the message that will carry a channel's address fits in one message, asked before the channel is opened.
+
+        The address and the expiry are not known yet. Both have a fixed length,
+        so a stand-in of the same length seals to the same size. A note too long
+        for it used to open the channel first, and the message carrying the
+        address was then refused, or counted in aamio-php as one that might
+        have landed (a review, 30 September 2026).
+        """
+        _, envelope = self._invitation(key, "a" * 20, int(time.time()) + int(ttl), note)
+        size = len(envelope.encode("utf-8"))
+
+        if size > MESSAGE_MAX_BYTES:
+            raise ValueError(
+                "with this note the message carrying the address would be %d bytes, and a message is at most %d, so no channel was opened. "
+                "Shorten the note, and send the rest on the channel once it is open." % (size, MESSAGE_MAX_BYTES)
+            )
+
     def _hand_over(self, channel, key, reply_to, note=None):
         """The channel's address sent to reply_to, sealed to key and signed, through the outbox like any send.
 
@@ -1584,11 +1615,7 @@ class Runtime:
         opened = {"label": channel.label, "w": channel.w, "expire_at": channel.expire_at}
         entry = None
         try:
-            body = {"channel": channel.w, "expire_at": channel.expire_at}
-            if note:
-                body["text"] = str(note)
-            body.update(self._conversation(key))
-            envelope = self.keys.seal(key, json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            body, envelope = self._invitation(key, channel.w, channel.expire_at, note)
             # The message that carries the address is a send, and goes through
             # the outbox like one. It was posted directly, and a refusal was a
             # RuntimeError: a traceback on the command line, with the channel
@@ -2058,6 +2085,8 @@ class Runtime:
         label = label or ("with-" + key_hash(key)[:8])
         if label in self.channels:
             label = "%s-%d" % (label, int(time.time()))
+        if reply_to:
+            self._handover_fits(key, int(ttl), note)
         status, data, read_key, w = self.client.open_thread(int(ttl), [key])
         if status != 201:
             raise RuntimeError("could not open channel: %s %s" % (status, data))
@@ -2261,8 +2290,22 @@ class Runtime:
             "tracked": True,
         }
         with self.lock:
+            earlier = self.outbox.get(entry["id"])
             self.outbox[entry["id"]] = entry
-        self.save_outbox()
+        try:
+            self.save_outbox()
+        except Exception:
+            # An entry that could not be written is taken out again: nothing was
+            # sent for it, and left in memory the next save that works wrote it as
+            # a send in flight, which a restart made unknown and offered to send
+            # again. A review of 30 September 2026.
+            with self.lock:
+                if self.outbox.get(entry["id"]) is entry:
+                    if earlier is None:
+                        del self.outbox[entry["id"]]
+                    else:
+                        self.outbox[entry["id"]] = earlier
+            raise
 
         return entry
 
@@ -2441,7 +2484,18 @@ class Runtime:
         """Send the stored bytes once, and record what the answer allows us to claim."""
         entry["attempts"] += 1
         entry["status"] = "sending"
-        self.save_outbox()
+        try:
+            self.save_outbox()
+        except Exception as error:
+            # Nothing has left this machine, and nothing will: the send stops here
+            # with its reason, and the entry says so, as a stop at a gate does. As
+            # sending, the next save that works wrote it as a send in flight, and
+            # a restart offered to send it again. Unless an earlier attempt is
+            # still open: a stop now settles this decision, not that one.
+            entry["status"] = "unknown" if entry.get("ever_open") else "stopped"
+            entry["error"] = "%s: %s" % (error.__class__.__name__, error)
+            entry["last_at"] = int(time.time())
+            raise
         notes = []
 
         try:
