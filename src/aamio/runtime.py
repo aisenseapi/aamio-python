@@ -216,6 +216,11 @@ def send_advice(outcome, status):
     )
 
 
+def refused_once(reason):
+    """A stop's reason told of a message that went once and was refused, where it was written for one that never left."""
+    return reason.replace("nothing was sent", "it was not sent again").replace("Nothing was sent", "It was not sent again")
+
+
 class SendFailed(RuntimeError):
     """A send that did not end in a stored message.
 
@@ -2274,6 +2279,16 @@ class Runtime:
 
     def _outbox_add(self, w, key, envelope, body, replaces=None):
         """One durable entry per logical message, written before the first attempt."""
+        size = len(envelope.encode("utf-8"))
+
+        # Every send passes here, so a message too large for any inbox stops here,
+        # before an entry exists, a byte leaves or a gate is worked for. aamio-php
+        # stored one and its client refused it afterwards, which left a message
+        # that could never go looking as if it might have (a health check of 30
+        # September 2026); here it went out and came back 413.
+        if size > MESSAGE_MAX_BYTES:
+            raise ValueError("this message is %d bytes sealed, and a message is at most %d, so nothing was stored or sent. Send a URL and a hash instead." % (size, MESSAGE_MAX_BYTES))
+
         entry = {
             "id": "m-" + sha256hex("%s|%s|%s" % (self.keys.public, w, envelope))[:16],
             "w": w,
@@ -2406,11 +2421,19 @@ class Runtime:
             left = result.get("seconds_left") if isinstance(result.get("seconds_left"), int) else None
             if left is not None:
                 self._gate_clock()[w] = (left, time.monotonic())
-            asked = gate_plan(result["gate"], w, self.host, left)
-            notes.extend(note for note in asked["notes"] if note not in notes)
+            try:
+                asked = gate_plan(result["gate"], w, self.host, left)
+                notes.extend(note for note in asked["notes"] if note not in notes)
 
-            if asked["bits"] and asked["bits"] != advice["bits"]:
-                status, result = self._post_with_work(w, body_text, signature, asked["bits"], left, entry)
+                if asked["bits"] and asked["bits"] != advice["bits"]:
+                    status, result = self._post_with_work(w, body_text, signature, asked["bits"], left, entry)
+            except GateStop as stop:
+                # It went once, and the inbox refused it with 428. Not sending it
+                # again leaves that refusal as the answer, with why it was not met.
+                # A stop here used to read as one before anything left, so the
+                # message was called never sent, or left open to a retry, and it
+                # had gone (a health check of 30 September 2026).
+                result = dict(result, fix=refused_once(stop.reason))
 
         return status, result
 

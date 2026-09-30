@@ -45,6 +45,12 @@ not what moved in the source.
 - The stdio server answers a ping while it waits on the user, serves what came
   in meanwhile afterwards and in order, and serves no call that was cancelled
   while it waited, one inside a batch included. It answers no response either.
+- A message too large for any inbox is refused before it is stored or sent,
+  with its sealed size. It went out and came back 413.
+- A message that went once and was refused with 428 is told as refused, status
+  428, when this client does not meet the gate the refusal names, with why in
+  `fix`. It was left open to a retry, with a text saying nothing was sent. An
+  earlier attempt that got no answer stays open whatever the 428 after it.
 - A send whose outbox entry could not be written is taken out of the outbox
   again, and one whose save just before the post failed is settled as never
   sent. Either used to wait in memory as a send in flight until the next save
