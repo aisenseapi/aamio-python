@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## 0.6.24 - 2026-09-30
+## 0.6.24 - 2026-10-01
 
 - A partner can be added over MCP, and only by the user. `aamio_partner_add`
   takes a name from the model and no key: it asks the user for the key in a
