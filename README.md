@@ -86,6 +86,7 @@ The server holds the home for as long as it runs, so the command line cannot cha
 | `~/.aamio/key` | your 32-byte seed, mode 600. Lose it and you make a new one and update the contract. |
 | `~/.aamio/partners.json` | names and public keys from the contract, mode 600 |
 | `~/.aamio/scopes.json` | your scopes by name, with the scope key when you can read, mode 600. The model only ever sees the names |
+| `~/.aamio/domains.json` | the websites this runtime may read a key list from, which only you add to, mode 600 |
 | `~/.aamio/state.json` | your open channels with read keys, mode 600, the addresses partners were last seen at, and the hash of every message each channel has already handed you |
 | `~/.aamio/outbox.json` | every message sent, with the exact bytes, until its fate is settled, mode 600 |
 | `~/.aamio/effects.json` | operation keys you have recorded as carried out, mode 600 |
@@ -274,6 +275,25 @@ aamio channel open tender --ttl 600 --allow "Nordlys,Polar,Kabelhuset"
 opens a thread that only those partners can write to and that expires in ten minutes. Take `receipt --channel tender` when the deadline passes. aamio refuses late writes itself.
 
 The address alone is enough for whoever writes to it directly, with a client of their own. It is not enough for a partner's runtime, which sends only to an address it knows the key behind, and learns that from presence, or from `reply_to` or `channel` in a verified message. An address pasted into the text of a message, or put in `data`, binds nothing, and the partner's first send to it stops with "no key known for address".
+
+## Checking a key against a website
+
+A website can list the public keys of its own agents at `/.well-known/aamio-keys.json`, and this runtime can check a partner's key, or the key behind a message it verified, against that list. In the source and not yet in the package.
+
+```bash
+aamio domain allow example.org                  # put a website on this runtime's list, from your own records
+aamio domain check example.org --partner NAME   # read the list once and compare
+aamio domain list                               # the websites this runtime may read
+aamio domain forget example.org
+aamio domain file --name support                # your public key as the file a site publishes
+aamio domain validate aamio-keys.json           # is this a valid list: reads one file, no domain and no home
+```
+
+`check` exits 0 for listed, 3 for not listed, 4 for no list at that address, 5 for no answer that could be read, and 2 for an invalid list or a check refused before anything was read. `--name LABEL` asks for one label on the list. `listed` says that this exact website listed this key when it was read. It is not an identity and it permits nothing, it adds no partner and it changes no allowlist. `not_listed` is no evidence of fraud: a key rotated out looks the same.
+
+The website comes from you and the key from this machine. A check of a website that is not on your list stops before anything is looked up, and a key is never handed in: it comes from the address book or from a signature this process checked itself, so a message cannot choose what is compared. `aamio_domain_check` does the same over MCP, with a domain and either a partner or the sha256 of a message this server read. For a website that is not on the list it asks you in a form, and you type the domain yourself, so a name that only looks right stops at what you type. What a server verified is in its memory and a message is handed over once, so after a restart check a later message from the same sender.
+
+A read goes only to public addresses, connects to the address it checked, follows no redirect and sends nothing about you, and takes at most five seconds and 16 KiB. At most two checks run at once and twenty start per minute in one process. `AAMIO_DOMAIN_DENY` adds networks that are never read, comma separated. If a certificate cannot be verified on your machine but the site opens in a browser, the machine's store may lack the root: `SSL_CERT_FILE` can point Python at a CA bundle, and verification is never switched off.
 
 ## Moving a conversation to a private thread
 
