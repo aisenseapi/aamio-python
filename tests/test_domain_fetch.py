@@ -408,6 +408,14 @@ def test_the_lookup_keeps_each_address_once_and_in_order(monkeypatch):
     assert domain_fetch._resolve("example.org", 1.0) == ["2606:4700:4700::1111", PUBLIC]
 
 
+def end_lookups(release):
+    """Let every lookup a test left hanging finish, so the next test finds all of them free."""
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name == "aamio-domain-keys-lookup":
+            thread.join(5)
+
+
 def test_a_lookup_that_hangs_is_given_up_on_time_and_never_keeps_python_alive(monkeypatch):
     release = threading.Event()
 
@@ -424,7 +432,7 @@ def test_a_lookup_that_hangs_is_given_up_on_time_and_never_keeps_python_alive(mo
         lingering = [thread for thread in threading.enumerate() if thread.name == "aamio-domain-keys-lookup"]
         assert lingering and all(thread.daemon for thread in lingering), "a lookup left running would hold Python open at exit"
     finally:
-        release.set()
+        end_lookups(release)
 
 
 def test_a_lookup_that_fails_says_so(monkeypatch):
@@ -435,6 +443,77 @@ def test_a_lookup_that_fails_says_so(monkeypatch):
 
     with pytest.raises(socket.gaierror):
         domain_fetch._resolve("example.org", 1.0)
+
+
+def test_lookups_that_never_end_are_capped_until_they_really_end(monkeypatch):
+    release = threading.Event()
+    started = []
+
+    def hang(*args):
+        started.append(args[0])
+        release.wait(10)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC, 443))]
+
+    monkeypatch.setattr(domain_fetch.socket, "getaddrinfo", hang)
+    try:
+        for _ in range(domain_fetch.MAX_LOOKUPS):
+            with pytest.raises(TimeoutError):
+                domain_fetch._resolve("example.org", 0.02)
+
+        with pytest.raises(domain_fetch._Refused) as busy:
+            domain_fetch._resolve("example.org", 0.02)
+        assert busy.value.reason == "dns_busy" and len(started) <= domain_fetch.MAX_LOOKUPS
+
+        result = check("example.org", KEY, deadline_seconds=0.02, now=lambda: WHEN)
+        assert result["status"] == "unreachable" and result["reason"] == "dns_busy"
+    finally:
+        end_lookups(release)
+
+    assert domain_fetch._resolve("example.org", 1.0) == [PUBLIC], "a lookup that ended gave its place back"
+
+
+def test_building_the_tls_context_counts_against_the_share(monkeypatch):
+    now = [0.0]
+    seen = {}
+
+    class Context:
+        def wrap_socket(self, raw, server_hostname):
+            return "tls"
+
+    def slow_context():
+        now[0] += 0.4
+        return Context()
+
+    def slow_connection(address, timeout):
+        seen["connect_timeout"] = timeout
+        now[0] += 0.4
+        return RawSocket(seen)
+
+    monkeypatch.setattr(domain_fetch.ssl, "create_default_context", slow_context)
+    monkeypatch.setattr(domain_fetch.socket, "create_connection", slow_connection)
+
+    assert domain_fetch._open(PUBLIC, "example.org", 1.0, clock=lambda: now[0]) == "tls"
+    assert seen == {"connect_timeout": pytest.approx(0.6), "timeouts": [pytest.approx(0.2)]}
+
+
+def test_a_tls_context_that_took_the_whole_share_opens_no_connection(monkeypatch):
+    now = [0.0]
+
+    class Context:
+        pass
+
+    def slow_context():
+        now[0] += 1.5
+        return Context()
+
+    def connection(address, timeout):
+        raise AssertionError("a connection was opened with no time left")
+
+    monkeypatch.setattr(domain_fetch.ssl, "create_default_context", slow_context)
+    monkeypatch.setattr(domain_fetch.socket, "create_connection", connection)
+
+    with pytest.raises(TimeoutError):
+        domain_fetch._open(PUBLIC, "example.org", 1.0, clock=lambda: now[0])
 
 
 def test_a_certificate_that_does_not_fit_stops_the_read():

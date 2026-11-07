@@ -24,6 +24,8 @@ that host, only once and only for a few seconds.
   as they arrive rather than as the server announces them. Each address tried
   gets an even share of the time left, so one that never answers cannot use
   up the time of the next.
+- At most four lookups at once, each counted until it has really ended, since
+  a lookup cannot be stopped. Past that a check answers unreachable, dns_busy.
 
 What comes back is a dated observation, never a decision:
 
@@ -82,12 +84,30 @@ def public_address(text, deny=()) -> bool:
     return not any(address.version == net.version and address in net for net in DENIED_NETWORKS + tuple(deny))
 
 
+class _Refused(Exception):
+    def __init__(self, status, reason):
+        super().__init__(reason)
+        self.status = status
+        self.reason = reason
+
+
+# At most this many lookups at once, each counted until it has really ended and
+# not only until its caller stopped waiting. getaddrinfo cannot be stopped, so
+# without this a resolver that never answers would leave a thread behind for
+# every check (a review of 7 November 2026).
+MAX_LOOKUPS = 4
+_LOOKUPS = threading.BoundedSemaphore(MAX_LOOKUPS)
+
+
 def _resolve(domain, remaining):
     # getaddrinfo takes no timeout, so it runs in a thread of its own beside the
     # clock, which keeps counting. A lookup still running when the time is up
     # is left to finish on its own and its answer is never used. The thread is
     # a daemon: a pool's worker is waited for when Python exits, and a lookup
     # that hangs would keep the process alive after everything else was done.
+    limit = time.monotonic() + remaining
+    if not _LOOKUPS.acquire(timeout=max(remaining, 0.001)):
+        raise _Refused("unreachable", "dns_busy")
     box = {}
     done = threading.Event()
 
@@ -97,10 +117,15 @@ def _resolve(domain, remaining):
         except Exception as error:
             box["error"] = error
         finally:
+            _LOOKUPS.release()
             done.set()
 
-    threading.Thread(target=lookup, name="aamio-domain-keys-lookup", daemon=True).start()
-    if not done.wait(max(remaining, 0.001)):
+    try:
+        threading.Thread(target=lookup, name="aamio-domain-keys-lookup", daemon=True).start()
+    except BaseException:
+        _LOOKUPS.release()
+        raise
+    if not done.wait(max(limit - time.monotonic(), 0.001)):
         raise TimeoutError("the lookup took longer than the time left")
     if "error" in box:
         raise box["error"]
@@ -112,31 +137,29 @@ def _resolve(domain, remaining):
 
 
 def _open(address, domain, remaining, context=None, clock=time.monotonic):
-    # One limit for the connection and the handshake together. A socket's
-    # timeout counts each step from its own start, so the handshake gets what
-    # the connection left of the share, and not the whole share again.
+    # One limit for building the TLS context, the connection and the handshake
+    # together, read again before each step. A socket's timeout counts each step
+    # from its own start, so each step gets what the ones before it left, and
+    # not the whole share again (a review of 7 November 2026).
     limit = clock() + remaining
-    raw = socket.create_connection((address, PORT), timeout=max(remaining, 0.001))
+
+    def left():
+        time_left = limit - clock()
+        if time_left <= 0:
+            raise TimeoutError("no time left to open the connection")
+        return time_left
+
+    if context is None:
+        context = ssl.create_default_context()
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+    raw = socket.create_connection((address, PORT), timeout=left())
     try:
-        left = limit - clock()
-        if left <= 0:
-            raise TimeoutError("no time left for the handshake")
-        raw.settimeout(left)
-        if context is None:
-            context = ssl.create_default_context()
-            context.check_hostname = True
-            context.verify_mode = ssl.CERT_REQUIRED
+        raw.settimeout(left())
         return context.wrap_socket(raw, server_hostname=domain)
     except BaseException:
         raw.close()
         raise
-
-
-class _Refused(Exception):
-    def __init__(self, status, reason):
-        super().__init__(reason)
-        self.status = status
-        self.reason = reason
 
 
 def _read_response(connection, deadline, clock):
@@ -233,6 +256,8 @@ def check(domain, key, name=None, allowed=None, deny=(), context=None, resolve=N
     connect = connect or (lambda address, server, remaining: _open(address, server, remaining, context, clock))
     try:
         addresses = resolve(host, deadline - clock())
+    except _Refused as refused:
+        return answer(refused.status, refused.reason)
     except TimeoutError:
         return answer("unreachable", "timeout")
     except OSError:

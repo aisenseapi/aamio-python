@@ -21,8 +21,9 @@ not what moved in the source.
   443 at the fixed path only, public addresses only, where one private address
   among the answers refuses the whole read, a connection to the address that
   was checked with TLS for the domain, no proxy, cookie, redirect or retry, and
-  five seconds and 16 KiB of headers and of body. Nothing about the reader goes
-  out, and a result grants nothing. A machine whose certificate store lacks a
+  five seconds and 16 KiB of headers and of body. At most four lookups run at
+  once, each counted until it has really ended, since a lookup cannot be
+  stopped. Nothing about the reader goes out, and a result grants nothing. A machine whose certificate store lacks a
   root gets unreachable, tls; `check` takes a TLS context that verifies, such
   as one built from certifi, and refuses one that does not. The runtime, the
   command line and MCP do not call it yet. The addresses it may reach are
