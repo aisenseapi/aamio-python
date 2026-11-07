@@ -424,6 +424,8 @@ def test_help_and_bad_arguments_change_nothing(site, monkeypatch, tmp_path):
     assert code == 0 and "usage: aamio addon enable" in out and path.read_bytes() == before
     code, _, _ = main(["addon", "enable", "demo", "--bogus"], monkeypatch)
     assert code == 2 and path.read_bytes() == before
+    code, _, err = main(["addon", "disable", "demo", "--home"], monkeypatch)
+    assert code == 2 and "--home" in err and "expected one argument" in err and path.read_bytes() == before, "--home without a folder is not the default home"
 
     # Once the enabled add-on is broken, the shortcut past the loading is exactly `addon disable NAME`.
     (tmp_path / "site" / "demo_pkg.py").write_text("raise ImportError('no such library')\n", encoding="utf-8")
