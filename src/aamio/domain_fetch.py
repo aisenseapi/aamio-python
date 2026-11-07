@@ -187,7 +187,9 @@ def _read_response(connection, deadline, clock):
         raise _Refused("invalid", "header_limit")
     lines = head.decode("iso-8859-1").split("\r\n")
     parts = lines[0].split(" ", 2)
-    if len(parts) < 2 or not parts[0].startswith("HTTP/1.") or not parts[1].isdigit() or len(parts[1]) != 3:
+    # isascii too: isdigit says yes to a superscript two, which int() then refuses,
+    # and a hostile site would have made the read raise rather than answer.
+    if len(parts) < 2 or not parts[0].startswith("HTTP/1.") or not (parts[1].isascii() and parts[1].isdigit()) or len(parts[1]) != 3:
         raise _Refused("invalid", "not_http")
     status = int(parts[1])
     headers = {}

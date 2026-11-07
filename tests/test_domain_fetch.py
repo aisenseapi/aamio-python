@@ -205,6 +205,12 @@ def test_an_answer_that_is_not_http():
     assert run(b"SSH-2.0-OpenSSH\r\n\r\n")[0]["reason"] == "not_http"
 
 
+@pytest.mark.parametrize("status", [b"\xb2\xb2\xb2", b"abc", b"20", b"2000", b"+20", b"2 0"])
+def test_a_status_that_is_not_three_digits(status):
+    # A superscript two is a digit to isdigit and not to int.
+    assert run(b"HTTP/1.1 " + status + b" OK\r\n\r\n")[0]["reason"] == "not_http"
+
+
 def test_a_connection_closed_before_the_headers():
     result = run(b"HTTP/1.1 200 OK\r\nContent-Type: appl")[0]
 
