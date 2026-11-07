@@ -6,43 +6,46 @@ not what moved in the source.
 
 ## Unreleased
 
-- `aamio.domain_keys` reads and writes the domain key list, a file a website
-  can publish at `/.well-known/aamio-keys.json` to say which public aamio keys
-  are its own. It is the format only: a strict parser that refuses the whole
-  list for one bad entry, a match that says listed, not listed or invalid and
-  grants nothing, a generator that writes the same bytes every client writes,
-  and the syntax of a domain. It reads no domain; `python -m aamio.domain_keys
-  check` and `make` work on local files and say so in every answer. The shared
-  vectors are in `tests/domain_keys_vectors.json`.
-- `aamio.domain_fetch` reads that list from the domain itself, once, and says
-  what it found: listed, not listed, no list, unreachable or invalid, with the
-  time and a hash of the bytes compared. It is built for a domain that came
-  from a message, so the read cannot be turned on anyone else: HTTPS on port
-  443 at the fixed path only, public addresses only, where one private address
-  among the answers refuses the whole read, a connection to the address that
-  was checked with TLS for the domain, no proxy, cookie, redirect or retry, and
-  five seconds and 16 KiB of headers and of body. At most four lookups run at
-  once, each counted until it has really ended, since a lookup cannot be
-  stopped. Nothing about the reader goes out, and a result grants nothing. A machine whose certificate store lacks a
-  root gets unreachable, tls; `check` takes a TLS context that verifies, such
-  as one built from certifi, and refuses one that does not. The addresses it
-  may reach are shared in `tests/domain_fetch_vectors.json`.
-- `aamio domain` and `aamio_domain_check` check a key against a website from
+- Add-ons. The core is the rendezvous, and what a runtime can do beyond it
+  comes in add-ons, each a distribution of its own that depends on aamio and
+  declares an entry point in the group `aamio.addons`, so that installing one is
+  the user's choice and `pip install aamio` stays what it was: twenty-four
+  tools. `aamio addon list` says what this installation can run, and an add-on's
+  commands sit under `aamio addon NAME`, its tools beside the core's. Two
+  add-ons with one name, or a tool with a name already taken, stop the start and
+  say so, rather than let the order they were found in decide; so does an add-on
+  that cannot be loaded, since a broken install is not a quiet absence. For a
+  checkout that is not installed, `AAMIO_ADDONS` names the modules.
+- Domain Keys is the first add-on, `aamio-domain-keys`, built in
+  `addons/domain-keys` of this repository and installed with
+  `pip install "aamio[domain-keys]"`. A website can publish the public keys of
+  its agents at `/.well-known/aamio-keys.json`, and `aamio addon domain check`
+  and the tool `aamio_addon_domain_check` check a key against that list from
   inside the runtime. The key comes from the address book or from the signature
   this process checked itself, and never from whoever asks, so a message cannot
   pick the key that is compared; a message read by an earlier process is not
   known, and answers source_unavailable. Only websites on the user's own list
-  are read, in `domains.json` in the home: `aamio domain allow` on the command
-  line, or a form over MCP where the user types the domain themselves and a
-  lookalike stops at what they type. A check of any other domain stops before a
-  lookup, on every surface. `aamio domain file` writes your public key as the
-  list a site publishes, and `aamio domain validate` checks a file without
-  touching a home. `check` has an exit code per answer. At most two checks run
-  at once and twenty start per minute in one process, and `AAMIO_DOMAIN_DENY`
-  keeps an operator's own networks out. A result is a dated observation and
-  changes nothing. Nothing is read until a domain is on the list, there is no
-  background work, and a `domains.json` that cannot be read stops domain checks
-  and nothing else.
+  are read, in `domains.json` in the home: `aamio addon domain allow` on the
+  command line, or a form over MCP where the user types the domain themselves
+  and a lookalike stops at what they type. A check of any other domain stops
+  before a lookup, on every surface. `aamio addon domain file` writes your
+  public key as the list a site publishes, `aamio addon domain validate` checks
+  a file without touching a home, and `python -m aamio_domain_keys make` writes
+  a list of several keys for a site that runs no aamio. `check` has an exit
+  code per answer. The read reaches only public addresses, where one private
+  address among the answers refuses the whole read, connects to the address
+  that was checked with TLS for the domain, follows no proxy, cookie, redirect
+  or retry, and takes five seconds and 16 KiB of headers and of body at most;
+  at most four lookups run at once, each counted until it has really ended. At
+  most two checks run at once and twenty start per minute in one process, and
+  `AAMIO_DOMAIN_DENY` keeps an operator's own networks out. A result is a dated
+  observation and changes nothing. Nothing is read until a domain is on the
+  list, there is no background work, and a `domains.json` that cannot be read
+  stops domain checks and nothing else. The shared vectors are in
+  `tests/domain_keys_vectors.json` and `tests/domain_fetch_vectors.json`.
+- The runtime gives an add-on three ways in and no more: `home_file` and
+  `save_json` for a file of its own in the home, and `verified_signers` for the
+  keys behind a message this process read and verified.
 - Clearing a channel's observed messages now takes the channel's lock, as every
   other touch of them does. `forget_thread` and the reset in `poll` did not, so
   a receipt reading them on another thread could meet a change of size.

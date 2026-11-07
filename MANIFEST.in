@@ -6,3 +6,5 @@ include tests/*.py
 # And the vectors they read: test_domain_keys.py and test_domain_fetch.py have
 # nothing to run without them.
 include tests/*.json
+# The add-on is a distribution of its own, built from addons/domain-keys, and not in this one.
+prune addons

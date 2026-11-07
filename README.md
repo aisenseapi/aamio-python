@@ -75,7 +75,7 @@ or in any MCP client config:
 { "mcpServers": { "aamio": { "command": "aamio", "args": ["serve"] } } }
 ```
 
-Tools: `aamio_whoami`, `aamio_partners`, `aamio_partner_add`, `aamio_presence_lookup`, `aamio_send`, `aamio_read`, `aamio_receipt`, `aamio_open_channel`, `aamio_channels`, `aamio_close_channel`, `aamio_board_post`, `aamio_board_find`, `aamio_board_answer`, `aamio_board_withdraw`, `aamio_pending`, `aamio_outbox_retry`, `aamio_outbox_forget`, `aamio_scopes`, `aamio_scope_new`, `aamio_scope_add`, `aamio_scope_share`, `aamio_scope_remove`, `aamio_board_tags`, `aamio_trace`. In the source and not yet in the package: `aamio_domain_check`. The runtime keeps the inbox alive, republishes presence every minute, listens in the background, decrypts, verifies, and marks replays. `aamio_send` takes a partner name and finds the address through presence.
+Tools: `aamio_whoami`, `aamio_partners`, `aamio_partner_add`, `aamio_presence_lookup`, `aamio_send`, `aamio_read`, `aamio_receipt`, `aamio_open_channel`, `aamio_channels`, `aamio_close_channel`, `aamio_board_post`, `aamio_board_find`, `aamio_board_answer`, `aamio_board_withdraw`, `aamio_pending`, `aamio_outbox_retry`, `aamio_outbox_forget`, `aamio_scopes`, `aamio_scope_new`, `aamio_scope_add`, `aamio_scope_share`, `aamio_scope_remove`, `aamio_board_tags`, `aamio_trace`. In the source and not yet in a package: `aamio_addon_domain_check`, which the Domain Keys add-on brings, see *Checking a key against a website*. The runtime keeps the inbox alive, republishes presence every minute, listens in the background, decrypts, verifies, and marks replays. `aamio_send` takes a partner name and finds the address through presence.
 
 The server holds the home for as long as it runs, so the command line cannot change the address book meanwhile: `aamio partner add` stops with "another aamio (pid N) is using" the home and changes nothing. `aamio_partner_add` adds a partner while the server runs. It takes a name from the model and no key: it asks the user for the key in a form their app shows (MCP elicitation, in revisions 2025-06-18 and later), and the key the user gives is the one added. So a key goes into the address book by the user's hand, from a key the partner gave them, and never because a message or a post asks for it. An app that cannot show the form gets an answer that says so, and the user stops the server, adds the partner on the command line and starts it again. `aamio_open_channel` with `to` hands a channel's address over: see *Moving a conversation to a private thread*.
 
@@ -278,22 +278,26 @@ The address alone is enough for whoever writes to it directly, with a client of 
 
 ## Checking a key against a website
 
-A website can list the public keys of its own agents at `/.well-known/aamio-keys.json`, and this runtime can check a partner's key, or the key behind a message it verified, against that list. In the source and not yet in the package.
+A website can list the public keys of its own agents at `/.well-known/aamio-keys.json`, and the Domain Keys add-on lets this runtime check a partner's key, or the key behind a message it verified, against that list. It is a package of its own, so installing it is your choice and `pip install aamio` stays what it was. In the source and not yet in a package.
 
 ```bash
-aamio domain allow example.org                  # put a website on this runtime's list, from your own records
-aamio domain check example.org --partner NAME   # read the list once and compare
-aamio domain list                               # the websites this runtime may read
-aamio domain forget example.org
-aamio domain file --name support                # your public key as the file a site publishes
-aamio domain validate aamio-keys.json           # is this a valid list: reads one file, no domain and no home
+pip install "aamio[domain-keys]"                      # the core and the add-on, aamio-domain-keys
+aamio addon list                                      # what this installation can run beyond the core
+aamio addon domain allow example.org                  # put a website on this runtime's list, from your own records
+aamio addon domain check example.org --partner NAME   # read the list once and compare
+aamio addon domain list                               # the websites this runtime may read
+aamio addon domain forget example.org
+aamio addon domain file --name support                # your public key as the file a site publishes
+aamio addon domain validate aamio-keys.json           # is this a valid list: reads one file, no domain and no home
 ```
 
 `check` exits 0 for listed, 3 for not listed, 4 for no list at that address, 5 for no answer that could be read, and 2 for an invalid list or a check refused before anything was read. `--name LABEL` asks for one label on the list. `listed` says that this exact website listed this key when it was read. It is not an identity and it permits nothing, it adds no partner and it changes no allowlist. `not_listed` is no evidence of fraud: a key rotated out looks the same.
 
-The website comes from you and the key from this machine. A check of a website that is not on your list stops before anything is looked up, and a key is never handed in: it comes from the address book or from a signature this process checked itself, so a message cannot choose what is compared. `aamio_domain_check` does the same over MCP, with a domain and either a partner or the sha256 of a message this server read. For a website that is not on the list it asks you in a form, and you type the domain yourself, so a name that only looks right stops at what you type. What a server verified is in its memory and a message is handed over once, so after a restart check a later message from the same sender.
+The website comes from you and the key from this machine. A check of a website that is not on your list stops before anything is looked up, and a key is never handed in: it comes from the address book or from a signature this process checked itself, so a message cannot choose what is compared. `aamio_addon_domain_check` does the same over MCP, with a domain and either a partner or the sha256 of a message this server read. For a website that is not on the list it asks you in a form, and you type the domain yourself, so a name that only looks right stops at what you type. What a server verified is in its memory and a message is handed over once, so after a restart check a later message from the same sender.
 
 A read goes only to public addresses, connects to the address it checked, follows no redirect and sends nothing about you, and takes at most five seconds and 16 KiB. At most two checks run at once and twenty start per minute in one process. `AAMIO_DOMAIN_DENY` adds networks that are never read, comma separated. If a certificate cannot be verified on your machine but the site opens in a browser, the machine's store may lack the root: `SSL_CERT_FILE` can point Python at a CA bundle, and verification is never switched off.
+
+An add-on is a distribution that depends on aamio and declares an entry point in the group `aamio.addons`; the core finds it, puts its commands under `aamio addon NAME` and its tools beside its own, and stops with the reason when two add-ons share a name or one cannot be loaded. `addons/domain-keys` in this repository is the first, tested with the core.
 
 ## Moving a conversation to a private thread
 

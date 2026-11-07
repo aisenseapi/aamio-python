@@ -17,12 +17,14 @@ import sys
 import pytest
 
 sys.path.insert(0, "src")
+sys.path.insert(0, os.path.join("addons", "domain-keys", "src"))
 
-from aamio import domain_keys
-from aamio.domain_keys import InvalidDocument, make, match, normalise_domain, parse, url_for
+from aamio_domain_keys import lists
+from aamio_domain_keys.__main__ import main as command_line
+from aamio_domain_keys.lists import InvalidDocument, make, match, normalise_domain, parse, url_for
 
 VECTORS = json.loads((pathlib.Path(__file__).parent / "domain_keys_vectors.json").read_text(encoding="utf-8"))
-SOURCE = pathlib.Path(domain_keys.__file__)
+SOURCE = pathlib.Path(lists.__file__)
 
 
 def raw_of(case):
@@ -102,7 +104,7 @@ def test_the_module_cannot_reach_the_network():
 
 def test_nothing_opens_a_connection(monkeypatch, tmp_path):
     def refuse(*args, **kwargs):
-        raise AssertionError("domain_keys opened a connection")
+        raise AssertionError("the format opened a connection")
 
     monkeypatch.setattr(socket, "socket", refuse)
     monkeypatch.setattr(socket, "create_connection", refuse)
@@ -112,13 +114,13 @@ def test_nothing_opens_a_connection(monkeypatch, tmp_path):
     path = tmp_path / "aamio-keys.json"
     path.write_bytes(make(case["entries"]))
 
-    assert domain_keys.main(["check", str(path), "--key", case["entries"][0]["key"], "--name", "support"]) == 0
+    assert command_line(["check", str(path), "--key", case["entries"][0]["key"], "--name", "support"]) == 0
     assert url_for("example.org").startswith("https://")
 
 
 def run(*args):
-    environment = dict(os.environ, PYTHONPATH=str(SOURCE.parent.parent))
-    return subprocess.run([sys.executable, "-m", "aamio.domain_keys", *args], capture_output=True, env=environment)
+    environment = dict(os.environ, PYTHONPATH=os.pathsep.join([str(SOURCE.parent.parent), os.path.abspath("src")]))
+    return subprocess.run([sys.executable, "-m", "aamio_domain_keys", *args], capture_output=True, env=environment)
 
 
 def test_the_command_checks_a_local_file_and_says_it_read_no_domain(tmp_path):

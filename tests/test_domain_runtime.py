@@ -1,6 +1,6 @@
 """Checking a key against a website from inside a runtime: which key, which website, and what a result does.
 
-domain_keys.py and domain_fetch.py have tests of their own. What is tried here
+lists.py and fetch.py have tests of their own. What is tried here
 is what the runtime adds: the key comes from the address book or from a
 signature this process checked and from nobody else, only websites the user
 put on the list are read, a refusal reaches neither the resolver nor the
@@ -23,11 +23,13 @@ import time
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "domain-keys", "src"))
 sys.path.insert(0, os.path.dirname(__file__))
 
-from aamio import cli, domain_fetch, domain_keys, domain_runtime, mcp_server
+from aamio import addons, cli, mcp_server
+from aamio_domain_keys import fetch, lists, mcp as domain_mcp, policy
 from aamio.crypto import Keys, thread_signing_input
-from aamio.domain_runtime import Limits
+from aamio_domain_keys.policy import Limits
 from aamio.runtime import Runtime
 from test_conversation_trace import HOMES, Service, answer_with, direct, pair, read_all, runtime_for
 from test_domain_fetch import Connection, http
@@ -64,15 +66,21 @@ class Web:
         return connection
 
     def publish(self, domain, *entries):
-        self.sites[domain] = http(body=domain_keys.make(list(entries)))
+        self.sites[domain] = http(body=lists.make(list(entries)))
+
+
+@pytest.fixture(autouse=True)
+def domain_addon(monkeypatch):
+    """The add-on, as a checkout that is not installed has it: named in the environment."""
+    monkeypatch.setenv("AAMIO_ADDONS", "aamio_domain_keys")
 
 
 @pytest.fixture
 def web(monkeypatch):
     world = Web()
-    monkeypatch.setattr(domain_fetch, "_resolve", world.resolve)
-    monkeypatch.setattr(domain_fetch, "_open", world.open)
-    monkeypatch.setattr(domain_runtime, "LIMITS", Limits())
+    monkeypatch.setattr(fetch, "_resolve", world.resolve)
+    monkeypatch.setattr(fetch, "_open", world.open)
+    monkeypatch.setattr(policy, "LIMITS", Limits())
     monkeypatch.delenv("AAMIO_DOMAIN_DENY", raising=False)
     return world
 
@@ -106,37 +114,37 @@ def signed_plainly(service, reader, keys, body):
 
 def test_nothing_is_on_the_list_until_the_user_puts_it_there():
     service, a, b = pair()
-    assert domain_runtime.allowed_domains(a) == []
+    assert policy.allowed_domains(a) == []
     assert not os.path.exists(a._path("domains.json")), "and asking writes nothing"
 
 
 def test_a_domain_is_added_once_in_its_exact_form_and_taken_off_again():
     service, a, b = pair()
-    assert domain_runtime.allow(a, "Leverandor.Example") == {"domain": DOMAIN, "added": True, "domains": [DOMAIN]}
-    assert domain_runtime.allow(a, DOMAIN)["added"] is False
-    assert domain_runtime.allow(a, "another.example")["domains"] == ["another.example", DOMAIN]
+    assert policy.allow(a, "Leverandor.Example") == {"domain": DOMAIN, "added": True, "domains": [DOMAIN]}
+    assert policy.allow(a, DOMAIN)["added"] is False
+    assert policy.allow(a, "another.example")["domains"] == ["another.example", DOMAIN]
     assert json.load(open(a._path("domains.json"), encoding="utf-8")) == ["another.example", DOMAIN]
-    assert domain_runtime.forget(a, DOMAIN) == {"domain": DOMAIN, "removed": True, "domains": ["another.example"]}
-    assert domain_runtime.forget(a, DOMAIN)["removed"] is False
+    assert policy.forget(a, DOMAIN) == {"domain": DOMAIN, "removed": True, "domains": ["another.example"]}
+    assert policy.forget(a, DOMAIN)["removed"] is False
 
 
 def test_the_list_survives_a_restart_and_a_new_runtime_reads_it():
     service = Service()
     home = runtime_for(service, "a")
-    domain_runtime.allow(home, DOMAIN)
+    policy.allow(home, DOMAIN)
     path = home.home
     home.close()
     again = Runtime(home=path, host="https://fake.test", archive=False)
-    assert domain_runtime.allowed_domains(again) == [DOMAIN]
+    assert policy.allowed_domains(again) == [DOMAIN]
     again.close()
 
 
 @pytest.mark.parametrize("value", ["https://leverandor.example", "leverandor.example/path", "127.0.0.1", "localhost", "leverandor.example.", "xn--bcher-kva.example", "", None, 7])
 def test_only_a_plain_host_goes_on_the_list(value):
     service, a, b = pair()
-    with pytest.raises(domain_runtime.Refused) as refused:
-        domain_runtime.allow(a, value)
-    assert refused.value.reason == "invalid_domain" and domain_runtime.allowed_domains(a) == []
+    with pytest.raises(policy.Refused) as refused:
+        policy.allow(a, value)
+    assert refused.value.reason == "invalid_domain" and policy.allowed_domains(a) == []
 
 
 @pytest.mark.parametrize("content", [b"", b"not json", b"{}", b'{"domains": []}', b'["ok.example", 7]', b'["https://ok.example"]', b'["OK.example"]', b"\xff\xfe"])
@@ -145,13 +153,13 @@ def test_a_list_that_cannot_be_read_stops_the_check_and_is_never_saved_over(cont
     web.publish(DOMAIN, {"key": b.keys.public})
     with open(a._path("domains.json"), "wb") as handle:
         handle.write(content)
-    answer = domain_runtime.check(a, DOMAIN, partner="b")
+    answer = policy.check(a, DOMAIN, partner="b")
     assert (answer["status"], answer["reason"]) == ("invalid", "domain_policy_unreadable") and "fix" in answer
     assert nothing_was_read(web)
-    with pytest.raises(domain_runtime.Refused):
-        domain_runtime.allow(a, DOMAIN)
-    with pytest.raises(domain_runtime.Refused):
-        domain_runtime.forget(a, DOMAIN)
+    with pytest.raises(policy.Refused):
+        policy.allow(a, DOMAIN)
+    with pytest.raises(policy.Refused):
+        policy.forget(a, DOMAIN)
     assert open(a._path("domains.json"), "rb").read() == content
 
 
@@ -175,29 +183,29 @@ def test_a_list_that_could_not_be_written_says_so(monkeypatch):
         raise OSError("no space left")
 
     monkeypatch.setattr(a, "_save_json", full)
-    with pytest.raises(domain_runtime.Refused) as refused:
-        domain_runtime.allow(a, DOMAIN)
+    with pytest.raises(policy.Refused) as refused:
+        policy.allow(a, DOMAIN)
     assert refused.value.reason == "domain_policy_unwritable"
 
 
 def test_a_save_that_a_closed_runtime_dropped_is_not_called_added():
     service, a, b = pair()
     a.home_released = True
-    with pytest.raises(domain_runtime.Refused) as refused:
-        domain_runtime.allow(a, DOMAIN)
+    with pytest.raises(policy.Refused) as refused:
+        policy.allow(a, DOMAIN)
     assert refused.value.reason == "domain_policy_unwritable"
 
 
 def test_a_removal_that_a_closed_runtime_dropped_is_not_called_removed():
     service, a, b = pair()
-    domain_runtime.allow(a, DOMAIN)
+    policy.allow(a, DOMAIN)
     a.home_released = True
 
-    with pytest.raises(domain_runtime.Refused) as refused:
-        domain_runtime.forget(a, DOMAIN)
+    with pytest.raises(policy.Refused) as refused:
+        policy.forget(a, DOMAIN)
 
     assert refused.value.reason == "domain_policy_unwritable"
-    assert domain_runtime.allowed_domains(a) == [DOMAIN], "the next runtime reads this file"
+    assert policy.allowed_domains(a) == [DOMAIN], "the next runtime reads this file"
 
 
 # ----------------------------------------------------- which key is checked --
@@ -205,14 +213,14 @@ def test_a_removal_that_a_closed_runtime_dropped_is_not_called_removed():
 def test_a_partner_is_checked_with_the_key_in_the_address_book(web):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": b.keys.public, "name": "support"})
-    domain_runtime.allow(a, DOMAIN)
+    policy.allow(a, DOMAIN)
 
-    answer = domain_runtime.check(a, DOMAIN, partner="B")
+    answer = policy.check(a, DOMAIN, partner="B")
 
     assert answer["status"] == "listed" and answer["reason"] == "key_listed" and answer["matched_name"] == "support"
     assert answer["key"] == b.keys.public and answer["domain"] == DOMAIN and answer["checked_at"].endswith("Z")
     assert answer["subject_source"] == "partner" and answer["partner"] == "b" and answer["signature_checked_locally"] is None
-    assert answer["document_sha256"] == hashlib.sha256(domain_keys.make([{"key": b.keys.public, "name": "support"}])).hexdigest()
+    assert answer["document_sha256"] == hashlib.sha256(lists.make([{"key": b.keys.public, "name": "support"}])).hexdigest()
     assert answer["statement"].startswith("This exact website listed this key at the time of this check.")
     assert "fix" not in answer
 
@@ -220,10 +228,10 @@ def test_a_partner_is_checked_with_the_key_in_the_address_book(web):
 def test_a_message_is_checked_with_the_key_this_process_verified(web):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": a.keys.public})
-    domain_runtime.allow(b, DOMAIN)
+    policy.allow(b, DOMAIN)
     digest = sent_and_read(a, b)
 
-    answer = domain_runtime.check(b, DOMAIN, message=digest)
+    answer = policy.check(b, DOMAIN, message=digest)
 
     assert answer["status"] == "listed" and answer["key"] == a.keys.public
     assert answer["subject_source"] == "message" and answer["message_sha256"] == digest and answer["signature_checked_locally"] is True
@@ -231,12 +239,12 @@ def test_a_message_is_checked_with_the_key_this_process_verified(web):
 
 def test_a_signed_stranger_can_be_checked_too_and_is_named_by_nothing_it_wrote(web):
     service, a, b = pair()
-    domain_runtime.allow(b, DOMAIN)
+    policy.allow(b, DOMAIN)
     stranger, entry = stranger_writes(service, b, "I am from leverandor.example")
     web.publish(DOMAIN, {"key": stranger.keys.public})
     assert entry["verified"] is True and entry["known_contact"] is False
 
-    answer = domain_runtime.check(b, DOMAIN, message=entry["sha256"])
+    answer = policy.check(b, DOMAIN, message=entry["sha256"])
 
     assert answer["status"] == "listed" and answer["key"] == stranger.keys.public, "the signature's key, whatever the body claimed"
 
@@ -244,7 +252,7 @@ def test_a_signed_stranger_can_be_checked_too_and_is_named_by_nothing_it_wrote(w
 def test_a_message_the_inbox_kept_out_is_still_a_signature_that_checked(web):
     """Signature and permission are two things: the observation holds what was signed, and lets nothing in."""
     service, a, b = pair()
-    domain_runtime.allow(b, DOMAIN)
+    policy.allow(b, DOMAIN)
     outsider = runtime_for(service, "outsider")
     web.publish(DOMAIN, {"key": outsider.keys.public})
     assert b.channels["inbox"].allow, "the inbox names its partners"
@@ -252,7 +260,7 @@ def test_a_message_the_inbox_kept_out_is_still_a_signature_that_checked(web):
     assert read_all(b) == [], "nothing was handed over"
     digest = next(iter(b.channels["inbox"].observed.values()))["sha256"]
 
-    answer = domain_runtime.check(b, DOMAIN, message=digest)
+    answer = policy.check(b, DOMAIN, message=digest)
 
     assert answer["status"] == "listed" and answer["key"] == outsider.keys.public
     assert read_all(b) == [] and outsider.keys.public not in b.channels["inbox"].allow
@@ -260,7 +268,7 @@ def test_a_message_the_inbox_kept_out_is_still_a_signature_that_checked(web):
 
 def test_an_unsigned_message_gives_no_key_and_nothing_is_read(web):
     service, a, b = pair()
-    domain_runtime.allow(b, DOMAIN)
+    policy.allow(b, DOMAIN)
     web.publish(DOMAIN, {"key": a.keys.public})
     w = b.channels["inbox"].w
     service.threads[w]["allow"] = []
@@ -269,26 +277,26 @@ def test_an_unsigned_message_gives_no_key_and_nothing_is_read(web):
     service.client().post(w, unsigned, None, None)
     assert read_all(b)[0]["verified"] is False
 
-    answer = domain_runtime.check(b, DOMAIN, message=hashlib.sha256(unsigned.encode()).hexdigest())
+    answer = policy.check(b, DOMAIN, message=hashlib.sha256(unsigned.encode()).hexdigest())
 
     assert answer["reason"] == "source_unavailable" and nothing_was_read(web)
 
 
 def test_a_signature_that_does_not_verify_gives_no_key(web):
     service, a, b = pair()
-    domain_runtime.allow(b, DOMAIN)
+    policy.allow(b, DOMAIN)
     web.publish(DOMAIN, {"key": a.keys.public})
     digest = sent_and_read(a, b)
     b.channels["inbox"].observed[1]["verified"] = False
 
-    assert domain_runtime.check(b, DOMAIN, message=digest)["reason"] == "source_unavailable"
+    assert policy.check(b, DOMAIN, message=digest)["reason"] == "source_unavailable"
     assert nothing_was_read(web)
 
 
 def test_a_message_this_process_never_read_is_not_known_after_a_restart(web):
     """What a process verified lives in its memory: state.json holds no observation to invent one from."""
     service, a, b = pair()
-    domain_runtime.allow(b, DOMAIN)
+    policy.allow(b, DOMAIN)
     digest = sent_and_read(a, b)
     path = b.home
     b.save_state()
@@ -296,7 +304,7 @@ def test_a_message_this_process_never_read_is_not_known_after_a_restart(web):
     again = Runtime(home=path, host="https://fake.test", archive=False)
     again.client = service.client()
 
-    answer = domain_runtime.check(again, DOMAIN, message=digest)
+    answer = policy.check(again, DOMAIN, message=digest)
 
     assert answer["reason"] == "source_unavailable" and nothing_was_read(web)
     # And the way on is the next message, since no read goes back to this one.
@@ -306,14 +314,14 @@ def test_a_message_this_process_never_read_is_not_known_after_a_restart(web):
 
 def test_the_same_bytes_signed_by_two_keys_name_no_one(web):
     service, a, b = pair()
-    domain_runtime.allow(b, DOMAIN)
+    policy.allow(b, DOMAIN)
     b.channels["inbox"].allow = ["*"]
     body = json.dumps({"text": "the same bytes"})
     signed_plainly(service, b, Keys.generate(), body)
     signed_plainly(service, b, Keys.generate(), body)
     assert [entry["verified"] for entry in read_all(b)] == [True, True]
 
-    answer = domain_runtime.check(b, DOMAIN, message=hashlib.sha256(body.encode()).hexdigest())
+    answer = policy.check(b, DOMAIN, message=hashlib.sha256(body.encode()).hexdigest())
 
     assert answer["reason"] == "ambiguous_signer" and nothing_was_read(web)
 
@@ -330,20 +338,20 @@ def test_the_same_bytes_signed_by_two_keys_name_no_one(web):
 ])
 def test_a_subject_that_cannot_be_named_stops_before_the_network(arguments, reason, web):
     service, a, b = pair()
-    domain_runtime.allow(a, DOMAIN)
-    answer = domain_runtime.check(a, DOMAIN, **arguments)
+    policy.allow(a, DOMAIN)
+    answer = policy.check(a, DOMAIN, **arguments)
     assert (answer["status"], answer["reason"]) == ("invalid", reason) and answer["fix"] and nothing_was_read(web)
 
 
 def test_a_partner_key_that_is_not_canonical_is_not_compared(web):
     service, a, b = pair()
-    domain_runtime.allow(a, DOMAIN)
+    policy.allow(a, DOMAIN)
     # Bits past the 32 bytes in the last character: the same key to a decoder, and another string.
     key = Keys.generate().public
     spelled = key[:-1] + "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"[("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".index(key[-1]) + 1) % 64]
-    assert not domain_keys.canonical_key(spelled)
+    assert not lists.canonical_key(spelled)
     a.partners[0]["key"] = spelled
-    assert domain_runtime.check(a, DOMAIN, partner="b")["reason"] == "partner_unavailable" and nothing_was_read(web)
+    assert policy.check(a, DOMAIN, partner="b")["reason"] == "partner_unavailable" and nothing_was_read(web)
 
 
 # ------------------------------------------------------ what may be read --
@@ -351,64 +359,64 @@ def test_a_partner_key_that_is_not_canonical_is_not_compared(web):
 def test_a_domain_that_is_not_on_the_list_is_refused_before_any_lookup(web):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": b.keys.public})
-    answer = domain_runtime.check(a, DOMAIN, partner="b")
+    answer = policy.check(a, DOMAIN, partner="b")
     assert (answer["status"], answer["reason"]) == ("invalid", "domain_not_allowed") and nothing_was_read(web)
-    assert "aamio domain allow %s" % DOMAIN in answer["fix"] and answer["partner"] == "b"
+    assert "aamio addon domain allow %s" % DOMAIN in answer["fix"] and answer["partner"] == "b"
 
 
 def test_a_parent_or_a_child_of_a_listed_domain_is_another_place(web):
     service, a, b = pair()
-    domain_runtime.allow(a, "example.org")
+    policy.allow(a, "example.org")
     for other in ("www.example.org", "org.example", "example.org.evil.example"):
-        assert domain_runtime.check(a, other, partner="b")["reason"] == "domain_not_allowed"
+        assert policy.check(a, other, partner="b")["reason"] == "domain_not_allowed"
     assert nothing_was_read(web)
 
 
 def test_a_domain_taken_off_the_list_is_not_read_again(web):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": b.keys.public})
-    domain_runtime.allow(a, DOMAIN)
-    assert domain_runtime.check(a, DOMAIN, partner="b")["status"] == "listed"
-    domain_runtime.forget(a, DOMAIN)
+    policy.allow(a, DOMAIN)
+    assert policy.check(a, DOMAIN, partner="b")["status"] == "listed"
+    policy.forget(a, DOMAIN)
     before = len(web.lookups)
-    assert domain_runtime.check(a, DOMAIN, partner="b")["reason"] == "domain_not_allowed" and len(web.lookups) == before
+    assert policy.check(a, DOMAIN, partner="b")["reason"] == "domain_not_allowed" and len(web.lookups) == before
 
 
 @pytest.mark.parametrize("domain", ["https://leverandor.example", "127.0.0.1", "0x7f.0.0.1", "", None])
 def test_a_bad_domain_or_name_stops_here(domain, web):
     service, a, b = pair()
-    assert domain_runtime.check(a, domain, partner="b")["reason"] == "invalid_domain" and nothing_was_read(web)
+    assert policy.check(a, domain, partner="b")["reason"] == "invalid_domain" and nothing_was_read(web)
 
 
 def test_a_bad_name_stops_here(web):
     service, a, b = pair()
-    domain_runtime.allow(a, DOMAIN)
-    assert domain_runtime.check(a, DOMAIN, partner="b", name="Not A Label")["reason"] == "invalid_requested_name" and nothing_was_read(web)
+    policy.allow(a, DOMAIN)
+    assert policy.check(a, DOMAIN, partner="b", name="Not A Label")["reason"] == "invalid_requested_name" and nothing_was_read(web)
 
 
 def test_the_address_rules_still_hold_for_a_domain_on_the_list(web, monkeypatch):
     service, a, b = pair()
-    domain_runtime.allow(a, DOMAIN)
-    monkeypatch.setattr(domain_fetch, "_resolve", lambda host, remaining: ["10.0.0.5"])
-    answer = domain_runtime.check(a, DOMAIN, partner="b")
+    policy.allow(a, DOMAIN)
+    monkeypatch.setattr(fetch, "_resolve", lambda host, remaining: ["10.0.0.5"])
+    answer = policy.check(a, DOMAIN, partner="b")
     assert (answer["status"], answer["reason"]) == ("invalid", "target_not_public") and web.connections == []
-    assert answer["statement"] == domain_runtime.NOT_CONTACTED and "answered" not in answer["statement"], "no website said anything"
+    assert answer["statement"] == policy.NOT_CONTACTED and "answered" not in answer["statement"], "no website said anything"
 
 
 def test_the_operator_can_keep_more_networks_out(web, monkeypatch):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": b.keys.public})
-    domain_runtime.allow(a, DOMAIN)
+    policy.allow(a, DOMAIN)
     monkeypatch.setenv("AAMIO_DOMAIN_DENY", "198.18.0.0/15, 93.184.216.0/24")
-    answer = domain_runtime.check(a, DOMAIN, partner="b")
+    answer = policy.check(a, DOMAIN, partner="b")
     assert answer["reason"] == "target_not_public" and web.connections == []
 
 
 def test_a_keep_out_that_does_not_parse_stops_the_check_rather_than_leave_a_range_open(web, monkeypatch):
     service, a, b = pair()
-    domain_runtime.allow(a, DOMAIN)
+    policy.allow(a, DOMAIN)
     monkeypatch.setenv("AAMIO_DOMAIN_DENY", "93.184.216.0/24,not-a-network")
-    assert domain_runtime.check(a, DOMAIN, partner="b")["reason"] == "domain_deny_invalid" and nothing_was_read(web)
+    assert policy.check(a, DOMAIN, partner="b")["reason"] == "domain_deny_invalid" and nothing_was_read(web)
 
 
 # -------------------------------------------------- what the answers mean --
@@ -424,17 +432,17 @@ def test_a_keep_out_that_does_not_parse_stops_the_check_rather_than_leave_a_rang
 def test_every_answer_a_site_can_give_comes_through_with_its_statement(page, status, reason, web):
     service, a, b = pair()
     web.sites[DOMAIN] = page
-    domain_runtime.allow(a, DOMAIN)
-    answer = domain_runtime.check(a, DOMAIN, partner="b")
+    policy.allow(a, DOMAIN)
+    answer = policy.check(a, DOMAIN, partner="b")
     assert (answer["status"], answer["reason"]) == (status, reason)
-    assert answer["statement"] == domain_runtime.STATEMENTS[status] and "fix" not in answer
+    assert answer["statement"] == policy.STATEMENTS[status] and "fix" not in answer
 
 
 def test_a_list_without_the_key_is_not_listed_and_says_it_is_no_evidence_of_fraud(web):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": Keys.generate().public})
-    domain_runtime.allow(a, DOMAIN)
-    answer = domain_runtime.check(a, DOMAIN, partner="b")
+    policy.allow(a, DOMAIN)
+    answer = policy.check(a, DOMAIN, partner="b")
     assert answer["status"] == "not_listed" and "no evidence of fraud" in answer["statement"]
     assert "label" not in answer["statement"], "none was asked for"
 
@@ -442,21 +450,21 @@ def test_a_list_without_the_key_is_not_listed_and_says_it_is_no_evidence_of_frau
 def test_the_wrong_label_is_not_listed(web):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": b.keys.public, "name": "support"})
-    domain_runtime.allow(a, DOMAIN)
-    answer = domain_runtime.check(a, DOMAIN, partner="b", name="billing")
+    policy.allow(a, DOMAIN)
+    answer = policy.check(a, DOMAIN, partner="b", name="billing")
     assert answer["status"] == "not_listed" and answer["requested_name"] == "billing"
     # The key is on the list, so the answer must not say it is not.
-    assert answer["statement"] == domain_runtime.NOT_UNDER_THAT_LABEL and "no evidence of fraud" in answer["statement"]
+    assert answer["statement"] == policy.NOT_UNDER_THAT_LABEL and "no evidence of fraud" in answer["statement"]
     assert "under the label asked for" in answer["statement"] and "did not have this key at" not in answer["statement"]
-    assert domain_runtime.check(a, DOMAIN, partner="b", name="support")["status"] == "listed"
-    assert domain_runtime.check(a, DOMAIN, partner="b")["matched_name"] == "support", "and a check with no name shows it, as the words say"
+    assert policy.check(a, DOMAIN, partner="b", name="support")["status"] == "listed"
+    assert policy.check(a, DOMAIN, partner="b")["matched_name"] == "support", "and a check with no name shows it, as the words say"
 
 
 def test_a_lookup_that_fails_is_unreachable_and_never_not_listed(web):
     service, a, b = pair()
     web.sites[DOMAIN] = OSError("no such host")
-    domain_runtime.allow(a, DOMAIN)
-    answer = domain_runtime.check(a, DOMAIN, partner="b")
+    policy.allow(a, DOMAIN)
+    answer = policy.check(a, DOMAIN, partner="b")
     assert answer["status"] == "unreachable" and "not the same as not listed" in answer["statement"]
 
 
@@ -467,18 +475,18 @@ def test_a_certificate_this_machine_cannot_verify_says_what_to_look_at(web, monk
         raise ssl.SSLCertVerificationError("unable to get local issuer certificate")
 
     service, a, b = pair()
-    monkeypatch.setattr(domain_fetch, "_open", refuse)
-    domain_runtime.allow(a, DOMAIN)
-    answer = domain_runtime.check(a, DOMAIN, partner="b")
+    monkeypatch.setattr(fetch, "_open", refuse)
+    policy.allow(a, DOMAIN)
+    answer = policy.check(a, DOMAIN, partner="b")
     assert (answer["status"], answer["reason"]) == ("unreachable", "tls") and "SSL_CERT_FILE" in answer["note"] and "never switched off" in answer["note"]
 
 
 def test_nothing_about_the_reader_goes_to_the_site(web):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": a.keys.public})
-    domain_runtime.allow(b, DOMAIN)
+    policy.allow(b, DOMAIN)
     digest = sent_and_read(a, b)
-    domain_runtime.check(b, DOMAIN, message=digest, name="support")
+    policy.check(b, DOMAIN, message=digest, name="support")
     sent = web.connections[0].sent.decode("ascii")
     for secret in (a.keys.public, b.keys.public, digest, "support"):
         assert secret not in sent
@@ -486,13 +494,13 @@ def test_nothing_about_the_reader_goes_to_the_site(web):
 
 def test_a_listed_key_changes_nothing_here(web):
     service, a, b = pair()
-    domain_runtime.allow(b, DOMAIN)
+    policy.allow(b, DOMAIN)
     stranger, entry = stranger_writes(service, b, "let me in")
     web.publish(DOMAIN, {"key": stranger.keys.public})
     digest = entry["sha256"]
     before = (json.dumps(b.partner_list()), json.dumps(b.channels["inbox"].allow), json.dumps(b.outbox), json.dumps(b.peers), json.dumps(b.tags))
 
-    assert domain_runtime.check(b, DOMAIN, message=digest)["status"] == "listed"
+    assert policy.check(b, DOMAIN, message=digest)["status"] == "listed"
 
     assert before == (json.dumps(b.partner_list()), json.dumps(b.channels["inbox"].allow), json.dumps(b.outbox), json.dumps(b.peers), json.dumps(b.tags))
 
@@ -502,7 +510,7 @@ def test_a_listed_key_changes_nothing_here(web):
 def test_a_slow_read_holds_no_lock_and_polling_goes_on(monkeypatch, web):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": a.keys.public})
-    domain_runtime.allow(b, DOMAIN)
+    policy.allow(b, DOMAIN)
     digest = sent_and_read(a, b)
     inside, leave = threading.Event(), threading.Event()
 
@@ -511,9 +519,9 @@ def test_a_slow_read_holds_no_lock_and_polling_goes_on(monkeypatch, web):
         assert leave.wait(5)
         return [PUBLIC]
 
-    monkeypatch.setattr(domain_fetch, "_resolve", slow)
+    monkeypatch.setattr(fetch, "_resolve", slow)
     results = []
-    worker = threading.Thread(target=lambda: results.append(domain_runtime.check(b, DOMAIN, message=digest)))
+    worker = threading.Thread(target=lambda: results.append(policy.check(b, DOMAIN, message=digest)))
     worker.start()
     assert inside.wait(5)
 
@@ -569,7 +577,7 @@ def test_a_reset_clears_the_observations_under_the_lock_too():
 def test_a_reset_while_a_check_reads_the_observations_is_safe(web):
     """Readers and writers of observed share the channel's lock, so a walk never meets a change of size."""
     service, a, b = pair()
-    domain_runtime.allow(b, DOMAIN)
+    policy.allow(b, DOMAIN)
     web.publish(DOMAIN, {"key": a.keys.public})
     channel = b.channels["inbox"]
     stop = threading.Event()
@@ -584,7 +592,7 @@ def test_a_reset_while_a_check_reads_the_observations_is_safe(web):
     worker.start()
     try:
         for _ in range(300):
-            assert domain_runtime.check(b, DOMAIN, message="a" * 64)["reason"] == "source_unavailable"
+            assert policy.check(b, DOMAIN, message="a" * 64)["reason"] == "source_unavailable"
     finally:
         stop.set()
         worker.join(5)
@@ -593,7 +601,7 @@ def test_a_reset_while_a_check_reads_the_observations_is_safe(web):
 def test_at_most_two_checks_at_once(monkeypatch, web):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": b.keys.public})
-    domain_runtime.allow(a, DOMAIN)
+    policy.allow(a, DOMAIN)
     inside = threading.Semaphore(0)
     leave = threading.Event()
 
@@ -602,59 +610,59 @@ def test_at_most_two_checks_at_once(monkeypatch, web):
         assert leave.wait(5)
         return [PUBLIC]
 
-    monkeypatch.setattr(domain_fetch, "_resolve", slow)
+    monkeypatch.setattr(fetch, "_resolve", slow)
     results = []
-    workers = [threading.Thread(target=lambda: results.append(domain_runtime.check(a, DOMAIN, partner="b"))) for _ in range(2)]
+    workers = [threading.Thread(target=lambda: results.append(policy.check(a, DOMAIN, partner="b"))) for _ in range(2)]
     for worker in workers:
         worker.start()
     assert inside.acquire(timeout=5) and inside.acquire(timeout=5)
 
-    third = domain_runtime.check(a, DOMAIN, partner="b")
+    third = policy.check(a, DOMAIN, partner="b")
 
     assert (third["status"], third["reason"]) == ("unreachable", "local_busy") and "Nothing was read" in third["fix"]
     leave.set()
     for worker in workers:
         worker.join(5)
     assert [r["status"] for r in results] == ["listed", "listed"]
-    monkeypatch.setattr(domain_fetch, "_resolve", web.resolve)
-    assert domain_runtime.check(a, DOMAIN, partner="b")["status"] == "listed", "and the places come back"
+    monkeypatch.setattr(fetch, "_resolve", web.resolve)
+    assert policy.check(a, DOMAIN, partner="b")["status"] == "listed", "and the places come back"
 
 
 def test_a_read_that_blows_up_gives_its_place_back(web, monkeypatch):
     service, a, b = pair()
-    domain_runtime.allow(a, DOMAIN)
+    policy.allow(a, DOMAIN)
 
     def broken(*args, **kwargs):
         raise RuntimeError("the read failed in a way nothing expected")
 
-    monkeypatch.setattr(domain_fetch, "check", broken)
+    monkeypatch.setattr(fetch, "check", broken)
     with pytest.raises(RuntimeError):
-        domain_runtime.check(a, DOMAIN, partner="b")
-    assert domain_runtime.LIMITS.running == 0
+        policy.check(a, DOMAIN, partner="b")
+    assert policy.LIMITS.running == 0
 
 
 def test_twenty_checks_start_per_minute_and_the_window_moves(web, monkeypatch):
     now = [1000.0]
-    monkeypatch.setattr(domain_runtime, "LIMITS", Limits(clock=lambda: now[0]))
+    monkeypatch.setattr(policy, "LIMITS", Limits(clock=lambda: now[0]))
     service, a, b = pair()
     web.publish(DOMAIN, {"key": b.keys.public})
-    domain_runtime.allow(a, DOMAIN)
+    policy.allow(a, DOMAIN)
 
-    assert [domain_runtime.check(a, DOMAIN, partner="b")["status"] for _ in range(20)] == ["listed"] * 20
+    assert [policy.check(a, DOMAIN, partner="b")["status"] for _ in range(20)] == ["listed"] * 20
 
-    held = domain_runtime.check(a, DOMAIN, partner="b")
+    held = policy.check(a, DOMAIN, partner="b")
     assert (held["status"], held["reason"]) == ("unreachable", "local_rate_limit") and len(web.lookups) == 20
     now[0] += 60
-    assert domain_runtime.check(a, DOMAIN, partner="b")["status"] == "listed"
+    assert policy.check(a, DOMAIN, partner="b")["status"] == "listed"
 
 
 def test_refused_checks_use_up_no_budget(web, monkeypatch):
     now = [1000.0]
-    monkeypatch.setattr(domain_runtime, "LIMITS", Limits(clock=lambda: now[0]))
+    monkeypatch.setattr(policy, "LIMITS", Limits(clock=lambda: now[0]))
     service, a, b = pair()
     for _ in range(30):
-        assert domain_runtime.check(a, DOMAIN, partner="b")["reason"] == "domain_not_allowed"
-    assert len(domain_runtime.LIMITS.started) == 0
+        assert policy.check(a, DOMAIN, partner="b")["reason"] == "domain_not_allowed"
+    assert len(policy.LIMITS.started) == 0
 
 
 # ------------------------------------------------------- two parties, rotation --
@@ -666,12 +674,12 @@ def test_two_parties_a_partner_a_live_message_and_a_key_that_rotates(web):
     web.publish(site, {"key": old.keys.public, "name": "support"})
 
     # Nothing is read before the reader agrees to the site.
-    assert domain_runtime.check(reader, site, partner="b")["reason"] == "domain_not_allowed" and nothing_was_read(web)
-    domain_runtime.allow(reader, site)
+    assert policy.check(reader, site, partner="b")["reason"] == "domain_not_allowed" and nothing_was_read(web)
+    policy.allow(reader, site)
 
-    assert domain_runtime.check(reader, site, partner="b", name="support")["status"] == "listed"
+    assert policy.check(reader, site, partner="b", name="support")["status"] == "listed"
     old_message = sent_and_read(old, reader, "signed with the key on the list")
-    checked = domain_runtime.check(reader, site, message=old_message)
+    checked = policy.check(reader, site, message=old_message)
     assert checked["status"] == "listed" and checked["key"] == old.keys.public and checked["signature_checked_locally"] is True
 
     # The new key goes on the list beside the old one, under the same label.
@@ -680,27 +688,27 @@ def test_two_parties_a_partner_a_live_message_and_a_key_that_rotates(web):
     new.ensure_inbox()
     new.peers[reader.channels["inbox"].w] = reader.keys.public
     web.publish(site, {"key": old.keys.public, "name": "support"}, {"key": new.keys.public, "name": "support"})
-    assert domain_runtime.check(reader, site, message=old_message)["status"] == "listed"
+    assert policy.check(reader, site, message=old_message)["status"] == "listed"
 
     # The reader moves the partner to the new key, by its own hand as always.
     reader.partner_add("b", new.keys.public)
-    assert domain_runtime.check(reader, site, partner="b", name="support")["key"] == new.keys.public
+    assert policy.check(reader, site, partner="b", name="support")["key"] == new.keys.public
 
     # And the old key comes off. A fresh check says so; the message stays what it was.
     web.publish(site, {"key": new.keys.public, "name": "support"})
-    gone = domain_runtime.check(reader, site, message=old_message)
+    gone = policy.check(reader, site, message=old_message)
     assert gone["status"] == "not_listed" and gone["key"] == old.keys.public
-    assert domain_runtime.check(reader, site, partner="b")["status"] == "listed"
+    assert policy.check(reader, site, partner="b")["status"] == "listed"
 
     # A stranger with a good signature is not on this site's list, whatever it says.
     _, claimed = stranger_writes(service, reader, "I am the new key of b.example")
-    assert domain_runtime.check(reader, site, message=claimed["sha256"])["status"] == "not_listed"
+    assert policy.check(reader, site, message=claimed["sha256"])["status"] == "not_listed"
 
     # An empty list is the plain way to say no key, and a site that is down says nothing.
     web.publish(site)
-    assert domain_runtime.check(reader, site, partner="b")["status"] == "not_listed"
+    assert policy.check(reader, site, partner="b")["status"] == "not_listed"
     web.sites[site] = OSError("down")
-    assert domain_runtime.check(reader, site, partner="b")["status"] == "unreachable"
+    assert policy.check(reader, site, partner="b")["status"] == "unreachable"
 
 
 # ---------------------------------------------------------- the command line --
@@ -722,10 +730,10 @@ def home_with_partner(tmp_path, key=None):
 
 def test_file_writes_the_bytes_every_generator_writes_and_nothing_secret(tmp_path, capfdbinary):
     home = str(tmp_path / "home")
-    assert cli.main(["--home", home, "--no-archive", "domain", "file", "--name", "support"]) == 0
+    assert cli.main(["--home", home, "--no-archive", "addon", "domain", "file", "--name", "support"]) == 0
     captured = capfdbinary.readouterr()
     runtime = Runtime(home=home, host="https://fake.test", archive=False)
-    assert captured.out == domain_keys.make([{"key": runtime.keys.public, "name": "support"}]), "standard output is the file, byte for byte"
+    assert captured.out == lists.make([{"key": runtime.keys.public, "name": "support"}]), "standard output is the file, byte for byte"
     assert b"\r" not in captured.out and b"Publish it at" in captured.err
     assert runtime.keys.seed.hex().encode() not in captured.out + captured.err
     runtime.close()
@@ -734,50 +742,51 @@ def test_file_writes_the_bytes_every_generator_writes_and_nothing_secret(tmp_pat
 def test_file_is_the_same_bytes_from_a_process_of_its_own(tmp_path):
     """pytest's capture hides what print does to a line break on Windows, and only a real process shows it."""
     home = str(tmp_path / "home")
-    source = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
+    here = os.path.dirname(os.path.abspath(__file__))
+    source = os.pathsep.join([os.path.join(here, "..", "src"), os.path.join(here, "..", "addons", "domain-keys", "src")])
 
-    done = subprocess.run([sys.executable, "-m", "aamio", "--home", home, "--no-archive", "domain", "file", "--name", "support"],
-                          capture_output=True, env=dict(os.environ, PYTHONPATH=source), timeout=60)
+    done = subprocess.run([sys.executable, "-m", "aamio", "--home", home, "--no-archive", "addon", "domain", "file", "--name", "support"],
+                          capture_output=True, env=dict(os.environ, PYTHONPATH=source, AAMIO_ADDONS="aamio_domain_keys"), timeout=60)
 
     assert done.returncode == 0, done.stderr
     runtime = Runtime(home=home, host="https://fake.test", archive=False)
-    assert done.stdout == domain_keys.make([{"key": runtime.keys.public, "name": "support"}])
+    assert done.stdout == lists.make([{"key": runtime.keys.public, "name": "support"}])
     runtime.close()
 
 
 def test_file_without_a_name_and_with_a_bad_one(tmp_path, capfdbinary):
     home = str(tmp_path / "home")
-    assert cli.main(["--home", home, "--no-archive", "domain", "file"]) == 0
+    assert cli.main(["--home", home, "--no-archive", "addon", "domain", "file"]) == 0
     assert list(json.loads(capfdbinary.readouterr().out)["keys"][0]) == ["key"]
-    assert cli.main(["--home", home, "--no-archive", "domain", "file", "--name", "Not A Label"]) == 2
+    assert cli.main(["--home", home, "--no-archive", "addon", "domain", "file", "--name", "Not A Label"]) == 2
     captured = capfdbinary.readouterr()
     assert captured.out == b"" and json.loads(captured.err)["error"] == "invalid_name", "standard output is the file, so a refusal goes elsewhere"
 
 
 def test_validate_reads_the_file_and_never_the_home(tmp_path, capsys):
     good = tmp_path / "good.json"
-    good.write_bytes(domain_keys.make([{"key": Keys.generate().public}]))
+    good.write_bytes(lists.make([{"key": Keys.generate().public}]))
     bad = tmp_path / "bad.json"
     bad.write_bytes(b'{"aamio_keys": 2, "keys": []}')
     home = str(tmp_path / "no-such-home")
 
-    code, printed, _ = command(capsys, home, "domain", "validate", str(good))
+    code, printed, _ = command(capsys, home, "addon", "domain", "validate", str(good))
     assert code == 0 and json.loads(printed) == {"format_valid": True, "keys": 1, "source": "local_file", "domain_checked": False}
 
-    code, printed, _ = command(capsys, home, "domain", "validate", str(bad))
+    code, printed, _ = command(capsys, home, "addon", "domain", "validate", str(bad))
     assert code == 2 and json.loads(printed)["detail"] == "unsupported_version"
 
-    code, printed, _ = command(capsys, home, "domain", "validate", str(tmp_path / "missing.json"))
+    code, printed, _ = command(capsys, home, "addon", "domain", "validate", str(tmp_path / "missing.json"))
     assert code == 2 and json.loads(printed) == {"error": "local_file_unreadable"}
     assert not os.path.exists(home), "no home, no key and no lock came of it"
 
 
 def test_validate_runs_beside_a_runtime_that_holds_the_home(tmp_path, capsys):
     good = tmp_path / "good.json"
-    good.write_bytes(domain_keys.make([]))
+    good.write_bytes(lists.make([]))
     home = str(tmp_path / "home")
     holder = Runtime(home=home, host="https://fake.test", archive=False)
-    code, printed, _ = command(capsys, home, "domain", "validate", str(good))
+    code, printed, _ = command(capsys, home, "addon", "domain", "validate", str(good))
     assert code == 0 and json.loads(printed)["keys"] == 0
     holder.close()
 
@@ -785,23 +794,23 @@ def test_validate_runs_beside_a_runtime_that_holds_the_home(tmp_path, capsys):
 def test_allow_list_and_forget(tmp_path, capsys):
     home = home_with_partner(tmp_path)
 
-    code, printed, _ = command(capsys, home, "domain", "allow", "Leverandor.Example")
+    code, printed, _ = command(capsys, home, "addon", "domain", "allow", "Leverandor.Example")
     said = json.loads(printed)
     assert code == 0 and said["added"] is True and said["domains"] == [DOMAIN] and "permits nothing" in said["note"]
 
-    code, printed, _ = command(capsys, home, "domain", "list")
+    code, printed, _ = command(capsys, home, "addon", "domain", "list")
     assert code == 0 and json.loads(printed) == {"domains": [DOMAIN]}
 
-    code, printed, _ = command(capsys, home, "domain", "forget", DOMAIN)
+    code, printed, _ = command(capsys, home, "addon", "domain", "forget", DOMAIN)
     assert code == 0 and json.loads(printed)["removed"] is True
 
-    code, printed, _ = command(capsys, home, "domain", "allow", "https://leverandor.example")
+    code, printed, _ = command(capsys, home, "addon", "domain", "allow", "https://leverandor.example")
     assert code == 2 and json.loads(printed)["reason"] == "invalid_domain"
 
 
 @pytest.mark.parametrize("page,status,code", [
     (None, "listed", 0),
-    (http(body=domain_keys.make([])), "not_listed", 3),
+    (http(body=lists.make([])), "not_listed", 3),
     (http(404, body=b""), "no_list", 4),
     (http(500, body=b""), "unreachable", 5),
     (http(body=b"{}"), "invalid", 2),
@@ -809,10 +818,10 @@ def test_allow_list_and_forget(tmp_path, capsys):
 def test_check_has_an_exit_code_for_every_answer(page, status, code, tmp_path, capsys, web):
     key = Keys.generate().public
     home = home_with_partner(tmp_path, key)
-    command(capsys, home, "domain", "allow", DOMAIN)
-    web.sites[DOMAIN] = page or http(body=domain_keys.make([{"key": key}]))
+    command(capsys, home, "addon", "domain", "allow", DOMAIN)
+    web.sites[DOMAIN] = page or http(body=lists.make([{"key": key}]))
 
-    exit_code, printed, _ = command(capsys, home, "domain", "check", DOMAIN, "--partner", "bob")
+    exit_code, printed, _ = command(capsys, home, "addon", "domain", "check", DOMAIN, "--partner", "bob")
 
     said = json.loads(printed)
     assert exit_code == code and said["status"] == status and said["subject_source"] == "partner"
@@ -820,20 +829,20 @@ def test_check_has_an_exit_code_for_every_answer(page, status, code, tmp_path, c
 
 def test_check_refuses_what_is_not_on_the_list_with_the_way_on(tmp_path, capsys, web):
     home = home_with_partner(tmp_path)
-    code, printed, _ = command(capsys, home, "domain", "check", DOMAIN, "--partner", "bob")
+    code, printed, _ = command(capsys, home, "addon", "domain", "check", DOMAIN, "--partner", "bob")
     said = json.loads(printed)
-    assert code == 2 and said["reason"] == "domain_not_allowed" and "aamio domain allow" in said["fix"] and nothing_was_read(web)
+    assert code == 2 and said["reason"] == "domain_not_allowed" and "aamio addon domain allow" in said["fix"] and nothing_was_read(web)
 
 
 def test_check_of_a_partner_nobody_has(tmp_path, capsys, web):
     home = home_with_partner(tmp_path)
-    command(capsys, home, "domain", "allow", DOMAIN)
-    code, printed, _ = command(capsys, home, "domain", "check", DOMAIN, "--partner", "nobody")
+    command(capsys, home, "addon", "domain", "allow", DOMAIN)
+    code, printed, _ = command(capsys, home, "addon", "domain", "check", DOMAIN, "--partner", "nobody")
     assert code == 2 and json.loads(printed)["reason"] == "partner_unavailable" and nothing_was_read(web)
 
 
 def test_the_command_line_offers_no_message_and_no_key(capsys):
-    for words in (["domain", "check", DOMAIN, "--message", "a" * 64], ["domain", "check", DOMAIN, "--key", "x"], ["domain", "check", DOMAIN]):
+    for words in (["addon", "domain", "check", DOMAIN, "--message", "a" * 64], ["addon", "domain", "check", DOMAIN, "--key", "x"], ["addon", "domain", "check", DOMAIN]):
         with pytest.raises(SystemExit) as stopped:
             cli.main(words)
         assert stopped.value.code == 2
@@ -843,7 +852,7 @@ def test_the_command_line_offers_no_message_and_no_key(capsys):
 def test_a_check_beside_a_runtime_that_holds_the_home_is_refused_by_the_lock(tmp_path, capsys):
     home = str(tmp_path / "home")
     holder = Runtime(home=home, host="https://fake.test", archive=False)
-    code, _, stderr = command(capsys, home, "domain", "list")
+    code, _, stderr = command(capsys, home, "addon", "domain", "list")
     assert code == 1 and stderr.startswith("aamio: ")
     holder.close()
 
@@ -851,7 +860,7 @@ def test_a_check_beside_a_runtime_that_holds_the_home_is_refused_by_the_lock(tmp
 # --------------------------------------------------------------- MCP tool --
 
 def call(runtime, arguments, ask=None):
-    return mcp_server.dispatch(runtime, "aamio_domain_check", arguments, ask=ask)
+    return mcp_server.dispatch(runtime, "aamio_addon_domain_check", arguments, ask=ask)
 
 
 def said(result):
@@ -859,7 +868,8 @@ def said(result):
 
 
 def test_the_tool_is_described_for_what_it_does():
-    tool = next(t for t in mcp_server.TOOLS if t["name"] == "aamio_domain_check")
+    tool = next(t for t in mcp_server.tools() if t["name"] == "aamio_addon_domain_check")
+    assert tool in domain_mcp.TOOLS and tool not in mcp_server.TOOLS, "the add-on's, and not the core's"
     schema = tool["inputSchema"]
     assert sorted(schema["properties"]) == ["domain", "message", "name", "partner"] and schema["required"] == ["domain"]
     assert schema["additionalProperties"] is False and "oneOf" not in schema and "anyOf" not in schema, "hosts refuse those at the top of a tool's schema"
@@ -873,7 +883,7 @@ def test_the_tool_is_described_for_what_it_does():
 @pytest.mark.parametrize("field,value", [("key", "x"), ("verified", True), ("from_key", "x"), ("allow", True), ("subject_source", "partner")])
 def test_a_key_or_a_verdict_from_the_model_is_refused_by_name(field, value, web):
     service, a, b = pair()
-    domain_runtime.allow(a, DOMAIN)
+    policy.allow(a, DOMAIN)
     result = call(a, {"domain": DOMAIN, "partner": "b", field: value})
     assert result["isError"] is True and said(result)["given"] == [field] and "never from the conversation" in said(result)["fix"]
     assert nothing_was_read(web)
@@ -881,7 +891,7 @@ def test_a_key_or_a_verdict_from_the_model_is_refused_by_name(field, value, web)
 
 def test_partner_and_message_together_or_neither(web):
     service, a, b = pair()
-    domain_runtime.allow(a, DOMAIN)
+    policy.allow(a, DOMAIN)
     for arguments in ({"domain": DOMAIN}, {"domain": DOMAIN, "partner": "b", "message": "a" * 64}):
         result = call(a, arguments)
         assert result["isError"] is True and said(result)["reason"] == "choose_partner_or_message"
@@ -891,7 +901,7 @@ def test_partner_and_message_together_or_neither(web):
 def test_a_domain_on_the_list_is_read_and_the_user_is_not_asked(web):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": b.keys.public})
-    domain_runtime.allow(a, DOMAIN)
+    policy.allow(a, DOMAIN)
 
     def never(*args):
         raise AssertionError("the user was asked about a domain they already agreed to")
@@ -903,7 +913,7 @@ def test_a_domain_on_the_list_is_read_and_the_user_is_not_asked(web):
 def test_a_message_over_the_tool(web):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": a.keys.public})
-    domain_runtime.allow(b, DOMAIN)
+    policy.allow(b, DOMAIN)
     digest = sent_and_read(a, b)
     result = call(b, {"domain": DOMAIN, "message": digest})
     assert result["isError"] is False and said(result)["signature_checked_locally"] is True and said(result)["key"] == a.keys.public
@@ -912,7 +922,7 @@ def test_a_message_over_the_tool(web):
 def test_not_listed_and_unreachable_are_answers_and_not_errors(web):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": a.keys.public})
-    domain_runtime.allow(a, DOMAIN)
+    policy.allow(a, DOMAIN)
     assert call(a, {"domain": DOMAIN, "partner": "b"})["isError"] is False
     web.sites[DOMAIN] = http(503, body=b"")
     result = call(a, {"domain": DOMAIN, "partner": "b"})
@@ -923,7 +933,7 @@ def test_without_a_form_nothing_is_read_and_the_answer_says_how_the_user_adds_it
     service, a, b = pair()
     result = call(a, {"domain": DOMAIN, "partner": "b"})
     assert result["isError"] is True and said(result)["reason"] == "domain_not_allowed"
-    assert "aamio domain allow %s" % DOMAIN in said(result)["fix"] and nothing_was_read(web)
+    assert "aamio addon domain allow %s" % DOMAIN in said(result)["fix"] and nothing_was_read(web)
     assert "stop this server" in said(result)["fix"], "which costs a partner check nothing"
 
 
@@ -939,7 +949,7 @@ def test_a_message_is_not_told_to_restart_since_that_would_lose_it(ask, web):
     result = call(b, {"domain": DOMAIN, "message": digest}, ask=broken if ask else None)
 
     assert result["isError"] is True and said(result)["reason"] == "domain_not_allowed" and nothing_was_read(web)
-    assert "aamio domain allow %s the next time" % DOMAIN in said(result)["fix"] and "a later message from the same sender" in said(result)["fix"]
+    assert "aamio addon domain allow %s the next time" % DOMAIN in said(result)["fix"] and "a later message from the same sender" in said(result)["fix"]
     assert "stop this server" not in said(result)["fix"]
 
 
@@ -954,10 +964,10 @@ def test_the_form_asks_for_the_domain_and_does_not_offer_the_one_asked_for(web):
 
     result = call(a, {"domain": DOMAIN, "partner": "b"}, ask=ask)
 
-    assert result["isError"] is False and said(result)["status"] == "listed" and domain_runtime.allowed_domains(a) == [DOMAIN]
-    assert asked["tool"] == "aamio_domain_check" and asked["key"] == mcp_server.DOMAIN_QUESTION
+    assert result["isError"] is False and said(result)["status"] == "listed" and policy.allowed_domains(a) == [DOMAIN]
+    assert asked["tool"] == "aamio_addon_domain_check" and asked["key"] == domain_mcp.QUESTION
     question = json.dumps(asked["question"])
-    assert DOMAIN not in question and "your partner b" in question and "aamio domain forget" in question
+    assert DOMAIN not in question and "your partner b" in question and "aamio addon domain forget" in question
     assert asked["question"]["requestedSchema"]["required"] == ["domain"] and "default" not in question
 
 
@@ -978,27 +988,27 @@ def test_a_form_about_a_message_names_the_key_by_hash_and_shows_nothing_it_wrote
 
 def test_a_lookalike_stops_at_what_the_user_types(web):
     service, a, b = pair()
-    web.sites["supp1ier.example"] = http(body=domain_keys.make([{"key": b.keys.public}]))
+    web.sites["supp1ier.example"] = http(body=lists.make([{"key": b.keys.public}]))
 
     result = call(a, {"domain": "supp1ier.example", "partner": "b"}, ask=lambda *args: {"action": "accept", "content": {"domain": "supplier.example"}})
 
     assert result["isError"] is True and said(result)["reason"] == "domain_not_confirmed"
-    assert domain_runtime.allowed_domains(a) == [] and nothing_was_read(web)
+    assert policy.allowed_domains(a) == [] and nothing_was_read(web)
     assert "supplier.example" not in json.dumps(said(result)), "what the user typed is not handed to the model"
 
 
 def test_what_the_command_line_refuses_stops_at_the_form_too(web):
-    """lower() makes a k of the Kelvin sign, so the form took a name that aamio domain allow refuses."""
+    """lower() makes a k of the Kelvin sign, so the form took a name that aamio addon domain allow refuses."""
     service, a, b = pair()
     web.publish("kit.example", {"key": b.keys.public})
     typed = "\u212ait.example"
     assert typed.lower() == "kit.example"
-    with pytest.raises(domain_runtime.Refused):
-        domain_runtime.allow(a, typed)
+    with pytest.raises(policy.Refused):
+        policy.allow(a, typed)
 
     result = call(a, {"domain": "kit.example", "partner": "b"}, ask=lambda *args: {"action": "accept", "content": {"domain": typed}})
 
-    assert said(result)["reason"] == "domain_not_confirmed" and domain_runtime.allowed_domains(a) == [] and nothing_was_read(web)
+    assert said(result)["reason"] == "domain_not_confirmed" and policy.allowed_domains(a) == [] and nothing_was_read(web)
 
 
 @pytest.mark.parametrize("typed", [DOMAIN.upper(), "  %s\n" % DOMAIN])
@@ -1008,7 +1018,7 @@ def test_capitals_and_a_space_around_it_are_how_people_type(typed, web):
 
     result = call(a, {"domain": DOMAIN, "partner": "b"}, ask=lambda *args: {"action": "accept", "content": {"domain": typed}})
 
-    assert said(result)["status"] == "listed" and domain_runtime.allowed_domains(a) == [DOMAIN]
+    assert said(result)["status"] == "listed" and policy.allowed_domains(a) == [DOMAIN]
 
 
 @pytest.mark.parametrize("answer,reason", [({"action": "decline"}, "domain_declined"), ({"action": "cancel"}, "domain_not_answered"), ({}, "domain_not_answered")])
@@ -1016,14 +1026,14 @@ def test_a_user_who_does_not_agree_adds_nothing_and_nothing_is_read(answer, reas
     service, a, b = pair()
     result = call(a, {"domain": DOMAIN, "partner": "b"}, ask=lambda *args: answer)
     assert result["isError"] is False and said(result)["reason"] == reason and "Do not ask again" in said(result)["note"]
-    assert domain_runtime.allowed_domains(a) == [] and nothing_was_read(web)
+    assert policy.allowed_domains(a) == [] and nothing_was_read(web)
 
 
 @pytest.mark.parametrize("content", [{}, {"domain": 7}, {"domain": ""}, "text"])
 def test_an_accept_with_no_domain_in_it_is_no_agreement(content, web):
     service, a, b = pair()
     result = call(a, {"domain": DOMAIN, "partner": "b"}, ask=lambda *args: {"action": "accept", "content": content})
-    assert said(result)["reason"] == "domain_not_confirmed" and domain_runtime.allowed_domains(a) == [] and nothing_was_read(web)
+    assert said(result)["reason"] == "domain_not_confirmed" and policy.allowed_domains(a) == [] and nothing_was_read(web)
 
 
 def test_a_form_that_could_not_be_shown_is_said(web):
@@ -1033,7 +1043,7 @@ def test_a_form_that_could_not_be_shown_is_said(web):
         raise mcp_server.NoDialog("the app answered the question with an error: no")
 
     result = call(a, {"domain": DOMAIN, "partner": "b"}, ask=broken)
-    assert result["isError"] is True and "the app answered" in said(result)["fix"] and "aamio domain allow" in said(result)["fix"]
+    assert result["isError"] is True and "the app answered" in said(result)["fix"] and "aamio addon domain allow" in said(result)["fix"]
 
 
 def test_a_subject_that_does_not_exist_never_reaches_the_user(web):
@@ -1047,7 +1057,7 @@ def test_a_subject_that_does_not_exist_never_reaches_the_user(web):
 
 
 def request(arguments, state=None, responses=None, capabilities=FORM, rid=1):
-    params = {"name": "aamio_domain_check", "arguments": arguments, "_meta": {
+    params = {"name": "aamio_addon_domain_check", "arguments": arguments, "_meta": {
         "io.modelcontextprotocol/protocolVersion": MODERN,
         "io.modelcontextprotocol/clientInfo": {"name": "check", "version": "1"},
         "io.modelcontextprotocol/clientCapabilities": capabilities,
@@ -1067,27 +1077,27 @@ def test_over_2026_07_28_the_question_is_the_result_and_the_second_call_reads(we
     asked = mcp_server.handle(a, request(arguments))
 
     result = asked["result"]
-    assert result["resultType"] == "input_required" and list(result["inputRequests"]) == [mcp_server.DOMAIN_QUESTION]
-    form = result["inputRequests"][mcp_server.DOMAIN_QUESTION]
+    assert result["resultType"] == "input_required" and list(result["inputRequests"]) == [domain_mcp.QUESTION]
+    form = result["inputRequests"][domain_mcp.QUESTION]
     assert form["method"] == "elicitation/create" and form["params"]["mode"] == "form" and DOMAIN not in json.dumps(form)
-    assert nothing_was_read(web) and domain_runtime.allowed_domains(a) == []
+    assert nothing_was_read(web) and policy.allowed_domains(a) == []
 
-    answered = mcp_server.handle(a, request(arguments, result["requestState"], {mcp_server.DOMAIN_QUESTION: {"action": "accept", "content": {"domain": DOMAIN}}}, rid=2))
+    answered = mcp_server.handle(a, request(arguments, result["requestState"], {domain_mcp.QUESTION: {"action": "accept", "content": {"domain": DOMAIN}}}, rid=2))
 
-    assert answered["result"]["structuredContent"]["status"] == "listed" and domain_runtime.allowed_domains(a) == [DOMAIN]
+    assert answered["result"]["structuredContent"]["status"] == "listed" and policy.allowed_domains(a) == [DOMAIN]
 
 
 def test_an_answer_cannot_be_carried_over_to_another_domain_or_another_subject(web):
     service, a, b = pair()
     web.publish(DOMAIN, {"key": b.keys.public})
-    web.sites["other.example"] = http(body=domain_keys.make([]))
+    web.sites["other.example"] = http(body=lists.make([]))
     asked = mcp_server.handle(a, request({"domain": DOMAIN, "partner": "b"}))
     state = asked["result"]["requestState"]
 
-    moved = mcp_server.handle(a, request({"domain": "other.example", "partner": "b"}, state, {mcp_server.DOMAIN_QUESTION: {"action": "accept", "content": {"domain": "other.example"}}}, rid=2))
+    moved = mcp_server.handle(a, request({"domain": "other.example", "partner": "b"}, state, {domain_mcp.QUESTION: {"action": "accept", "content": {"domain": "other.example"}}}, rid=2))
 
     assert moved["result"]["isError"] is True and moved["result"]["structuredContent"]["reason"] == "domain_not_allowed"
-    assert domain_runtime.allowed_domains(a) == [] and nothing_was_read(web)
+    assert policy.allowed_domains(a) == [] and nothing_was_read(web)
 
 
 def test_an_answer_is_used_once(web):
@@ -1095,13 +1105,13 @@ def test_an_answer_is_used_once(web):
     web.publish(DOMAIN, {"key": b.keys.public})
     arguments = {"domain": DOMAIN, "partner": "b"}
     state = mcp_server.handle(a, request(arguments))["result"]["requestState"]
-    answer = {mcp_server.DOMAIN_QUESTION: {"action": "accept", "content": {"domain": DOMAIN}}}
+    answer = {domain_mcp.QUESTION: {"action": "accept", "content": {"domain": DOMAIN}}}
     mcp_server.handle(a, request(arguments, state, answer, rid=2))
-    domain_runtime.forget(a, DOMAIN)
+    policy.forget(a, DOMAIN)
 
     again = mcp_server.handle(a, request(arguments, state, answer, rid=3))
 
-    assert again["result"]["isError"] is True and domain_runtime.allowed_domains(a) == []
+    assert again["result"]["isError"] is True and policy.allowed_domains(a) == []
 
 
 def test_a_state_from_the_partner_question_opens_no_website(web):
@@ -1110,15 +1120,15 @@ def test_a_state_from_the_partner_question_opens_no_website(web):
     about = json.dumps([DOMAIN, "b", None, None])
     state = mcp_server.seal_state(about)
 
-    answered = mcp_server.handle(a, request(arguments, state, {mcp_server.DOMAIN_QUESTION: {"action": "accept", "content": {"domain": DOMAIN}}}))
+    answered = mcp_server.handle(a, request(arguments, state, {domain_mcp.QUESTION: {"action": "accept", "content": {"domain": DOMAIN}}}))
 
-    assert answered["result"]["isError"] is True and domain_runtime.allowed_domains(a) == [] and nothing_was_read(web)
+    assert answered["result"]["isError"] is True and policy.allowed_domains(a) == [] and nothing_was_read(web)
 
 
 def test_an_app_that_cannot_show_a_form_gets_the_command_line(web):
     service, a, b = pair()
     reply = mcp_server.handle(a, request({"domain": DOMAIN, "partner": "b"}, capabilities={}))
-    assert reply["result"]["isError"] is True and "aamio domain allow" in reply["result"]["structuredContent"]["fix"] and nothing_was_read(web)
+    assert reply["result"]["isError"] is True and "aamio addon domain allow" in reply["result"]["structuredContent"]["fix"] and nothing_was_read(web)
 
 
 def test_before_2026_07_28_the_question_goes_out_on_the_wire_while_the_call_waits(web):
@@ -1127,10 +1137,10 @@ def test_before_2026_07_28_the_question_goes_out_on_the_wire_while_the_call_wait
     answer = json.dumps({"jsonrpc": "2.0", "id": "aamio-1", "result": {"action": "accept", "content": {"domain": DOMAIN}}}) + "\n"
     wire = mcp_server.Wire(io.StringIO(answer), io.StringIO())
     session = {"version": "2025-11-25", "capabilities": {"elicitation": {}}, "wire": wire}
-    call_it = {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "aamio_domain_check", "arguments": {"domain": DOMAIN, "partner": "b"}}}
+    call_it = {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "aamio_addon_domain_check", "arguments": {"domain": DOMAIN, "partner": "b"}}}
 
     reply = mcp_server.handle(a, call_it, session)
 
     sent = json.loads(wire.stdout.getvalue().splitlines()[0])
     assert sent["method"] == "elicitation/create" and sent["params"]["mode"] == "form" and DOMAIN not in json.dumps(sent)
-    assert reply["result"]["structuredContent"]["status"] == "listed" and domain_runtime.allowed_domains(a) == [DOMAIN]
+    assert reply["result"]["structuredContent"]["status"] == "listed" and policy.allowed_domains(a) == [DOMAIN]

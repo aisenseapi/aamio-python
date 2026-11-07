@@ -1153,6 +1153,39 @@ class Runtime:
     def partner_list(self):
         return [{"name": p["name"], "key": p["key"], "hash_prefix": key_hash(p["key"])[:8]} for p in self.partners]
 
+    # ------------------------------------------------ what an add-on may use --
+    #
+    # An add-on keeps what it keeps in this home and asks this runtime which key
+    # it means. These are the ways in, so that an add-on never reaches into
+    # channels and files by their private names.
+
+    def home_file(self, name):
+        """The path of a file of that name in this home."""
+        return self._path(name)
+
+    def save_json(self, name, value):
+        """Write a file in this home, private from its first byte, and not at all after close."""
+        self._save_json(name, value)
+
+    def verified_signers(self, sha256):
+        """The keys that signed a message this process read and verified, by its hash. The same bytes may carry more than one.
+
+        What this process checked lives in its memory and not in state.json, so a
+        message read by an earlier process is not here. An observation the
+        channel's allowlist kept out is: a signature that checked is not a
+        permission. Read under the locks and held by none of them.
+        """
+        with self.lock:
+            channels = list(self.channels.values())
+        keys = []
+        for channel in channels:
+            with channel.lock:
+                rows = [dict(row) for row in channel.observed.values()]
+            for row in rows:
+                if row.get("sha256") == sha256 and row.get("verified") is True and row.get("from_key") not in keys:
+                    keys.append(row.get("from_key"))
+        return keys
+
     def partner_by_name(self, name):
         for p in self.partners:
             if p["name"].lower() == str(name).lower():

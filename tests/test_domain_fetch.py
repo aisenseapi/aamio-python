@@ -23,9 +23,10 @@ import time
 import pytest
 
 sys.path.insert(0, "src")
+sys.path.insert(0, os.path.join("addons", "domain-keys", "src"))
 
-from aamio import domain_fetch, domain_keys
-from aamio.domain_fetch import ADDRESS_POLICY, DENIED_NETWORKS, IPV6_GLOBAL, check, public_address
+from aamio_domain_keys import fetch, lists
+from aamio_domain_keys.fetch import ADDRESS_POLICY, DENIED_NETWORKS, IPV6_GLOBAL, check, public_address
 
 VECTORS = json.loads((pathlib.Path(__file__).parent / "domain_fetch_vectors.json").read_text(encoding="utf-8"))
 
@@ -34,7 +35,7 @@ OTHER = "wK1BJa9cuHn7Y7QPC_4EQ6X_jtCbgbMbR6pqT-VGmmA"
 PILOT = OTHER
 PUBLIC = "93.184.216.34"
 WHEN = datetime.datetime(2026, 11, 7, 12, 0, 0, tzinfo=datetime.timezone.utc)
-LIST = domain_keys.make([{"key": KEY, "name": "support"}])
+LIST = lists.make([{"key": KEY, "name": "support"}])
 
 
 def http(status=200, headers=None, body=LIST):
@@ -106,7 +107,7 @@ def test_a_listed_key_with_what_was_read_and_when():
 
     assert result == {"domain": "example.org", "key": KEY, "checked_at": "2026-11-07T12:00:00Z", "requested_name": "support",
                       "status": "listed", "reason": "key_listed", "matched_name": "support",
-                      "document_sha256": domain_keys.match(LIST, KEY)["document_sha256"]}
+                      "document_sha256": lists.match(LIST, KEY)["document_sha256"]}
     assert asked == {"resolve": ["example.org"], "connect": [(PUBLIC, "example.org")]}
     assert connection.closed
 
@@ -344,10 +345,10 @@ def test_the_checked_address_is_opened_with_tls_for_the_domain(monkeypatch):
             return "tls"
 
     made = Context()
-    monkeypatch.setattr(domain_fetch.socket, "create_connection", lambda address, timeout: seen.update(address=address) or RawSocket(seen))
-    monkeypatch.setattr(domain_fetch.ssl, "create_default_context", lambda: made)
+    monkeypatch.setattr(fetch.socket, "create_connection", lambda address, timeout: seen.update(address=address) or RawSocket(seen))
+    monkeypatch.setattr(fetch.ssl, "create_default_context", lambda: made)
 
-    assert domain_fetch._open("2606:4700:4700::1111", "example.org", 1.0, clock=lambda: 0.0) == "tls"
+    assert fetch._open("2606:4700:4700::1111", "example.org", 1.0, clock=lambda: 0.0) == "tls"
     assert seen == {"address": ("2606:4700:4700::1111", 443), "timeouts": [1.0], "server_hostname": "example.org"}
     assert made.check_hostname is True and made.verify_mode == ssl.CERT_REQUIRED
 
@@ -366,9 +367,9 @@ def test_the_handshake_gets_what_the_connection_left_and_not_the_whole_share_aga
             seen["handshake"] = True
             return "tls"
 
-    monkeypatch.setattr(domain_fetch.socket, "create_connection", slow_connection)
+    monkeypatch.setattr(fetch.socket, "create_connection", slow_connection)
 
-    assert domain_fetch._open(PUBLIC, "example.org", 1.0, Context(), clock=lambda: now[0]) == "tls"
+    assert fetch._open(PUBLIC, "example.org", 1.0, Context(), clock=lambda: now[0]) == "tls"
     assert seen == {"connect_timeout": 1.0, "timeouts": [pytest.approx(0.25)], "handshake": True}
 
 
@@ -384,10 +385,10 @@ def test_a_connection_that_used_up_the_share_never_starts_the_handshake(monkeypa
         def wrap_socket(self, raw, server_hostname):
             seen["handshake"] = True
 
-    monkeypatch.setattr(domain_fetch.socket, "create_connection", slower_connection)
+    monkeypatch.setattr(fetch.socket, "create_connection", slower_connection)
 
     with pytest.raises(TimeoutError):
-        domain_fetch._open(PUBLIC, "example.org", 1.0, Context(), clock=lambda: now[0])
+        fetch._open(PUBLIC, "example.org", 1.0, Context(), clock=lambda: now[0])
     assert seen == {"closed": True}
 
 
@@ -398,10 +399,10 @@ def test_a_handshake_that_fails_closes_the_socket(monkeypatch):
         def wrap_socket(self, raw, server_hostname):
             raise ssl.SSLCertVerificationError("unable to get local issuer certificate")
 
-    monkeypatch.setattr(domain_fetch.socket, "create_connection", lambda address, timeout: RawSocket(seen))
+    monkeypatch.setattr(fetch.socket, "create_connection", lambda address, timeout: RawSocket(seen))
 
     with pytest.raises(ssl.SSLError):
-        domain_fetch._open(PUBLIC, "example.org", 1.0, Context(), clock=lambda: 0.0)
+        fetch._open(PUBLIC, "example.org", 1.0, Context(), clock=lambda: 0.0)
     assert seen == {"timeouts": [1.0], "closed": True}
 
 
@@ -411,9 +412,9 @@ def test_the_lookup_keeps_each_address_once_and_in_order(monkeypatch):
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC, 443)),
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC, 443)),
     ]
-    monkeypatch.setattr(domain_fetch.socket, "getaddrinfo", lambda *args: found)
+    monkeypatch.setattr(fetch.socket, "getaddrinfo", lambda *args: found)
 
-    assert domain_fetch._resolve("example.org", 1.0) == ["2606:4700:4700::1111", PUBLIC]
+    assert fetch._resolve("example.org", 1.0) == ["2606:4700:4700::1111", PUBLIC]
 
 
 def end_lookups(release):
@@ -431,11 +432,11 @@ def test_a_lookup_that_hangs_is_given_up_on_time_and_never_keeps_python_alive(mo
         release.wait(5)
         return []
 
-    monkeypatch.setattr(domain_fetch.socket, "getaddrinfo", hang)
+    monkeypatch.setattr(fetch.socket, "getaddrinfo", hang)
     started = time.monotonic()
     try:
         with pytest.raises(TimeoutError):
-            domain_fetch._resolve("example.org", 0.05)
+            fetch._resolve("example.org", 0.05)
         assert time.monotonic() - started < 1
         lingering = [thread for thread in threading.enumerate() if thread.name == "aamio-domain-keys-lookup"]
         assert lingering and all(thread.daemon for thread in lingering), "a lookup left running would hold Python open at exit"
@@ -447,10 +448,10 @@ def test_a_lookup_that_fails_says_so(monkeypatch):
     def fail(*args):
         raise socket.gaierror("no such name")
 
-    monkeypatch.setattr(domain_fetch.socket, "getaddrinfo", fail)
+    monkeypatch.setattr(fetch.socket, "getaddrinfo", fail)
 
     with pytest.raises(socket.gaierror):
-        domain_fetch._resolve("example.org", 1.0)
+        fetch._resolve("example.org", 1.0)
 
 
 def test_lookups_that_never_end_are_capped_until_they_really_end(monkeypatch):
@@ -462,22 +463,22 @@ def test_lookups_that_never_end_are_capped_until_they_really_end(monkeypatch):
         release.wait(10)
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC, 443))]
 
-    monkeypatch.setattr(domain_fetch.socket, "getaddrinfo", hang)
+    monkeypatch.setattr(fetch.socket, "getaddrinfo", hang)
     try:
-        for _ in range(domain_fetch.MAX_LOOKUPS):
+        for _ in range(fetch.MAX_LOOKUPS):
             with pytest.raises(TimeoutError):
-                domain_fetch._resolve("example.org", 0.02)
+                fetch._resolve("example.org", 0.02)
 
-        with pytest.raises(domain_fetch._Refused) as busy:
-            domain_fetch._resolve("example.org", 0.02)
-        assert busy.value.reason == "dns_busy" and len(started) <= domain_fetch.MAX_LOOKUPS
+        with pytest.raises(fetch._Refused) as busy:
+            fetch._resolve("example.org", 0.02)
+        assert busy.value.reason == "dns_busy" and len(started) <= fetch.MAX_LOOKUPS
 
         result = check("example.org", KEY, deadline_seconds=0.02, now=lambda: WHEN)
         assert result["status"] == "unreachable" and result["reason"] == "dns_busy"
     finally:
         end_lookups(release)
 
-    assert domain_fetch._resolve("example.org", 1.0) == [PUBLIC], "a lookup that ended gave its place back"
+    assert fetch._resolve("example.org", 1.0) == [PUBLIC], "a lookup that ended gave its place back"
 
 
 def test_building_the_tls_context_counts_against_the_share(monkeypatch):
@@ -497,10 +498,10 @@ def test_building_the_tls_context_counts_against_the_share(monkeypatch):
         now[0] += 0.4
         return RawSocket(seen)
 
-    monkeypatch.setattr(domain_fetch.ssl, "create_default_context", slow_context)
-    monkeypatch.setattr(domain_fetch.socket, "create_connection", slow_connection)
+    monkeypatch.setattr(fetch.ssl, "create_default_context", slow_context)
+    monkeypatch.setattr(fetch.socket, "create_connection", slow_connection)
 
-    assert domain_fetch._open(PUBLIC, "example.org", 1.0, clock=lambda: now[0]) == "tls"
+    assert fetch._open(PUBLIC, "example.org", 1.0, clock=lambda: now[0]) == "tls"
     assert seen == {"connect_timeout": pytest.approx(0.6), "timeouts": [pytest.approx(0.2)]}
 
 
@@ -517,11 +518,11 @@ def test_a_tls_context_that_took_the_whole_share_opens_no_connection(monkeypatch
     def connection(address, timeout):
         raise AssertionError("a connection was opened with no time left")
 
-    monkeypatch.setattr(domain_fetch.ssl, "create_default_context", slow_context)
-    monkeypatch.setattr(domain_fetch.socket, "create_connection", connection)
+    monkeypatch.setattr(fetch.ssl, "create_default_context", slow_context)
+    monkeypatch.setattr(fetch.socket, "create_connection", connection)
 
     with pytest.raises(TimeoutError):
-        domain_fetch._open(PUBLIC, "example.org", 1.0, clock=lambda: now[0])
+        fetch._open(PUBLIC, "example.org", 1.0, clock=lambda: now[0])
 
 
 def test_a_certificate_that_does_not_fit_stops_the_read():

@@ -432,7 +432,8 @@ def test_the_readme_counts_what_pip_installs():
     the last release is named apart, and the next version stops here until the words follow."""
     readme = open(os.path.join(os.path.dirname(HERE), "README.md"), encoding="utf-8").read()
 
+    assert "twenty-four tools" in readme, "the core, whatever is installed beside it"
     if mcp_server.__version__ == "0.6.24":
-        assert "twenty-four tools" in readme and "In the source and not yet in the package: `aamio_domain_check`." in readme
+        assert "In the source and not yet in a package: `aamio_addon_domain_check`" in readme
     else:
-        assert "twenty-five tools" in readme and "not yet in the package" not in readme
+        assert "not yet in a package" not in readme

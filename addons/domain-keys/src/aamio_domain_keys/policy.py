@@ -1,6 +1,6 @@
 """Checking a key against a website, from inside a runtime.
 
-domain_keys.py is the format and domain_fetch.py is the read. This is the part
+lists.py is the format and fetch.py is the read. This is the part
 that decides what is asked: which key, and which websites may be read at all.
 
 The key never comes from whoever asks. For a partner it comes from the address
@@ -40,7 +40,7 @@ import re
 import threading
 import time
 
-from . import domain_fetch, domain_keys
+from . import fetch, lists
 
 POLICY_FILE = "domains.json"
 MAX_AT_ONCE = 2
@@ -114,7 +114,7 @@ LIMITS = Limits()
 
 
 def _unreadable(runtime):
-    return Refused("domain_policy_unreadable", "%s could not be read as a list of domains, so no website is read. Repair the file, or move it away and add the domains again with aamio domain allow." % runtime._path(POLICY_FILE))
+    return Refused("domain_policy_unreadable", "%s could not be read as a list of domains, so no website is read. Repair the file, or move it away and add the domains again with aamio addon domain allow." % runtime.home_file(POLICY_FILE))
 
 
 def allowed_domains(runtime) -> list:
@@ -122,7 +122,7 @@ def allowed_domains(runtime) -> list:
     try:
         # Under the lock a write takes: on Windows a rename fails while another
         # thread has the file open, and a check must not cost the user their yes.
-        with runtime.lock, open(runtime._path(POLICY_FILE), "rb") as handle:
+        with runtime.lock, open(runtime.home_file(POLICY_FILE), "rb") as handle:
             rows = json.loads(handle.read().decode("utf-8"))
     except FileNotFoundError:
         return []
@@ -132,7 +132,7 @@ def allowed_domains(runtime) -> list:
         raise _unreadable(runtime)
     for row in rows:
         try:
-            if domain_keys.normalise_domain(row) != row:
+            if lists.normalise_domain(row) != row:
                 raise _unreadable(runtime)
         except Refused:
             raise
@@ -143,7 +143,7 @@ def allowed_domains(runtime) -> list:
 
 def _host(domain):
     try:
-        return domain_keys.normalise_domain(domain)
+        return lists.normalise_domain(domain)
     except ValueError:
         raise Refused("invalid_domain", "A domain is a plain host name of two labels or more, as example.org, with no https://, port or path. www.example.org and example.org are different places. Internationalised names are not read yet.") from None
 
@@ -158,16 +158,16 @@ def is_same_host(typed, host) -> bool:
     if not isinstance(typed, str):
         return False
     try:
-        return domain_keys.normalise_domain(typed.strip()) == host
+        return lists.normalise_domain(typed.strip()) == host
     except ValueError:
         return False
 
 
 def _write(runtime, rows):
     try:
-        runtime._save_json(POLICY_FILE, rows)
+        runtime.save_json(POLICY_FILE, rows)
     except OSError:
-        raise Refused("domain_policy_unwritable", "%s could not be written, so the list is as it was. Check the disk and the home's permissions." % runtime._path(POLICY_FILE)) from None
+        raise Refused("domain_policy_unwritable", "%s could not be written, so the list is as it was. Check the disk and the home's permissions." % runtime.home_file(POLICY_FILE)) from None
 
 
 def allow(runtime, domain) -> dict:
@@ -179,7 +179,7 @@ def allow(runtime, domain) -> dict:
             _write(runtime, sorted(held + [host]))
             # Read back, since a save after close writes nothing and says so only to the log.
             if host not in allowed_domains(runtime):
-                raise Refused("domain_policy_unwritable", "%s was not written, so the list is as it was." % runtime._path(POLICY_FILE))
+                raise Refused("domain_policy_unwritable", "%s was not written, so the list is as it was." % runtime.home_file(POLICY_FILE))
             return {"domain": host, "added": True, "domains": sorted(held + [host])}
     return {"domain": host, "added": False, "domains": held}
 
@@ -195,7 +195,7 @@ def forget(runtime, domain) -> dict:
             # Read back, as allow does: a website called gone and still on the
             # list would go on being read by the next runtime.
             if host in allowed_domains(runtime):
-                raise Refused("domain_policy_unwritable", "%s was not written, so the list is as it was." % runtime._path(POLICY_FILE))
+                raise Refused("domain_policy_unwritable", "%s was not written, so the list is as it was." % runtime.home_file(POLICY_FILE))
             return {"domain": host, "removed": True, "domains": left}
     return {"domain": host, "removed": False, "domains": held}
 
@@ -214,34 +214,26 @@ def subject_snapshot(runtime, partner=None, message=None) -> dict:
             raise Refused("invalid_partner", "partner is a name in the address book.")
         with runtime.lock:
             row = runtime.partner_by_name(partner)
-            if row is None or not domain_keys.canonical_key(row.get("key")):
+            if row is None or not lists.canonical_key(row.get("key")):
                 raise Refused("partner_unavailable", "No partner by that name with a usable key is in the address book. aamio_partners or aamio partner list shows who is.")
             key, label = row["key"], row["name"]
         return {"key": key, "subject_source": "partner", "partner": label, "signature_checked_locally": None}
     if not isinstance(message, str) or re.fullmatch(r"[0-9a-f]{64}", message) is None:
         raise Refused("invalid_message_hash", "message is the sha256 of a message as read shows it: 64 lowercase hexadecimal characters.")
-    with runtime.lock:
-        channels = list(runtime.channels.values())
-    keys = set()
-    for channel in channels:
-        with channel.lock:
-            observations = [dict(row) for row in channel.observed.values()]
-        for row in observations:
-            if row.get("sha256") == message and row.get("verified") is True:
-                if not domain_keys.canonical_key(row.get("from_key")):
-                    raise Refused("invalid_local_observation", "The message is recorded here without a usable signing key, so it cannot be checked.")
-                keys.add(row["from_key"])
+    keys = runtime.verified_signers(message)
+    if any(not lists.canonical_key(key) for key in keys):
+        raise Refused("invalid_local_observation", "The message is recorded here without a usable signing key, so it cannot be checked.")
     if not keys:
         raise Refused("source_unavailable", "This process holds no verified message with that hash. Only a message this process read itself and whose signature checked out can be used: an unsigned one has no key to check, and what an earlier process read is not kept and cannot be read again. Check a later message from the same sender, or the partner by name.")
     if len(keys) != 1:
         raise Refused("ambiguous_signer", "Different keys signed the same bytes, so the hash does not say which one to check. Check the partner by name.")
-    return {"key": keys.pop(), "subject_source": "message", "message_sha256": message, "signature_checked_locally": True}
+    return {"key": keys[0], "subject_source": "message", "message_sha256": message, "signature_checked_locally": True}
 
 
 def prepare(runtime, domain, partner=None, message=None, name=None):
     """The exact host and the subject, or Refused. Everything that can be settled here is settled before anyone is asked anything."""
     host = _host(domain)
-    if name is not None and not domain_keys.valid_name(name):
+    if name is not None and not lists.valid_name(name):
         raise Refused("invalid_requested_name", "name is the label on the list: 1 to 64 characters of a-z, 0-9, dot, underscore and dash. Leave it out to look for the key under any label.")
     return host, subject_snapshot(runtime, partner=partner, message=message)
 
@@ -285,13 +277,13 @@ def check(runtime, domain, partner=None, message=None, name=None, **network) -> 
     Refused before anything is looked up: a bad domain or name, no such subject,
     a domain that is not on the list, a list that cannot be read, and a process
     at its limits. No lock is held during the read, so polling goes on.
-    network is passed to domain_fetch.check, for tests.
+    network is passed to fetch.check, for tests.
     """
     host = subject = None
     try:
         host, subject = prepare(runtime, domain, partner, message, name)
         if host not in allowed_domains(runtime):
-            raise Refused("domain_not_allowed", "This runtime reads only websites the user has put on its list, and this one is not there. The user adds it with aamio domain allow %s, from their own records and never from the message being checked. Over MCP aamio_domain_check asks them." % host)
+            raise Refused("domain_not_allowed", "This runtime reads only websites the user has put on its list, and this one is not there. The user adds it with aamio addon domain allow %s, from their own records and never from the message being checked. Over MCP aamio_addon_domain_check asks them." % host)
         deny = deny_networks()
     except Refused as refused:
         return refusal(refused, host, subject, name)
@@ -299,7 +291,7 @@ def check(runtime, domain, partner=None, message=None, name=None, **network) -> 
     if busy is not None:
         return refusal(Refused(busy, "At most %d checks run at once and %d start per minute here. Nothing was read. Try again shortly." % (LIMITS.at_once, LIMITS.per_window), status="unreachable"), host, subject, name)
     try:
-        found = domain_fetch.check(host, subject["key"], name, allowed={host}, deny=deny, **network)
+        found = fetch.check(host, subject["key"], name, allowed={host}, deny=deny, **network)
     finally:
         LIMITS.give_back()
     answer = dict(found, **{field: value for field, value in subject.items() if field != "key"})

@@ -21,6 +21,12 @@ authors = [{ name = "AI SENSE AS" }]
 dependencies = ["pynacl>=1.5"]
 keywords = ["aamio", "agents", "mcp", "rendezvous", "ed25519"]
 
+# An add-on is a distribution of its own, found through the entry point group
+# aamio.addons, so that installing one is the user's choice. The extras name
+# them, so `pip install "aamio[domain-keys]"` is the whole of it.
+[project.optional-dependencies]
+domain-keys = ["aamio-domain-keys>=0.1"]
+
 [project.urls]
 Homepage = "https://aamio.at"
 Reference = "https://aamio.at/api.md"
@@ -43,5 +49,5 @@ where = ["src"]
 # Test the tree, not whatever happens to be installed. Without this pytest
 # imports aamio from site-packages, so a green run can be green about
 # a different version of the code than the one being edited.
-pythonpath = ["src"]
+pythonpath = ["src", "addons/domain-keys/src"]
 testpaths = ["tests"]

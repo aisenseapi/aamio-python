@@ -1,6 +1,6 @@
 """Reading a domain key list from the domain itself, so that a stranger cannot turn the read on anyone else.
 
-domain_keys.py is the format. This is the one way this client reads a list
+lists.py is the format. This is the one way this client reads a list
 from a website, and it is built for the case where the domain came from a
 message: whatever it names, the read reaches only the public internet, only
 that host, only once and only for a few seconds.
@@ -47,7 +47,7 @@ import ssl
 import threading
 import time
 
-from . import domain_keys
+from . import lists
 
 PORT = 443
 DEADLINE_SECONDS = 5.0
@@ -201,7 +201,7 @@ def _read_response(connection, deadline, clock):
     if status != 200:
         return status, headers, b""
     while True:
-        if len(body) > domain_keys.MAX_BYTES:
+        if len(body) > lists.MAX_BYTES:
             raise _Refused("invalid", "body_limit")
         chunk = receive()
         if not chunk:
@@ -238,13 +238,13 @@ def check(domain, key, name=None, allowed=None, deny=(), context=None, resolve=N
         return dict(result, status=status, reason=reason, **extra)
 
     try:
-        host = domain_keys.normalise_domain(domain)
+        host = lists.normalise_domain(domain)
     except ValueError:
         return answer("invalid", "invalid_domain")
     result["domain"] = host
-    if not domain_keys.canonical_key(key):
+    if not lists.canonical_key(key):
         return answer("invalid", "invalid_subject_key")
-    if name is not None and not domain_keys.valid_name(name):
+    if name is not None and not lists.valid_name(name):
         return answer("invalid", "invalid_requested_name")
     if allowed is not None and host not in allowed:
         return answer("invalid", "domain_not_allowed")
@@ -291,7 +291,7 @@ def check(domain, key, name=None, allowed=None, deny=(), context=None, resolve=N
 
     try:
         request = ("GET %s HTTP/1.0\r\nHost: %s\r\nAccept: application/json\r\nAccept-Encoding: identity\r\n"
-                   "User-Agent: %s\r\nConnection: close\r\n\r\n" % (domain_keys.PATH, host, USER_AGENT)).encode("ascii")
+                   "User-Agent: %s\r\nConnection: close\r\n\r\n" % (lists.PATH, host, USER_AGENT)).encode("ascii")
         connection.settimeout(max(deadline - clock(), 0.001))
         connection.sendall(request)
         status, headers, body = _read_response(connection, deadline, clock)
@@ -325,7 +325,7 @@ def check(domain, key, name=None, allowed=None, deny=(), context=None, resolve=N
     if "content-length" in headers and headers["content-length"].strip() != str(len(body)):
         return answer("invalid", "length_mismatch")
 
-    found = domain_keys.match(body, key, name)
+    found = lists.match(body, key, name)
     if found["status"] == "invalid":
         return answer("invalid", "invalid_document", detail=found.get("detail"))
     extra = {"document_sha256": found["document_sha256"]}

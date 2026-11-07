@@ -9,7 +9,7 @@ and a reader who already knows the domain from its own records can ask whether
 the key behind a message it checked is on that list. This module is the format
 and nothing else: a strict parser, the match, a generator for the file, and the
 syntax of a domain. It opens no connection. Fetching the list is the separate,
-hardened step in domain_fetch.py, and nothing here may be taken for it.
+hardened step in fetch.py, and nothing here may be taken for it.
 
 A listed key says that this exact site listed this key when it was read. It is
 not an identity, an authority to act or proof that a message is true, and it
@@ -33,7 +33,6 @@ The shared vectors are in tests/domain_keys_vectors.json, for every client that
 takes this up to give the same answers.
 """
 
-import argparse
 import base64
 import binascii
 import hashlib
@@ -41,7 +40,6 @@ import ipaddress
 import json
 import math
 import re
-import sys
 
 VERSION = 1
 PATH = "/.well-known/aamio-keys.json"
@@ -270,46 +268,3 @@ def check_file(path, key=None, name=None):
     result["source"] = "local_file"
     result["domain_checked"] = False
     return result, code
-
-
-def _entry_argument(text: str) -> dict:
-    # KEY or KEY:NAME. Neither base64url nor a name holds a colon.
-    key, _, name = text.partition(":")
-    return {"key": key, "name": name} if name else {"key": key}
-
-
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="python -m aamio.domain_keys",
-        description="The domain key list format, on local files only. Nothing here reads a domain.")
-    commands = parser.add_subparsers(dest="command", required=True)
-    check = commands.add_parser("check", help="check a local file, and whether it lists a key")
-    check.add_argument("file")
-    check.add_argument("--key", help="a public key to look for in the file")
-    check.add_argument("--name", help="and the name it should be listed under")
-    made = commands.add_parser("make", help="write the file for a list of public keys to standard output")
-    made.add_argument("entries", nargs="*", metavar="KEY[:NAME]")
-    made.add_argument("--empty", action="store_true", help="write a list with no key, on purpose")
-    args = parser.parse_args(argv)
-
-    if args.command == "make":
-        if not args.entries and not args.empty:
-            parser.error("give at least one KEY[:NAME], or --empty for a list that lists no key")
-        try:
-            raw = make([_entry_argument(text) for text in args.entries])
-        except InvalidDocument as error:
-            print(json.dumps({"error": error.reason}), file=sys.stderr)
-            return 2
-        sys.stdout.buffer.write(raw)
-        sys.stdout.flush()
-        return 0
-
-    if args.name is not None and args.key is None:
-        parser.error("--name needs --key")
-    result, code = check_file(args.file, args.key, args.name)
-    print(json.dumps(result))
-    return code
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

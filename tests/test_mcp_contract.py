@@ -25,8 +25,15 @@ def instructions():
     return reply["result"]["instructions"]
 
 
-def test_twenty_five_tools_in_the_source():
-    assert len(mcp_server.TOOLS) == 25
+def test_twenty_four_tools_in_the_core():
+    assert len(mcp_server.TOOLS) == 24
+
+
+def test_an_installed_add_on_brings_its_tools(monkeypatch):
+    monkeypatch.setenv("AAMIO_ADDONS", "aamio_domain_keys")
+    assert [t["name"] for t in mcp_server.tools()] == [t["name"] for t in mcp_server.TOOLS] + ["aamio_addon_domain_check"]
+    monkeypatch.setenv("AAMIO_ADDONS", "")
+    assert mcp_server.tools() == mcp_server.TOOLS
 
 
 def test_the_readme_names_every_tool():
@@ -35,6 +42,7 @@ def test_the_readme_names_every_tool():
         readme = handle.read()
 
     assert [one["name"] for one in mcp_server.TOOLS if "`%s`" % one["name"] not in readme] == []
+    assert "`aamio_addon_domain_check`" in readme, "and the add-on's tool, as an add-on's"
 
 
 def test_read_says_plain_text_and_unknown_key_are_not_unsigned():
