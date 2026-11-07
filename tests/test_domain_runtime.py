@@ -188,6 +188,18 @@ def test_a_save_that_a_closed_runtime_dropped_is_not_called_added():
     assert refused.value.reason == "domain_policy_unwritable"
 
 
+def test_a_removal_that_a_closed_runtime_dropped_is_not_called_removed():
+    service, a, b = pair()
+    domain_runtime.allow(a, DOMAIN)
+    a.home_released = True
+
+    with pytest.raises(domain_runtime.Refused) as refused:
+        domain_runtime.forget(a, DOMAIN)
+
+    assert refused.value.reason == "domain_policy_unwritable"
+    assert domain_runtime.allowed_domains(a) == [DOMAIN], "the next runtime reads this file"
+
+
 # ----------------------------------------------------- which key is checked --
 
 def test_a_partner_is_checked_with_the_key_in_the_address_book(web):
@@ -287,6 +299,8 @@ def test_a_message_this_process_never_read_is_not_known_after_a_restart(web):
     answer = domain_runtime.check(again, DOMAIN, message=digest)
 
     assert answer["reason"] == "source_unavailable" and nothing_was_read(web)
+    # And the way on is the next message, since no read goes back to this one.
+    assert "later message" in answer["fix"] and digest not in [entry["sha256"] for entry in read_all(again)]
     again.close()
 
 
@@ -378,6 +392,7 @@ def test_the_address_rules_still_hold_for_a_domain_on_the_list(web, monkeypatch)
     monkeypatch.setattr(domain_fetch, "_resolve", lambda host, remaining: ["10.0.0.5"])
     answer = domain_runtime.check(a, DOMAIN, partner="b")
     assert (answer["status"], answer["reason"]) == ("invalid", "target_not_public") and web.connections == []
+    assert answer["statement"] == domain_runtime.NOT_CONTACTED and "answered" not in answer["statement"], "no website said anything"
 
 
 def test_the_operator_can_keep_more_networks_out(web, monkeypatch):
@@ -421,6 +436,7 @@ def test_a_list_without_the_key_is_not_listed_and_says_it_is_no_evidence_of_frau
     domain_runtime.allow(a, DOMAIN)
     answer = domain_runtime.check(a, DOMAIN, partner="b")
     assert answer["status"] == "not_listed" and "no evidence of fraud" in answer["statement"]
+    assert "label" not in answer["statement"], "none was asked for"
 
 
 def test_the_wrong_label_is_not_listed(web):
@@ -429,7 +445,11 @@ def test_the_wrong_label_is_not_listed(web):
     domain_runtime.allow(a, DOMAIN)
     answer = domain_runtime.check(a, DOMAIN, partner="b", name="billing")
     assert answer["status"] == "not_listed" and answer["requested_name"] == "billing"
+    # The key is on the list, so the answer must not say it is not.
+    assert answer["statement"] == domain_runtime.NOT_UNDER_THAT_LABEL and "no evidence of fraud" in answer["statement"]
+    assert "under the label asked for" in answer["statement"] and "did not have this key at" not in answer["statement"]
     assert domain_runtime.check(a, DOMAIN, partner="b", name="support")["status"] == "listed"
+    assert domain_runtime.check(a, DOMAIN, partner="b")["matched_name"] == "support", "and a check with no name shows it, as the words say"
 
 
 def test_a_lookup_that_fails_is_unreachable_and_never_not_listed(web):
@@ -904,6 +924,23 @@ def test_without_a_form_nothing_is_read_and_the_answer_says_how_the_user_adds_it
     result = call(a, {"domain": DOMAIN, "partner": "b"})
     assert result["isError"] is True and said(result)["reason"] == "domain_not_allowed"
     assert "aamio domain allow %s" % DOMAIN in said(result)["fix"] and nothing_was_read(web)
+    assert "stop this server" in said(result)["fix"], "which costs a partner check nothing"
+
+
+@pytest.mark.parametrize("ask", [None, "broken"])
+def test_a_message_is_not_told_to_restart_since_that_would_lose_it(ask, web):
+    """What this process verified lives in its memory, so the advice for a partner would end the check it advises on."""
+    service, a, b = pair()
+    digest = sent_and_read(a, b)
+
+    def broken(*args):
+        raise mcp_server.NoDialog("the app answered the question with an error: no")
+
+    result = call(b, {"domain": DOMAIN, "message": digest}, ask=broken if ask else None)
+
+    assert result["isError"] is True and said(result)["reason"] == "domain_not_allowed" and nothing_was_read(web)
+    assert "aamio domain allow %s the next time" % DOMAIN in said(result)["fix"] and "a later message from the same sender" in said(result)["fix"]
+    assert "stop this server" not in said(result)["fix"]
 
 
 def test_the_form_asks_for_the_domain_and_does_not_offer_the_one_asked_for(web):
@@ -948,6 +985,30 @@ def test_a_lookalike_stops_at_what_the_user_types(web):
     assert result["isError"] is True and said(result)["reason"] == "domain_not_confirmed"
     assert domain_runtime.allowed_domains(a) == [] and nothing_was_read(web)
     assert "supplier.example" not in json.dumps(said(result)), "what the user typed is not handed to the model"
+
+
+def test_what_the_command_line_refuses_stops_at_the_form_too(web):
+    """lower() makes a k of the Kelvin sign, so the form took a name that aamio domain allow refuses."""
+    service, a, b = pair()
+    web.publish("kit.example", {"key": b.keys.public})
+    typed = "\u212ait.example"
+    assert typed.lower() == "kit.example"
+    with pytest.raises(domain_runtime.Refused):
+        domain_runtime.allow(a, typed)
+
+    result = call(a, {"domain": "kit.example", "partner": "b"}, ask=lambda *args: {"action": "accept", "content": {"domain": typed}})
+
+    assert said(result)["reason"] == "domain_not_confirmed" and domain_runtime.allowed_domains(a) == [] and nothing_was_read(web)
+
+
+@pytest.mark.parametrize("typed", [DOMAIN.upper(), "  %s\n" % DOMAIN])
+def test_capitals_and_a_space_around_it_are_how_people_type(typed, web):
+    service, a, b = pair()
+    web.publish(DOMAIN, {"key": b.keys.public})
+
+    result = call(a, {"domain": DOMAIN, "partner": "b"}, ask=lambda *args: {"action": "accept", "content": {"domain": typed}})
+
+    assert said(result)["status"] == "listed" and domain_runtime.allowed_domains(a) == [DOMAIN]
 
 
 @pytest.mark.parametrize("answer,reason", [({"action": "decline"}, "domain_declined"), ({"action": "cancel"}, "domain_not_answered"), ({}, "domain_not_answered")])

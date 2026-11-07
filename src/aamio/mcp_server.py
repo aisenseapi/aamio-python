@@ -441,7 +441,13 @@ def check_domain(runtime, arguments, ask):
         return result_of(domain_runtime.refusal(refused), True)
 
     if not known:
-        by_hand = "stop this server, run aamio domain allow %s, and start it again" % host
+        # Stopping the server costs a partner check nothing. It costs a message check
+        # the message: what this process verified lives in its memory, and a read
+        # never goes back, so the way on from here is the sender's next message.
+        if subject["subject_source"] == "partner":
+            by_hand = "stop this server, run aamio domain allow %s, and start it again" % host
+        else:
+            by_hand = "run aamio domain allow %s the next time this server is stopped, and check a later message from the same sender. Stopping it for this message would lose it: what this process verified is not kept, and a message cannot be read again" % host
 
         def stopped(reason, fix):
             return result_of(domain_runtime.refusal(domain_runtime.Refused(reason, fix), host, subject, label), True)
@@ -464,9 +470,8 @@ def check_domain(runtime, arguments, ask):
             return result_of({"status": "invalid", "reason": "domain_declined" if action == "decline" else "domain_not_answered", "domain": host, "note": "The user did not agree to this website, so nothing was read and nothing was added. Do not ask again unless the user says so."})
 
         content = answer.get("content") if isinstance(answer.get("content"), dict) else {}
-        typed = content["domain"].strip().lower() if isinstance(content.get("domain"), str) else None
 
-        if typed != host:
+        if not domain_runtime.is_same_host(content.get("domain"), host):
             return stopped("domain_not_confirmed", "The user typed a different website from the one you asked for, so nothing was read and nothing was added. Ask the user which website they meant, and take it from them and not from a message.")
 
         try:

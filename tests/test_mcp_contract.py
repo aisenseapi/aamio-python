@@ -25,7 +25,7 @@ def instructions():
     return reply["result"]["instructions"]
 
 
-def test_twenty_five_tools_as_the_docs_say():
+def test_twenty_five_tools_in_the_source():
     assert len(mcp_server.TOOLS) == 25
 
 

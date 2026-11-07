@@ -49,11 +49,19 @@ WINDOW_SECONDS = 60.0
 
 STATEMENTS = {
     "listed": "This exact website listed this key at the time of this check. That is all it says: not who holds the key and not what they may do, and nothing changed here because of it.",
-    "not_listed": "This website's list did not have this key at the time of this check. That is no evidence of fraud: a key rotated out, the wrong name or the wrong domain look the same.",
+    "not_listed": "This website's list did not have this key at the time of this check. That is no evidence of fraud: a key rotated out or the wrong domain look the same.",
     "no_list": "This website publishes no key list at the exact address, so it says nothing about this key.",
     "unreachable": "The list could not be read, so nothing is known about this key. This is not the same as not listed.",
     "invalid": "What this website answered could not be used as a list, so nothing is known about this key.",
 }
+
+# The two answers a status alone would describe wrongly. match() says not_listed
+# for a key under another label too, on purpose, since a check for a label is a
+# check for that label, and target_not_public stops before any connection, so no
+# website answered anything.
+NOT_UNDER_THAT_LABEL = ("This website's list did not have this key under the label asked for at the time of this check. It may hold the key under "
+                        "another label, and a check with no name shows that. That is no evidence of fraud: a key rotated out, the wrong label or the wrong domain look the same.")
+NOT_CONTACTED = "This website was not contacted: an address its name points to is not a public one, or is on a network kept out here. So nothing is known about this key."
 
 # A site whose certificate fails here may be fine everywhere else: Windows fetches
 # a root only when its own check needs it, and Python sees what is already there.
@@ -140,6 +148,21 @@ def _host(domain):
         raise Refused("invalid_domain", "A domain is a plain host name of two labels or more, as example.org, with no https://, port or path. www.example.org and example.org are different places. Internationalised names are not read yet.") from None
 
 
+def is_same_host(typed, host) -> bool:
+    """Whether what a person typed is this host, by the rule the command line holds.
+
+    Not lower(), which turns some characters that are not ASCII into ASCII, so a
+    name the command line refuses would pass here. A space around it is forgiven,
+    since people paste, and nothing else is.
+    """
+    if not isinstance(typed, str):
+        return False
+    try:
+        return domain_keys.normalise_domain(typed.strip()) == host
+    except ValueError:
+        return False
+
+
 def _write(runtime, rows):
     try:
         runtime._save_json(POLICY_FILE, rows)
@@ -169,6 +192,10 @@ def forget(runtime, domain) -> dict:
         if host in held:
             left = [row for row in held if row != host]
             _write(runtime, left)
+            # Read back, as allow does: a website called gone and still on the
+            # list would go on being read by the next runtime.
+            if host in allowed_domains(runtime):
+                raise Refused("domain_policy_unwritable", "%s was not written, so the list is as it was." % runtime._path(POLICY_FILE))
             return {"domain": host, "removed": True, "domains": left}
     return {"domain": host, "removed": False, "domains": held}
 
@@ -205,7 +232,7 @@ def subject_snapshot(runtime, partner=None, message=None) -> dict:
                     raise Refused("invalid_local_observation", "The message is recorded here without a usable signing key, so it cannot be checked.")
                 keys.add(row["from_key"])
     if not keys:
-        raise Refused("source_unavailable", "This process holds no verified message with that hash. Only a message this process read itself and whose signature checked out can be used: an unsigned one has no key to check, and what an earlier process read is not kept. Read it again if it is still on its thread, or check the partner by name.")
+        raise Refused("source_unavailable", "This process holds no verified message with that hash. Only a message this process read itself and whose signature checked out can be used: an unsigned one has no key to check, and what an earlier process read is not kept and cannot be read again. Check a later message from the same sender, or the partner by name.")
     if len(keys) != 1:
         raise Refused("ambiguous_signer", "Different keys signed the same bytes, so the hash does not say which one to check. Check the partner by name.")
     return {"key": keys.pop(), "subject_source": "message", "message_sha256": message, "signature_checked_locally": True}
@@ -243,6 +270,15 @@ def deny_networks():
     return tuple(networks)
 
 
+def statement(found, name=None) -> str:
+    """An answer in words, from why it came and what was asked and not from its status alone."""
+    if found.get("reason") == "target_not_public":
+        return NOT_CONTACTED
+    if found["status"] == "not_listed" and name is not None:
+        return NOT_UNDER_THAT_LABEL
+    return STATEMENTS[found["status"]]
+
+
 def check(runtime, domain, partner=None, message=None, name=None, **network) -> dict:
     """Read the list at a domain on the user's list and say whether it lists this subject's key.
 
@@ -267,7 +303,7 @@ def check(runtime, domain, partner=None, message=None, name=None, **network) -> 
     finally:
         LIMITS.give_back()
     answer = dict(found, **{field: value for field, value in subject.items() if field != "key"})
-    answer["statement"] = STATEMENTS[found["status"]]
+    answer["statement"] = statement(found, name)
     if found.get("reason") == "tls":
         answer["note"] = TLS_NOTE
     return answer

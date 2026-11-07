@@ -421,7 +421,18 @@ def test_the_tool_and_the_readme_say_the_same():
     for said in ("## First exchange with a partner you know", "## Moving a conversation to a private thread", "aamio partner add NAME KEY",
                  "aamio board channel KEY --reply-to ADDRESS", "`aamio_partner_add`", "Stored, read and woken are three things",
                  "**One runtime per home.**", "**If a send is refused with 403**", "asks every open channel at once before it waits",
-                 "twenty-five tools", "tests/test_first_exchange.py", "tests/test_partner_add_asks_the_user.py"):
+                 "tests/test_first_exchange.py", "tests/test_partner_add_asks_the_user.py"):
         assert said in readme, said
-    for gone in ("twenty-two tools", "twenty-three tools", "twenty-four tools", "spends the wait on the first channel it holds", "Over MCP this cannot be done yet", "There is no tool for it"):
+    for gone in ("twenty-two tools", "twenty-three tools", "spends the wait on the first channel it holds", "Over MCP this cannot be done yet", "There is no tool for it"):
         assert gone not in readme, gone
+
+
+def test_the_readme_counts_what_pip_installs():
+    """The count stands above pip install aamio, so it counts the package. A tool built since
+    the last release is named apart, and the next version stops here until the words follow."""
+    readme = open(os.path.join(os.path.dirname(HERE), "README.md"), encoding="utf-8").read()
+
+    if mcp_server.__version__ == "0.6.24":
+        assert "twenty-four tools" in readme and "In the source and not yet in the package: `aamio_domain_check`." in readme
+    else:
+        assert "twenty-five tools" in readme and "not yet in the package" not in readme
