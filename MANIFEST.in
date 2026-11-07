@@ -3,3 +3,5 @@
 # 0.6.4 fifteen of them import tests/signing.py, so pytest in an unpacked
 # package could not collect them. The live tests import tests/live_pace.py.
 include tests/*.py
+# And the vectors they read: test_domain_keys.py has nothing to run without them.
+include tests/*.json

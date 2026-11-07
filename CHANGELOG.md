@@ -4,6 +4,17 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## Unreleased
+
+- `aamio.domain_keys` reads and writes the domain key list, a file a website
+  can publish at `/.well-known/aamio-keys.json` to say which public aamio keys
+  are its own. It is the format only: a strict parser that refuses the whole
+  list for one bad entry, a match that says listed, not listed or invalid and
+  grants nothing, a generator that writes the same bytes every client writes,
+  and the syntax of a domain. It reads no domain; `python -m aamio.domain_keys
+  check` and `make` work on local files and say so in every answer. The shared
+  vectors are in `tests/domain_keys_vectors.json`.
+
 ## 0.6.24 - 2026-10-01
 
 - A partner can be added over MCP, and only by the user. `aamio_partner_add`
