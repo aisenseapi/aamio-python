@@ -14,6 +14,19 @@ not what moved in the source.
   and the syntax of a domain. It reads no domain; `python -m aamio.domain_keys
   check` and `make` work on local files and say so in every answer. The shared
   vectors are in `tests/domain_keys_vectors.json`.
+- `aamio.domain_fetch` reads that list from the domain itself, once, and says
+  what it found: listed, not listed, no list, unreachable or invalid, with the
+  time and a hash of the bytes compared. It is built for a domain that came
+  from a message, so the read cannot be turned on anyone else: HTTPS on port
+  443 at the fixed path only, public addresses only, where one private address
+  among the answers refuses the whole read, a connection to the address that
+  was checked with TLS for the domain, no proxy, cookie, redirect or retry, and
+  five seconds and 16 KiB of headers and of body. Nothing about the reader goes
+  out, and a result grants nothing. A machine whose certificate store lacks a
+  root gets unreachable, tls; `check` takes a TLS context that verifies, such
+  as one built from certifi, and refuses one that does not. The runtime, the
+  command line and MCP do not call it yet. The addresses it may reach are
+  shared in `tests/domain_fetch_vectors.json`.
 
 ## 0.6.24 - 2026-10-01
 

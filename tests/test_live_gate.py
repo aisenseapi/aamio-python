@@ -32,7 +32,8 @@ def test_the_gate_opens_for_one_and_nothing_else():
 
 def test_both_live_files_carry_the_same_gate():
     # Three since 28 September 2026: the first-exchange smoke test writes to the
-    # service too, and came with the gate already in it.
-    for name in ("test_e2e.py", "test_robust.py", "test_first_exchange.py"):
+    # service too, and came with the gate already in it. Four since 7 November
+    # 2026: the domain key read only reads, but it reaches the network all the same.
+    for name in ("test_e2e.py", "test_robust.py", "test_first_exchange.py", "test_domain_fetch.py"):
         with open(os.path.join(HERE, name), encoding="utf-8") as handle:
             assert 'os.environ.get("AAMIO_LIVE") != "1"' in handle.read(), name

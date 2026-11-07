@@ -370,9 +370,15 @@ def test_the_request_is_handed_on_as_it_came(tmp_path, monkeypatch):
 def test_every_live_file_takes_its_turn():
     import test_live_gate
 
+    # test_domain_fetch.py reads one static file on aamio.at over a socket of its
+    # own and opens no thread, so it has no turn to take (7 November 2026). The
+    # day it uses the client it writes too, and is counted with the others.
+    reader = open(os.path.join(HERE, "test_domain_fetch.py"), encoding="utf-8").read()
+    assert "aamio_client" not in reader and "AamioClient" not in reader, "test_domain_fetch.py uses the client now, and must take its turn"
+
     live = [name for name in sorted(os.listdir(HERE)) if name.startswith("test_") and name.endswith(".py")
             and 'os.environ.get("AAMIO_LIVE") != "1"' in open(os.path.join(HERE, name), encoding="utf-8").read()
-            and name not in ("test_live_gate.py", "test_live_pace.py")]
+            and name not in ("test_live_gate.py", "test_live_pace.py", "test_domain_fetch.py")]
 
     assert live == ["test_e2e.py", "test_first_exchange.py", "test_robust.py"], live
 

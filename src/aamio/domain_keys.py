@@ -8,9 +8,8 @@ as {"aamio_keys": 1, "keys": [{"key": "<43 characters>", "name": "support"}]},
 and a reader who already knows the domain from its own records can ask whether
 the key behind a message it checked is on that list. This module is the format
 and nothing else: a strict parser, the match, a generator for the file, and the
-syntax of a domain. It opens no connection. Fetching the list is a separate,
-hardened step that is not built yet (docs/aamio-domain-addon-design-2026-11-07.md
-in the service repository), and nothing here may be taken for it.
+syntax of a domain. It opens no connection. Fetching the list is the separate,
+hardened step in domain_fetch.py, and nothing here may be taken for it.
 
 A listed key says that this exact site listed this key when it was read. It is
 not an identity, an authority to act or proof that a message is true, and it
@@ -77,6 +76,11 @@ def canonical_key(value) -> bool:
     # A last character carrying bits past the 32 bytes decodes to the same
     # bytes as another string; only the one an encoder writes is the key.
     return len(raw) == 32 and base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") == value
+
+
+def valid_name(value) -> bool:
+    """A name a list can carry: 1 to 64 characters of a-z, 0-9, dot, underscore and dash."""
+    return isinstance(value, str) and _NAME.fullmatch(value) is not None
 
 
 def normalise_domain(value) -> str:
@@ -184,7 +188,7 @@ def parse(raw: bytes) -> list:
         seen.add(row["key"])
         entry = {"key": row["key"]}
         if "name" in row:
-            if not isinstance(row["name"], str) or _NAME.fullmatch(row["name"]) is None:
+            if not valid_name(row["name"]):
                 raise InvalidDocument("invalid_name")
             entry["name"] = row["name"]
         entries.append(entry)
@@ -201,7 +205,7 @@ def match(raw: bytes, key: str, name=None) -> dict:
     """
     if not canonical_key(key):
         return {"status": "invalid", "reason": "invalid_subject_key"}
-    if name is not None and (not isinstance(name, str) or _NAME.fullmatch(name) is None):
+    if name is not None and not valid_name(name):
         return {"status": "invalid", "reason": "invalid_requested_name"}
     try:
         entries = parse(raw)
@@ -229,7 +233,7 @@ def make(entries) -> bytes:
             raise InvalidDocument("invalid_key")
         row = {"key": entry["key"]}
         if entry.get("name") is not None:
-            if not isinstance(entry["name"], str) or _NAME.fullmatch(entry["name"]) is None:
+            if not valid_name(entry["name"]):
                 raise InvalidDocument("invalid_name")
             row["name"] = entry["name"]
         rows.append(row)
