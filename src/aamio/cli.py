@@ -133,11 +133,14 @@ def main(argv=None):
     # the add-ons are loaded, so that a broken one can be taken out again.
     probe = argparse.ArgumentParser(add_help=False)
     probe.add_argument("--home", default=None)
+    probe.add_argument("--host", default=None)
+    probe.add_argument("--no-archive", action="store_true")
     known, rest = probe.parse_known_args(argv)
     addons.use_home(known.home)
-    words = [word for word in rest if not word.startswith("-")]
-    if words[:2] == ["addon", "disable"] and len(words) == 3:
-        return addon_change("disable", words[2])
+    # Exactly `addon disable NAME` and nothing else. Help, or any other word,
+    # goes through the parser like every command, and changes nothing.
+    if len(rest) == 3 and rest[:2] == ["addon", "disable"] and not rest[2].startswith("-"):
+        return addon_change("disable", rest[2])
     parser = argparse.ArgumentParser(prog="aamio", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--home", default=None)
     parser.add_argument("--host", default=None)
@@ -262,7 +265,7 @@ def main(argv=None):
     try:
         installed = addons.loaded()
     except addons.AddonError as error:
-        if words[:2] == ["addon", "list"]:
+        if rest == ["addon", "list"]:
             # The list still answers, from metadata, and says what is broken
             # and how to take it out: a broken add-on must not hide itself.
             try:

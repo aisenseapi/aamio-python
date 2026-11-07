@@ -69,7 +69,7 @@ def loaded(tmp_path, monkeypatch):
     # test before: not from Python's import cache, and not from the registry's.
     for module in ("demo_addon", "other_addon", "shadow_addon", "broken_addon", "half_addon"):
         sys.modules.pop(module, None)
-    monkeypatch.setitem(addons._cache, "key", None)
+    monkeypatch.setattr(addons, "_cache", {})
     # A home of this test's own, and nothing installed: what pip put on this
     # machine's path is not under test here.
     monkeypatch.setenv("AAMIO_HOME", str(tmp_path / "home"))
@@ -233,8 +233,8 @@ def site(tmp_path, monkeypatch):
     monkeypatch.setenv("AAMIO_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AAMIO_ADDONS", "")
     monkeypatch.setattr(addons, "_home", None)
-    monkeypatch.setitem(addons._cache, "key", None)
-    for module in ("demo_pkg", "other_pkg", "wrong_pkg", "broken_pkg", "list_pkg"):
+    monkeypatch.setattr(addons, "_cache", {})
+    for module in ("demo_pkg", "other_pkg", "wrong_pkg", "broken_pkg", "list_pkg", "twice_pkg"):
         sys.modules.pop(module, None)
 
     def install(distribution, module, name="demo", version="0.0.1", tool="aamio_addon_demo_ping", text=None, module_name=None):
@@ -341,7 +341,7 @@ def test_a_broken_enabled_add_on_is_listed_and_can_be_disabled(site, monkeypatch
     # The next version of it does not import.
     (tmp_path / "site" / "demo_pkg.py").write_text("raise ImportError('no such library')\n", encoding="utf-8")
     sys.modules.pop("demo_pkg", None)
-    addons._cache["key"] = None
+    addons._cache.clear()
 
     code, _, err = main(["whoami"], monkeypatch)
     assert code == 1 and "the add-on demo-pkg could not be loaded" in err and "aamio addon disable demo-pkg" in err, "every command stops, and says how to go on"
@@ -365,7 +365,7 @@ def test_what_the_file_says_and_cannot_say(site, monkeypatch, tmp_path):
     assert code == 0 and "enabled_but_not_installed" not in json.loads(out) and enabled_in(tmp_path) == {"enabled": []}
 
     (tmp_path / "home" / "addons.json").write_text("{not json", encoding="utf-8")
-    addons._cache["key"] = None
+    addons._cache.clear()
     code, _, err = main(["whoami"], monkeypatch)
     assert code == 1 and "addons.json could not be read" in err and "Fix or remove the file" in err
     code, _, err = main(["addon", "list"], monkeypatch)
@@ -383,3 +383,114 @@ def test_installed_and_named_in_the_environment_is_one_row(site, monkeypatch):
     said = json.loads(out)
     assert code == 0 and len(said["addons"]) == 1 and said["addons"][0]["enabled"] is True and said["addons"][0]["named_in"] == "AAMIO_ADDONS" and said["addons"][0]["distribution"] == "demo-pkg"
     assert said["addons"][0]["commands"] == ["dry", "ping"], "a checkout that is also installed: running because it was named, said once"
+
+
+# --------------------------------------------- the review of the enable step
+
+def test_the_server_uses_the_home_of_its_runtime(site, monkeypatch, tmp_path):
+    """Enabled in home a only: a server built on a runtime for home b offers and runs the core alone, whatever the command line's home was."""
+    site("demo-pkg", "demo_pkg")
+    assert main(["--home", str(tmp_path / "a"), "addon", "enable", "demo"], monkeypatch)[0] == 0
+    a = Runtime(home=str(tmp_path / "a"), host="https://fake.test", archive=False)
+    b = Runtime(home=str(tmp_path / "b"), host="https://fake.test", archive=False)
+    try:
+        listing = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "aamio_addon_demo_ping", "arguments": {}}}
+        for _ in range(2):
+            assert len(mcp_server.handle(b, listing)["result"]["tools"]) == 24, "the server on b, where nothing is enabled, offers the core's tools"
+            assert mcp_server.handle(a, listing)["result"]["tools"][-1]["name"] == "aamio_addon_demo_ping", "the server on a offers the add-on's, in alternation"
+        assert mcp_server.handle(b, call)["error"]["code"] == -32602, "and a call through b is refused as a tool nobody has"
+        assert mcp_server.handle(a, call)["result"]["structuredContent"] == {"pong": True}
+    finally:
+        a.close()
+        b.close()
+
+
+def test_help_and_bad_arguments_change_nothing(site, monkeypatch, tmp_path):
+    site("demo-pkg", "demo_pkg")
+    assert main(["addon", "enable", "demo"], monkeypatch)[0] == 0
+    path = tmp_path / "home" / "addons.json"
+    before = path.read_bytes()
+
+    code, out, _ = main(["addon", "disable", "demo", "--help"], monkeypatch)
+    assert code == 0 and "usage: aamio addon disable" in out and path.read_bytes() == before, "help is help, not a disable"
+    code, out, _ = main(["addon", "disable", "--help"], monkeypatch)
+    assert code == 0 and "usage:" in out and path.read_bytes() == before
+    code, _, err = main(["addon", "disable", "demo", "extra"], monkeypatch)
+    assert code == 2 and "unrecognized arguments" in err and path.read_bytes() == before
+    code, _, _ = main(["addon", "disable", "demo", "--bogus"], monkeypatch)
+    assert code == 2 and path.read_bytes() == before
+    code, out, _ = main(["addon", "enable", "demo", "--help"], monkeypatch)
+    assert code == 0 and "usage: aamio addon enable" in out and path.read_bytes() == before
+    code, _, _ = main(["addon", "enable", "demo", "--bogus"], monkeypatch)
+    assert code == 2 and path.read_bytes() == before
+
+    # Once the enabled add-on is broken, the shortcut past the loading is exactly `addon disable NAME`.
+    (tmp_path / "site" / "demo_pkg.py").write_text("raise ImportError('no such library')\n", encoding="utf-8")
+    sys.modules.pop("demo_pkg", None)
+    addons._cache.clear()
+    code, _, err = main(["addon", "disable", "demo", "--help"], monkeypatch)
+    assert code == 1 and "could not be loaded" in err and path.read_bytes() == before, "help with a broken add-on is the error, and no change"
+    assert main(["addon", "disable", "demo"], monkeypatch)[0] == 0 and path.read_bytes() != before
+
+
+def test_two_changes_at_once_keep_both(site, monkeypatch, tmp_path):
+    """Two commands enable two add-ons at the same moment: each takes its turn, and both stand."""
+    import subprocess
+
+    site("demo-pkg", "demo_pkg")
+    site("other-pkg", "other_pkg", name="other", tool="aamio_addon_other_ping")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([os.path.join(os.path.dirname(__file__), "..", "src"), str(tmp_path / "site")]), AAMIO_HOME=str(tmp_path / "home"), AAMIO_ADDONS="")
+    program = "import sys; from aamio import cli; raise SystemExit(cli.main(sys.argv[1:]))"
+    for _ in range(3):
+        for name in ("demo", "other"):
+            main(["addon", "disable", name], monkeypatch)
+        first = subprocess.Popen([sys.executable, "-c", program, "addon", "enable", "demo"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        second = subprocess.Popen([sys.executable, "-c", program, "addon", "enable", "other"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        errors = [proc.communicate(timeout=120)[1].decode("utf-8", "replace") for proc in (first, second)]
+        assert first.returncode == 0 and second.returncode == 0, errors
+        assert sorted(enabled_in(tmp_path)["enabled"]) == ["demo-pkg", "other-pkg"], "both changes stand"
+    addons._cache.clear()
+    assert len(mcp_server.tools()) == 26
+
+
+def test_a_change_waits_for_another_and_says_so(site, monkeypatch, tmp_path):
+    from aamio import storage
+
+    site("demo-pkg", "demo_pkg")
+    (tmp_path / "home").mkdir()
+    held = storage.hold(str(tmp_path / "home" / "addons.json.lock"))
+    assert held is not None
+    monkeypatch.setattr(addons, "LOCK_WAIT", 0.3)
+    try:
+        code, _, err = main(["addon", "enable", "demo"], monkeypatch)
+        assert code == 2 and "addons.json is being changed by another aamio" in err and "Nothing changed" in err and not os.path.exists(str(tmp_path / "home" / "addons.json"))
+    finally:
+        storage.let_go(held)
+    assert main(["addon", "enable", "demo"], monkeypatch)[0] == 0 and enabled_in(tmp_path) == {"enabled": ["demo-pkg"]}, "and once the other is done, the change goes through"
+
+
+def test_enable_refuses_an_add_on_whose_commands_do_not_build(site, monkeypatch, tmp_path):
+    twice = DEMO.replace('    sub.add_parser("dry")', '    sub.add_parser("dry")\n    parser.add_argument("--same")\n    parser.add_argument("--same")')
+    site("twice-pkg", "twice_pkg", name="twice", tool="aamio_addon_twice_ping", text=twice % {"name": "twice", "tool": "aamio_addon_twice_ping"})
+
+    code, _, err = main(["addon", "enable", "twice"], monkeypatch)
+    assert code == 2 and "the add-on twice_pkg could not build its commands: ArgumentError" in err and "aamio addon disable twice-pkg" in err
+    assert not os.path.exists(str(tmp_path / "home" / "addons.json")), "nothing was recorded"
+    code, out, _ = main(["addon", "list"], monkeypatch)
+    assert code == 0 and json.loads(out)["addons"][0]["enabled"] is False and len(mcp_server.tools()) == 24
+
+
+def test_disable_says_when_the_environment_holds_the_add_on(site, monkeypatch, tmp_path):
+    site("demo-pkg", "demo_pkg")
+    monkeypatch.setenv("AAMIO_ADDONS", "demo_pkg")
+
+    code, out, _ = main(["addon", "disable", "demo"], monkeypatch)
+    said = json.loads(out)
+    assert code == 0 and "demo was not enabled" in said["note"] and "demo still runs: AAMIO_ADDONS names demo_pkg" in said["note"] and "Unset AAMIO_ADDONS" in said["note"]
+    assert said["addons"][0]["enabled"] is True and said["addons"][0]["named_in"] == "AAMIO_ADDONS", "and it does run"
+    code, out, _ = main(["addon", "enable", "demo"], monkeypatch)
+    assert code == 0 and "start it again" in json.loads(out)["note"], "a running server keeps its tools: said on enable"
+    code, out, _ = main(["addon", "disable", "demo"], monkeypatch)
+    said = json.loads(out)
+    assert code == 0 and "demo is disabled" in said["note"] and "start it again" in said["note"] and "still runs" in said["note"]

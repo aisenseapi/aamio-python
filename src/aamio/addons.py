@@ -18,15 +18,17 @@ Installed is not enabled. The core imports an add-on only when the user has
 named it: with `aamio addon enable NAME`, kept in addons.json in the home, or
 in AAMIO_ADDONS for a checkout that is not installed. What is installed and not
 enabled is listed from the package's metadata, without running any of it, with
-the command that enables it. An add-on that runs here runs in this process,
-with the key and the home: enabling says which code runs, it is not a boundary
-around what that code can do.
+the command that enables it. The choice is read in the home a runtime runs in,
+so a server built on a runtime for another home does not see it. An add-on
+that runs here runs in this process, with the key and the home: enabling says
+which code runs, it is not a boundary around what that code can do.
 
 The core owns the names. Two add-ons with one short name, or two tools with one
 name, stop the start and say so, rather than let the order they were found in
-decide which one runs. An add-on that cannot be imported stops the start too:
-a broken install is not a quiet absence. `aamio addon disable NAME` takes a
-broken one out again.
+decide which one runs. An add-on that cannot be imported, or whose commands do
+not build, stops the start too: a broken install is not a quiet absence, and
+nothing of the kind is recorded as enabled. `aamio addon disable NAME` takes
+a broken one out again.
 """
 
 import argparse
@@ -34,16 +36,23 @@ import importlib
 import json
 import os
 import re
+import time
 from importlib import metadata
 
+from . import storage
 from .runtime import home_dir
 
 GROUP = "aamio.addons"
 ENABLED_FILE = "addons.json"
 HOOKS = ("NAME", "__version__", "add_commands", "early", "command", "TOOLS", "dispatch")
 RESERVED = ("list", "enable", "disable")
+# How long a change waits for another aamio that is changing the same list.
+LOCK_WAIT = 10.0
+RESTART = "A local MCP server already running keeps the tools it started with: start it again to see the change."
 
-_cache = {"key": None, "addons": []}
+# (AAMIO_ADDONS, home) -> the modules loaded for it. Two runtimes on two homes
+# in one process each see their own home's choice.
+_cache = {}
 _home = None
 
 
@@ -55,7 +64,7 @@ def use_home(home):
     """The home the command line was given, before the parser is built: the enabled list is kept in it."""
     global _home
     _home = home
-    _cache["key"] = None
+    _cache.clear()
 
 
 def home(given=None):
@@ -89,16 +98,56 @@ def enabled(given=None):
     return names
 
 
+class _Lock:
+    """The enabled list's lock, one per home, held from reading the list to writing it back.
+
+    The operating system holds it, as it holds a home's owner lock, so two
+    commands at once, from this runtime or from aamio-php on the same home,
+    take turns rather than each writing over the other's change.
+    """
+
+    def __init__(self, given):
+        self.folder = home(given)
+        self.path = enabled_file(given) + ".lock"
+        self.fd = None
+
+    def __enter__(self):
+        if not os.path.isdir(self.folder):
+            os.makedirs(self.folder, mode=0o700, exist_ok=True)
+        deadline = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                self.fd = storage.hold(self.path)
+            except OSError as error:
+                raise AddonError("%s could not be locked: %s. Nothing changed; restore locking support, or use a home on a local disk." % (self.path, error)) from None
+            if self.fd is not None:
+                return self
+            if time.monotonic() >= deadline:
+                raise AddonError("%s is being changed by another aamio, which did not finish in %d seconds. Nothing changed; try again." % (self.path[: -len(".lock")], LOCK_WAIT))
+            time.sleep(0.05)
+
+    def __exit__(self, *_):
+        storage.let_go(self.fd)
+
+
 def _write_enabled(given, names):
-    folder = home(given)
-    if not os.path.isdir(folder):
-        os.makedirs(folder, mode=0o700, exist_ok=True)
+    """Writes the list, under the lock the caller holds: a file of this process's own first, then one rename."""
     path = enabled_file(given)
-    with open(path + ".tmp", "w", encoding="utf-8") as handle:
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as handle:
         json.dump({"enabled": names}, handle, indent=2)
         handle.write("\n")
-    os.replace(path + ".tmp", path)
-    _cache["key"] = None
+    for attempt in range(20):
+        try:
+            os.replace(tmp, path)
+            break
+        except PermissionError:
+            # Windows: a reader holds the file for a moment.
+            if attempt == 19:
+                os.unlink(tmp)
+                raise AddonError("%s could not be replaced: another program holds it. Nothing changed; try again." % path) from None
+            time.sleep(0.05)
+    _cache.clear()
 
 
 # ---------------------------------------------------------------- installed
@@ -148,6 +197,20 @@ def _hooks(module, fix):
         raise AddonError("%s cannot be called %s: that is a command of aamio addon itself. To go on without it: %s." % (module.__name__, module.NAME, fix))
 
 
+def _well_formed(module, fix):
+    """What the hooks produce, tried before the add-on is used or recorded: its command tree builds, and its tools have names."""
+    try:
+        commands_of(module)
+    except Exception as error:
+        raise AddonError("the add-on %s could not build its commands: %s: %s. Reinstall it, or %s to go on without it." % (module.__name__, error.__class__.__name__, error, fix)) from None
+    try:
+        names = [tool["name"] for tool in module.TOOLS]
+    except Exception as error:
+        raise AddonError("%s cannot be used as an add-on: its TOOLS are not a list of tools (%s: %s). Reinstall it, or %s to go on without it." % (module.__name__, error.__class__.__name__, error, fix)) from None
+    if not all(isinstance(name, str) and name for name in names):
+        raise AddonError("%s cannot be used as an add-on: a tool of its has no name. Reinstall it, or %s to go on without it." % (module.__name__, fix))
+
+
 def _load(env, wanted):
     """The modules of the enabled add-ons and of what AAMIO_ADDONS names, each checked; nothing cached."""
     found = []
@@ -161,6 +224,7 @@ def _load(env, wanted):
         _hooks(module, fix)
         if module.NAME != row["name"]:
             raise AddonError("the add-on %s is called %s in its metadata and %s in its module. Reinstall it, or %s to go on without it." % (row["distribution"], row["name"], module.NAME, fix))
+        _well_formed(module, fix)
         found.append(module)
     for name in env.split(","):
         if name.strip():
@@ -168,6 +232,7 @@ def _load(env, wanted):
             if module in found:
                 continue
             _hooks(module, "uninstall it")
+            _well_formed(module, "uninstall it")
             found.append(module)
     names = {}
     for module in found:
@@ -184,16 +249,16 @@ def _load(env, wanted):
 
 
 def loaded(given=None):
-    """Every add-on this installation runs: the enabled ones and what AAMIO_ADDONS names, checked once for what an add-on must have and for its name."""
+    """Every add-on this installation runs in this home: the enabled ones and what AAMIO_ADDONS names, checked once for what an add-on must have and for its name."""
     env = os.environ.get("AAMIO_ADDONS") or ""
     key = (env, home(given))
-    if _cache["key"] != key:
-        _cache.update(key=key, addons=_load(env, enabled(given)))
-    return list(_cache["addons"])
+    if key not in _cache:
+        _cache[key] = _load(env, enabled(given))
+    return list(_cache[key])
 
 
-def by_name(name):
-    for module in loaded():
+def by_name(name, given=None):
+    for module in loaded(given):
         if module.NAME == name:
             return module
     raise LookupError("no add-on is called %s" % name)
@@ -204,12 +269,13 @@ def by_name(name):
 def enable(which, given=None):
     """Lets an installed add-on run here, once it has been loaded clean: a broken one is refused, not recorded."""
     distribution = pick(which, given)
-    names = enabled(given)
-    if not any(_normal(name) == _normal(distribution) for name in names):
-        _load(os.environ.get("AAMIO_ADDONS") or "", names + [distribution])
-        _write_enabled(given, names + [distribution])
+    with _Lock(given):
+        names = enabled(given)
+        if not any(_normal(name) == _normal(distribution) for name in names):
+            _load(os.environ.get("AAMIO_ADDONS") or "", names + [distribution])
+            _write_enabled(given, names + [distribution])
     answer = describe(given)
-    answer["note"] = "%s runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can." % distribution
+    answer["note"] = "%s runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can. %s" % (distribution, RESTART)
     return answer
 
 
@@ -217,13 +283,19 @@ def disable(which, given=None):
     """Takes an add-on out of the enabled list, by short name or by distribution, loading nothing to do it."""
     distributions = {_normal(row["distribution"]) for row in installed() if row["name"] == which and row["distribution"] is not None}
     distributions.add(_normal(which))
-    names = enabled(given)
-    kept = [name for name in names if _normal(name) not in distributions]
-    if len(kept) != len(names):
-        _write_enabled(given, kept)
+    with _Lock(given):
+        names = enabled(given)
+        kept = [name for name in names if _normal(name) not in distributions]
+        if len(kept) != len(names):
+            _write_enabled(given, kept)
     answer = describe(given)
-    if len(kept) == len(names):
-        answer["note"] = "%s was not enabled; nothing changed." % which
+    notes = ["%s was not enabled; nothing on disk changed." % which if len(kept) == len(names) else "%s is disabled. %s" % (which, RESTART)]
+    # What AAMIO_ADDONS names runs whatever the file says, and goes on running.
+    for row in answer["addons"]:
+        meant = which in (row["name"], row.get("module")) or (row.get("distribution") is not None and _normal(row["distribution"]) == _normal(which))
+        if row.get("named_in") == "AAMIO_ADDONS" and meant:
+            notes.append("%s still runs: AAMIO_ADDONS names %s. Unset AAMIO_ADDONS, or take %s out of it, to stop it." % (row["name"], row["module"], row["module"]))
+    answer["note"] = " ".join(notes)
     return answer
 
 
@@ -292,11 +364,11 @@ def describe(given=None):
 
 # -------------------------------------------------------------------- tools
 
-def tools(core, among=None):
-    """Every tool the add-ons bring, refused when a name is taken already."""
+def tools(core, among=None, home=None):
+    """Every tool the add-ons bring, in the given home, refused when a name is taken already."""
     taken = {tool["name"]: "the core" for tool in core}
     found = []
-    for module in loaded() if among is None else among:
+    for module in loaded(home) if among is None else among:
         for tool in module.TOOLS:
             if tool["name"] in taken:
                 raise AddonError("the tool %s is offered by %s and by %s. Uninstall one, or the order they were found in would decide which one runs." % (tool["name"], taken[tool["name"]], module.__name__))
@@ -306,8 +378,8 @@ def tools(core, among=None):
 
 
 def dispatch(runtime, name, arguments, ask):
-    """One tool call, to the add-on that has the tool, or None when none does."""
-    for module in loaded():
+    """One tool call, to the add-on that has the tool in the runtime's home, or None when none does."""
+    for module in loaded(getattr(runtime, "home", None)):
         if any(tool["name"] == name for tool in module.TOOLS):
             return module.dispatch(runtime, name, arguments, ask)
     return None

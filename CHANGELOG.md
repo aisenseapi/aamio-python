@@ -21,8 +21,13 @@ not what moved in the source.
   the choice; `aamio addon disable NAME` takes it out again, broken or not, and
   `aamio addon list` says what is installed and what runs, from the metadata,
   without running what is not enabled. An enabled add-on runs in aamio's own
-  process, with its key and home. For a checkout that is not installed,
-  `AAMIO_ADDONS` names the modules.
+  process, with its key and home. The choice is read in the home a runtime
+  runs in, so a server on another home does not see it; a server already
+  running keeps the tools it started with until it is started again; a change
+  waits for another aamio changing the same list, and nothing is recorded
+  before the add-on has loaded and built its commands. For a checkout that is
+  not installed, `AAMIO_ADDONS` names the modules, and what it names runs
+  whatever the file says.
 - Domain Keys is the first add-on, `aamio-domain-keys`, built in
   `addons/domain-keys` of this repository and installed with
   `pip install "aamio[domain-keys]"`, then `aamio addon enable domain`. A

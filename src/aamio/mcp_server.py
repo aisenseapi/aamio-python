@@ -142,9 +142,9 @@ TOOLS = [
 ]
 
 
-def tools():
-    """Every tool this server offers: the core's, and the ones installed add-ons bring."""
-    return TOOLS + addons.tools(TOOLS)
+def tools(runtime=None):
+    """Every tool this server offers: the core's, and the ones the add-ons enabled in the runtime's home bring."""
+    return TOOLS + addons.tools(TOOLS, home=getattr(runtime, "home", None))
 
 
 def result_of(data, is_error=False):
@@ -693,7 +693,7 @@ def handle(runtime: Runtime, message, session=None):
     if method == "ping":
         return {"jsonrpc": "2.0", "id": rid, "result": shaped({}, modern)}
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": rid, "result": shaped({"tools": tools()}, modern, listing=True)}
+        return {"jsonrpc": "2.0", "id": rid, "result": shaped({"tools": tools(runtime)}, modern, listing=True)}
     if method == "tools/call":
         name = params.get("name")
         arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
