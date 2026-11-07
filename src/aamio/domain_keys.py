@@ -246,6 +246,32 @@ def make(entries) -> bytes:
     return raw
 
 
+def check_file(path, key=None, name=None):
+    """A local file against the format, and against a key if one is given, with its exit code.
+
+    It reads the one file and nothing else: no domain and no runtime's home.
+    """
+    try:
+        with open(path, "rb") as stream:
+            raw = stream.read(MAX_BYTES + 1)
+    except OSError:
+        return {"error": "local_file_unreadable"}, 2
+    if key is None:
+        try:
+            result = {"format_valid": True, "keys": len(parse(raw))}
+            code = 0
+        except InvalidDocument as error:
+            result = {"format_valid": False, "reason": "invalid_document", "detail": error.reason}
+            code = 2
+    else:
+        result = match(raw, key, name)
+        code = {"listed": 0, "not_listed": 3, "invalid": 2}[result["status"]]
+    # Said every time, so a file found valid here is never taken for a domain read.
+    result["source"] = "local_file"
+    result["domain_checked"] = False
+    return result, code
+
+
 def _entry_argument(text: str) -> dict:
     # KEY or KEY:NAME. Neither base64url nor a name holds a colon.
     key, _, name = text.partition(":")
@@ -280,25 +306,7 @@ def main(argv=None) -> int:
 
     if args.name is not None and args.key is None:
         parser.error("--name needs --key")
-    try:
-        with open(args.file, "rb") as stream:
-            raw = stream.read(MAX_BYTES + 1)
-    except OSError:
-        print(json.dumps({"error": "local_file_unreadable"}))
-        return 2
-    if args.key is None:
-        try:
-            result = {"format_valid": True, "keys": len(parse(raw))}
-            code = 0
-        except InvalidDocument as error:
-            result = {"format_valid": False, "reason": "invalid_document", "detail": error.reason}
-            code = 2
-    else:
-        result = match(raw, args.key, args.name)
-        code = {"listed": 0, "not_listed": 3, "invalid": 2}[result["status"]]
-    # Said every time, so a file found valid here is never taken for a domain read.
-    result["source"] = "local_file"
-    result["domain_checked"] = False
+    result, code = check_file(args.file, args.key, args.name)
     print(json.dumps(result))
     return code
 

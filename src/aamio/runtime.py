@@ -609,7 +609,11 @@ class Channel:
         """
         self.after = 0
         self.created_at = None
-        self.observed.clear()
+        # Under the channel's lock like every other touch of observed. Cleared
+        # without it, a reader walking the dictionary would meet a change of
+        # size halfway, and a receipt or a domain check runs on another thread.
+        with self.lock:
+            self.observed.clear()
 
     def to_state(self):
         # seen travels with the channel: without it a restart cannot tell a
@@ -3027,7 +3031,8 @@ class Runtime:
             return self.poll(channel, 0, limit, max_bytes)
         if reset:
             self._note(channel, "restarted", (reset.get("what") if isinstance(reset, dict) else None) or "the service read this thread from the start")
-            channel.observed.clear()
+            with channel.lock:
+                channel.observed.clear()
         channel.created_at = created
 
         # What the budget kept out. The service answers a byte budget honestly:

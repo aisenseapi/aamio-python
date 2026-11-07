@@ -25,9 +25,27 @@ not what moved in the source.
   once, each counted until it has really ended, since a lookup cannot be
   stopped. Nothing about the reader goes out, and a result grants nothing. A machine whose certificate store lacks a
   root gets unreachable, tls; `check` takes a TLS context that verifies, such
-  as one built from certifi, and refuses one that does not. The runtime, the
-  command line and MCP do not call it yet. The addresses it may reach are
-  shared in `tests/domain_fetch_vectors.json`.
+  as one built from certifi, and refuses one that does not. The addresses it
+  may reach are shared in `tests/domain_fetch_vectors.json`.
+- `aamio domain` and `aamio_domain_check` check a key against a website from
+  inside the runtime. The key comes from the address book or from the signature
+  this process checked itself, and never from whoever asks, so a message cannot
+  pick the key that is compared; a message read by an earlier process is not
+  known, and answers source_unavailable. Only websites on the user's own list
+  are read, in `domains.json` in the home: `aamio domain allow` on the command
+  line, or a form over MCP where the user types the domain themselves and a
+  lookalike stops at what they type. A check of any other domain stops before a
+  lookup, on every surface. `aamio domain file` writes your public key as the
+  list a site publishes, and `aamio domain validate` checks a file without
+  touching a home. `check` has an exit code per answer. At most two checks run
+  at once and twenty start per minute in one process, and `AAMIO_DOMAIN_DENY`
+  keeps an operator's own networks out. A result is a dated observation and
+  changes nothing. Nothing is read until a domain is on the list, there is no
+  background work, and a `domains.json` that cannot be read stops domain checks
+  and nothing else.
+- Clearing a channel's observed messages now takes the channel's lock, as every
+  other touch of them does. `forget_thread` and the reset in `poll` did not, so
+  a receipt reading them on another thread could meet a change of size.
 
 ## 0.6.24 - 2026-10-01
 

@@ -25,8 +25,16 @@ def instructions():
     return reply["result"]["instructions"]
 
 
-def test_twenty_four_tools_as_the_docs_say():
-    assert len(mcp_server.TOOLS) == 24
+def test_twenty_five_tools_as_the_docs_say():
+    assert len(mcp_server.TOOLS) == 25
+
+
+def test_the_readme_names_every_tool():
+    # It said a count one higher than its list until this was here.
+    with open(os.path.join(os.path.dirname(__file__), "..", "README.md"), encoding="utf-8") as handle:
+        readme = handle.read()
+
+    assert [one["name"] for one in mcp_server.TOOLS if "`%s`" % one["name"] not in readme] == []
 
 
 def test_read_says_plain_text_and_unknown_key_are_not_unsigned():
