@@ -15,7 +15,8 @@
     aamio scope key NAME           the key, to pass on by hand
     aamio scope share NAME PARTNER --access read|write
     aamio scope remove NAME
-    aamio addon list               the add-ons this installation can run, each a package of its own
+    aamio addon list               the add-ons installed beside aamio, and which of them run here
+    aamio addon enable NAME        let an installed add-on run here; disable takes it out again
     aamio addon NAME ...           an add-on's commands: aamio addon domain --help with Domain Keys
     aamio serve                    MCP server on stdio
 
@@ -116,7 +117,27 @@ def send_failed(error, operation):
     return 1
 
 
+def addon_change(verb, name):
+    """aamio addon enable NAME or disable NAME: the list afterwards, or the refusal and 2."""
+    try:
+        out(getattr(addons, verb)(name))
+    except addons.AddonError as error:
+        print("aamio: %s" % error, file=sys.stderr)
+        return 2
+    return 0
+
+
 def main(argv=None):
+    # The home before the parser is built: which add-ons run here is kept in
+    # it, and the parser has a command for each. And `addon disable` before
+    # the add-ons are loaded, so that a broken one can be taken out again.
+    probe = argparse.ArgumentParser(add_help=False)
+    probe.add_argument("--home", default=None)
+    known, rest = probe.parse_known_args(argv)
+    addons.use_home(known.home)
+    words = [word for word in rest if not word.startswith("-")]
+    if words[:2] == ["addon", "disable"] and len(words) == 3:
+        return addon_change("disable", words[2])
     parser = argparse.ArgumentParser(prog="aamio", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--home", default=None)
     parser.add_argument("--host", default=None)
@@ -241,13 +262,28 @@ def main(argv=None):
     try:
         installed = addons.loaded()
     except addons.AddonError as error:
+        if words[:2] == ["addon", "list"]:
+            # The list still answers, from metadata, and says what is broken
+            # and how to take it out: a broken add-on must not hide itself.
+            try:
+                out(addons.describe())
+                return 1
+            except addons.AddonError:
+                pass
         print("aamio: %s" % error, file=sys.stderr)
         return 1
     p = sub.add_parser("addon", help="the add-ons installed beside aamio, and their commands")
     asub = p.add_subparsers(dest="addon", required=True)
-    asub.add_parser("list", help="which add-ons this installation can run")
+    asub.add_parser("list", help="which add-ons are installed, and which of them run here")
+    asub.add_parser("enable", help="let an installed add-on run here").add_argument("name", help="its short name, or its distribution")
+    asub.add_parser("disable", help="take an add-on out again").add_argument("name", help="its short name, or its distribution")
     for addon in installed:
         addon.add_commands(asub.add_parser(addon.NAME, help="%s %s" % (addon.__name__, addon.__version__)))
+    # An add-on that is installed and not enabled is a command that says so,
+    # not an unknown word; nothing of it runs, so it has no commands yet.
+    for row in addons.installed():
+        if row["name"] not in asub.choices:
+            asub.add_parser(row["name"], help="installed, not enabled").add_argument("rest", nargs=argparse.REMAINDER)
 
     args = parser.parse_args(argv)
     # Before the runtime: creating one takes the home's lock and tidies the home.
@@ -257,6 +293,11 @@ def main(argv=None):
         if args.addon == "list":
             out(addons.describe())
             return 0
+        if args.addon in ("enable", "disable"):
+            return addon_change(args.addon, args.name)
+        if args.addon not in {addon.NAME for addon in installed}:
+            print("aamio: the add-on %s is installed and not enabled. aamio addon enable %s lets it run here." % (args.addon, args.addon), file=sys.stderr)
+            return 2
         code = addons.by_name(args.addon).early(args)
         if code is not None:
             return code

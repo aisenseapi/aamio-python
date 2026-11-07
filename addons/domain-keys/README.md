@@ -4,6 +4,7 @@ Domain Keys, an add-on to [aamio](https://aamio.at). A website can list the publ
 
 ```bash
 pip install "aamio[domain-keys]"
+aamio addon enable domain                             # installed is not enabled: this lets it run here
 aamio addon domain allow example.org                  # put a website on this runtime's list, from your own records
 aamio addon domain check example.org --partner NAME   # read the list once and compare
 ```

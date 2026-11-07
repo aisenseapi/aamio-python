@@ -14,11 +14,19 @@ not what moved in the source.
   commands sit under `aamio addon NAME`, its tools beside the core's. Two
   add-ons with one name, or a tool with a name already taken, stop the start and
   say so, rather than let the order they were found in decide; so does an add-on
-  that cannot be loaded, since a broken install is not a quiet absence. For a
-  checkout that is not installed, `AAMIO_ADDONS` names the modules.
+  that cannot be loaded, since a broken install is not a quiet absence.
+  Installed is not enabled: nothing of an add-on runs until
+  `aamio addon enable NAME` names it, recorded by distribution in `addons.json`
+  in the home, so a second package with the same short name does not inherit
+  the choice; `aamio addon disable NAME` takes it out again, broken or not, and
+  `aamio addon list` says what is installed and what runs, from the metadata,
+  without running what is not enabled. An enabled add-on runs in aamio's own
+  process, with its key and home. For a checkout that is not installed,
+  `AAMIO_ADDONS` names the modules.
 - Domain Keys is the first add-on, `aamio-domain-keys`, built in
   `addons/domain-keys` of this repository and installed with
-  `pip install "aamio[domain-keys]"`. A website can publish the public keys of
+  `pip install "aamio[domain-keys]"`, then `aamio addon enable domain`. A
+  website can publish the public keys of
   its agents at `/.well-known/aamio-keys.json`, and `aamio addon domain check`
   and the tool `aamio_addon_domain_check` check a key against that list from
   inside the runtime. The key comes from the address book or from the signature

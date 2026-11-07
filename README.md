@@ -282,7 +282,8 @@ A website can list the public keys of its own agents at `/.well-known/aamio-keys
 
 ```bash
 pip install "aamio[domain-keys]"                      # the core and the add-on, aamio-domain-keys
-aamio addon list                                      # what this installation can run beyond the core
+aamio addon enable domain                             # let it run here: installed is not enabled
+aamio addon list                                      # what is installed beside the core, and what runs
 aamio addon domain allow example.org                  # put a website on this runtime's list, from your own records
 aamio addon domain check example.org --partner NAME   # read the list once and compare
 aamio addon domain list                               # the websites this runtime may read
@@ -297,7 +298,7 @@ The website comes from you and the key from this machine. A check of a website t
 
 A read goes only to public addresses, connects to the address it checked, follows no redirect and sends nothing about you, and takes at most five seconds and 16 KiB. At most two checks run at once and twenty start per minute in one process. `AAMIO_DOMAIN_DENY` adds networks that are never read, comma separated. If a certificate cannot be verified on your machine but the site opens in a browser, the machine's store may lack the root: `SSL_CERT_FILE` can point Python at a CA bundle, and verification is never switched off.
 
-An add-on is a distribution that depends on aamio and declares an entry point in the group `aamio.addons`; the core finds it, puts its commands under `aamio addon NAME` and its tools beside its own, and stops with the reason when two add-ons share a name or one cannot be loaded. `addons/domain-keys` in this repository is the first, tested with the core.
+An add-on is a distribution that depends on aamio and declares an entry point in the group `aamio.addons`; the core finds it, puts its commands under `aamio addon NAME` and its tools beside its own, and stops with the reason when two add-ons share a name or one cannot be loaded. Installed is not enabled: nothing of an add-on runs until `aamio addon enable NAME` names it, recorded by distribution in `addons.json` in the home, so a second package with the same short name does not inherit the choice, and `aamio addon disable NAME` takes one out again, broken or not. An enabled add-on runs in aamio's own process, with its key and home, and can do what aamio can: enable what you trust, as with any package. `addons/domain-keys` in this repository is the first, tested with the core.
 
 ## Moving a conversation to a private thread
 
