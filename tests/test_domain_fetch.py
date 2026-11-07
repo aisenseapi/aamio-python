@@ -271,7 +271,9 @@ def test_the_operator_can_keep_more_networks_out():
 def test_the_address_policy_is_the_shared_one_on_every_python():
     assert ADDRESS_POLICY == VECTORS["address_policy"] == 1
     assert str(IPV6_GLOBAL) == VECTORS["ipv6_global"]
-    assert [str(net) for net in DENIED_NETWORKS] == VECTORS["denied_networks"]
+    # The ranges and not their text: 3.10 prints the mapped range as ::ffff:0:0/96
+    # and a newer Python as ::ffff:0.0.0.0/96, and it is the same range.
+    assert list(DENIED_NETWORKS) == [ipaddress.ip_network(net) for net in VECTORS["denied_networks"]]
 
 
 def test_the_name_is_looked_up_once_and_the_checked_address_is_the_one_connected():
