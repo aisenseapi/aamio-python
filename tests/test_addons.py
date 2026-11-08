@@ -426,6 +426,17 @@ def test_help_and_bad_arguments_change_nothing(site, monkeypatch, tmp_path):
     assert code == 2 and path.read_bytes() == before
     code, _, err = main(["addon", "disable", "demo", "--home"], monkeypatch)
     assert code == 2 and "--home" in err and "expected one argument" in err and path.read_bytes() == before, "--home without a folder is not the default home"
+    code, _, err = main(["--home=", "addon", "disable", "demo"], monkeypatch)
+    assert code == 2 and "--home needs a value" in err and path.read_bytes() == before, "an empty --home is not the default home either"
+    code, _, err = main(["--home", "", "addon", "enable", "demo"], monkeypatch)
+    assert code == 2 and "--home needs a value" in err and path.read_bytes() == before
+    code, _, err = main(["addon", "disable", "demo", "--home", " "], monkeypatch)
+    assert code == 2 and "--home needs a value" in err and path.read_bytes() == before
+    code, _, err = main(["--host=", "addon", "list"], monkeypatch)
+    assert code == 2 and "--host needs a value" in err
+    other = tmp_path / "other-home"
+    code, _, _ = main(["--home", str(other), "addon", "enable", "demo"], monkeypatch)
+    assert code == 0 and json.loads((other / "addons.json").read_text(encoding="utf-8")) == {"enabled": ["demo-pkg"]} and path.read_bytes() == before, "a path names a home, and that home is the one that changes"
 
     # Once the enabled add-on is broken, the shortcut past the loading is exactly `addon disable NAME`.
     (tmp_path / "site" / "demo_pkg.py").write_text("raise ImportError('no such library')\n", encoding="utf-8")

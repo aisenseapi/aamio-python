@@ -4,6 +4,14 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.26 - 2026-11-08
+
+- `--home` and `--host` with an empty value, as `--home=` or `--home ""`, are
+  refused with exit code 2 and nothing changes. Before, an empty value fell
+  through to the default home or host, so a script whose variable for the
+  path was never set enabled or disabled an add-on in the home it did not
+  name. Leaving the option out still means the default.
+
 ## 0.6.25 - 2026-11-07
 
 - Add-ons. The core is the rendezvous, and what a runtime can do beyond it

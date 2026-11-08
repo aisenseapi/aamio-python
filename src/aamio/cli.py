@@ -136,6 +136,13 @@ def main(argv=None):
     probe.add_argument("--host", default=None)
     probe.add_argument("--no-archive", action="store_true")
     known, rest = probe.parse_known_args(argv)
+    # An empty value is not the default. `--home=` or `--home ""`, from a
+    # script whose variable was never set, would otherwise act in the default
+    # home; the option left out still means the default.
+    for option, value, shape in (("--home", known.home, "DIR"), ("--host", known.host, "URL")):
+        if value is not None and not value.strip():
+            sys.stderr.write("%s needs a value: aamio %s %s <command> ...\n" % (option, option, shape))
+            return 2
     addons.use_home(known.home)
     # Exactly `addon disable NAME` and nothing else. Help, or any other word,
     # goes through the parser like every command, and changes nothing.
