@@ -1,0 +1,31 @@
+{
+  "aamio_addon": 2,
+  "name": "example",
+  "version": "0.1.0",
+  "process": {"python": "aamio_example.process", "php": "process.php"},
+  "deadline_seconds": 10,
+  "description": "The commands under aamio addon example.\n\n    aamio addon example wave [--to NAME]    answer with a greeting\n\nMade from https://github.com/aisenseapi/aamio-addon-template.",
+  "commands": {
+    "wave": {
+      "help": "answer with a greeting",
+      "runtime": false,
+      "arguments": [
+        {"name": "--to", "help": "whom to greet, at most 64 characters"}
+      ]
+    }
+  },
+  "tools": [
+    {
+      "name": "aamio_addon_example_wave",
+      "description": "Answer with a greeting. Give to, a name of at most 64 characters, or leave it out.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "to": {"type": "string", "maxLength": 64, "description": "whom to greet"}
+        },
+        "additionalProperties": false
+      },
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    }
+  ]
+}

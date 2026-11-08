@@ -1,0 +1,17 @@
+{
+  "name": "your-vendor/aamio-example",
+  "description": "An add-on to aamio, made from https://github.com/aisenseapi/aamio-addon-template.",
+  "type": "aamio-addon",
+  "license": "MIT-0",
+  "require": {
+    "php": ">=8.1",
+    "aisenseapi/aamio": ">=0.3.13"
+  },
+  "autoload": {
+    "psr-4": {"AamioExample\\": "src/"}
+  },
+  "extra": {
+    "aamio-addon": {"name": "example", "contract": 2}
+  },
+  "minimum-stability": "stable"
+}

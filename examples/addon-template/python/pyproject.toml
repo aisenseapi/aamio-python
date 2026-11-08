@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# An add-on to aamio, made from https://github.com/aisenseapi/aamio-addon-template.
+name = "aamio-example"
+dynamic = ["version"]
+description = "An add-on to aamio."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT-0" }
+# The first core that knows contract 2 of aamio's add-ons.
+dependencies = ["aamio>=0.6.27"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+# How the core finds the add-on. The name on the left is the add-on's short name,
+# the same as name in aamio-addon.json.
+[project.entry-points."aamio.addons"]
+example = "aamio_example"
+
+[tool.setuptools.dynamic]
+version = { attr = "aamio_example.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# The manifest goes into the package, where the core reads it without running anything.
+[tool.setuptools.package-data]
+aamio_example = ["aamio-addon.json"]
