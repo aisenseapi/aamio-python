@@ -680,6 +680,9 @@ def test_contract_two_enable_probes_and_the_commands_go_through_the_process(proc
     assert row["mcp_tools"] == ["aamio_addon_demo2_ping", "aamio_addon_demo2_check", "aamio_addon_demo2_sleep"]
     assert "a process of its own" in said["note"] and "never the home's key" in said["note"]
     assert enabled_in(tmp_path) == {"enabled": ["demo2-pkg"]} and not imported.exists(), "recorded by distribution, and this process imported none of it"
+    code, out, _ = main(["addon", "enable", "demo2"], monkeypatch)
+    note = json.loads(out)["note"]
+    assert code == 0 and "nothing of it ran now" in note and "just now" not in note and ran.read_text(encoding="utf-8") == "probe probe\n", "enabling it again runs no probe, and says so"
 
     code, out, _ = main(["addon", "demo2", "--help"], monkeypatch)
     assert code == 0 and "ping" in out and "allow" in out and ran.read_text(encoding="utf-8") == "probe probe\n", "help comes from the manifest"

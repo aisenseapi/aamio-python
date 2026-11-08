@@ -64,7 +64,8 @@ STOP_WAIT = 5.0
 NEVER_PASSED = ("AAMIO_HOME", "AAMIO_ADDONS", "AAMIO_ADDON")
 # What the process gets of the environment: what the interpreter, the path, a
 # temporary directory, the locale, TLS roots and a proxy need, and nothing else.
-# A token in the user's environment is not the add-on's to read.
+# A token in the user's environment is not the add-on's to read, unless its
+# manifest names it, and then aamio addon list says so before it is enabled.
 ENVIRONMENT = (
     "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR",
     "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
@@ -659,14 +660,19 @@ def probe(manifest):
         raise AddonError("the add-on %s answered the probe as %s %s on contract %s, and its manifest says %s %s on contract 2. Reinstall it, or %s to go on without it." % (manifest.NAME, said.get("name"), said.get("version"), said.get("aamio_addon"), manifest.NAME, manifest.__version__, manifest.fix))
 
 
-def enable_note(distribution, environment):
-    """What enable says of an add-on on contract 2: the same words as aamio-php and https://aamio.at/docs/addons."""
+def enable_note(distribution, environment, probed=True):
+    """What enable says of an add-on on contract 2: the same words as aamio-php and https://aamio.at/docs/addons.
+
+    probed is whether the probe ran now; it does not for an add-on that was enabled already.
+    """
     asked = (", and %s, which its manifest asks for" % ", ".join(environment)) if environment else ""
-    return ("%s runs here from now on, in a process of its own for each call. enable started it once just now, before the choice was recorded, "
-            "to see that it answers as its manifest says. A call gets its arguments, a key aamio resolved for it, the runtime's public key where a "
+    ran = ("enable started it once just now, before the choice was recorded, to see that it answers as its manifest says." if probed
+           else "It was enabled already, and nothing of it ran now.")
+    return ("%s runs here from now on, in a process of its own for each call. %s "
+            "A call gets its arguments, a key aamio resolved for it, the runtime's public key where a "
             "command asks for it, a directory of its own under the home, and a short list of environment variables: the path, a temporary directory, "
             "the locale, the interpreter's own settings, TLS roots and the proxy variables, which can carry credentials of their own%s, and never the "
-            "home's key or the rest of your environment. Nothing it answers changes state in aamio. It runs with your own file permissions." % (distribution, asked))
+            "home's key or the rest of your environment. Nothing it answers changes state in aamio. It runs with your own file permissions." % (distribution, ran, asked))
 
 
 def state_dir(runtime, manifest):

@@ -289,6 +289,7 @@ def enable(which, given=None):
     with _Lock(given):
         names = enabled(given)
         contract = 1
+        probed = False
         if not any(_normal(name) == _normal(distribution) for name in names):
             for module in _load(os.environ.get("AAMIO_ADDONS") or "", names + [distribution]):
                 if isinstance(module, Manifest) and module.distribution is not None and _normal(module.distribution) == _normal(distribution):
@@ -296,13 +297,14 @@ def enable(which, given=None):
                     # the protocol and is the add-on the manifest says.
                     probe(module)
                     contract = 2
+                    probed = True
             _write_enabled(given, names + [distribution])
         else:
             contract = next((row.get("contract", 1) for row in describe(given)["addons"] if row.get("distribution") is not None and _normal(row["distribution"]) == _normal(distribution)), 1)
     answer = describe(given)
     if contract == 2:
         row = next((row for row in answer["addons"] if row.get("distribution") is not None and _normal(row["distribution"]) == _normal(distribution)), {})
-        answer["note"] = enable_note(distribution, row.get("environment") or []) + " " + RESTART
+        answer["note"] = enable_note(distribution, row.get("environment") or [], probed) + " " + RESTART
     else:
         answer["note"] = "%s runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can. %s" % (distribution, RESTART)
     return answer
