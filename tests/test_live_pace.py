@@ -375,10 +375,14 @@ def test_every_live_file_takes_its_turn():
     # day it uses the client it writes too, and is counted with the others.
     reader = open(os.path.join(HERE, "test_domain_fetch.py"), encoding="utf-8").read()
     assert "aamio_client" not in reader and "AamioClient" not in reader, "test_domain_fetch.py uses the client now, and must take its turn"
+    # test_sound_process.py calls aisenseapi.com and never aamio.at, so it has no
+    # turn to take either (8 November 2026). The same guard holds it to that.
+    sound = open(os.path.join(HERE, "test_sound_process.py"), encoding="utf-8").read()
+    assert "aamio_client" not in sound and "AamioClient" not in sound and "aamio.at" not in sound, "test_sound_process.py reaches aamio.at now, and must take its turn"
 
     live = [name for name in sorted(os.listdir(HERE)) if name.startswith("test_") and name.endswith(".py")
             and 'os.environ.get("AAMIO_LIVE") != "1"' in open(os.path.join(HERE, name), encoding="utf-8").read()
-            and name not in ("test_live_gate.py", "test_live_pace.py", "test_domain_fetch.py")]
+            and name not in ("test_live_gate.py", "test_live_pace.py", "test_domain_fetch.py", "test_sound_process.py")]
 
     assert live == ["test_e2e.py", "test_first_exchange.py", "test_robust.py"], live
 

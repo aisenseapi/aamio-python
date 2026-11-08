@@ -49,5 +49,5 @@ where = ["src"]
 # Test the tree, not whatever happens to be installed. Without this pytest
 # imports aamio from site-packages, so a green run can be green about
 # a different version of the code than the one being edited.
-pythonpath = ["src", "addons/domain-keys/src", "examples/hello/src"]
+pythonpath = ["src", "addons/domain-keys/src", "addons/sound/src", "examples/hello/src"]
 testpaths = ["tests"]
