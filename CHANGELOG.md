@@ -21,6 +21,13 @@ not what moved in the source.
   `aamio addon list` says each add-on's contract, and an add-on written for a
   contract this aamio does not know is said and can be taken out. `run` is a
   reserved name.
+- `aamio addon list` says which environment variables a contract-2 add-on asks
+  for before it is enabled, the probe at `enable` gets none of them, and the
+  note `enable` prints names them, says that the probe ran, and that the
+  process runs with your own file permissions. An answer past 1 MB or standard
+  error past 64 KB is refused the same whether the process was still writing
+  or had already exited. An add-on installed editable, `pip install -e`, is
+  found in its source tree, where its manifest is.
 - aamio-domain-keys 0.2.0 is on contract 2: the same commands and the same
   tool, with the check in a process of its own, and its `domains.json` becomes
   the core's list at the first command. It requires this version.

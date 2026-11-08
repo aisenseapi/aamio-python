@@ -43,7 +43,7 @@ from . import storage
 from .runtime import home_dir
 
 from . import addon_process
-from .addon_process import AddonError, Manifest, RESERVED, probe, read_manifest
+from .addon_process import AddonError, Manifest, RESERVED, enable_note, probe, read_manifest
 
 GROUP = "aamio.addons"
 ENABLED_FILE = "addons.json"
@@ -301,7 +301,8 @@ def enable(which, given=None):
             contract = next((row.get("contract", 1) for row in describe(given)["addons"] if row.get("distribution") is not None and _normal(row["distribution"]) == _normal(distribution)), 1)
     answer = describe(given)
     if contract == 2:
-        answer["note"] = "%s runs here from now on, in a process of its own for each call, with the call's arguments, a key aamio resolves for it and a directory of its own, and never the home's key. It runs with your own file permissions, and enable started it once just now to check that it answers. %s" % (distribution, RESTART)
+        row = next((row for row in answer["addons"] if row.get("distribution") is not None and _normal(row["distribution"]) == _normal(distribution)), {})
+        answer["note"] = enable_note(distribution, row.get("environment") or []) + " " + RESTART
     else:
         answer["note"] = "%s runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can. %s" % (distribution, RESTART)
     return answer
@@ -366,7 +367,11 @@ def describe(given=None):
         # Which contract, from the manifest or its absence, running nothing; a
         # manifest for a contract this aamio does not know is this row's error.
         try:
-            entry["contract"] = 2 if read_manifest(row["module"].split(":")[0], row["distribution"], "aamio addon disable %s" % row["distribution"], dist=row["point"].dist) is not None else 1
+            manifest = read_manifest(row["module"].split(":")[0], row["distribution"], "aamio addon disable %s" % row["distribution"], dist=row["point"].dist)
+            entry["contract"] = 2 if manifest is not None else 1
+            if manifest is not None and manifest.environment:
+                # Said before the add-on is enabled: which variables it asks for, by name.
+                entry["environment"] = list(manifest.environment)
         except AddonError as failure:
             entry["error"] = str(failure)
         module = running.get(row["name"])

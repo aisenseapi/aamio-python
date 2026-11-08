@@ -523,6 +523,9 @@ here = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(here, "process.ran"), "a", encoding="utf-8") as marker:
     marker.write(request["kind"] + " " + request["name"] + "\\n")
 if request["kind"] == "probe":
+    if os.environ.get("AAMIO_TEST_PASSTHRU") is not None:
+        print(json.dumps({"result": {"ok": False, "reason": "addon_failed", "fix": "the probe was given AAMIO_TEST_PASSTHRU, which only a call may get"}}))
+        sys.exit(0)
     print(json.dumps({"result": {"ok": True, "name": %(name)r, "version": %(version)r, "aamio_addon": 2}}))
     sys.exit(0)
 short = request["name"].rsplit("_", 1)[-1]
@@ -549,6 +552,19 @@ if short == "noisy":
     sys.stderr.flush()
     time.sleep(5)
     sys.exit(0)
+if short == "spill":
+    sys.stdout.write("x" * 5000)
+    sys.exit(0)
+if short == "grumble":
+    sys.stderr.write("y" * 5000)
+    sys.stderr.flush()
+    print(json.dumps({"result": {"pong": True}}))
+    sys.exit(0)
+if short == "mutter":
+    sys.stderr.write("y" * 500)
+    sys.stderr.flush()
+    print(json.dumps({"result": {"pong": True}}))
+    sys.exit(0)
 print(json.dumps({"result": {"pong": True, "name": request["name"], "arguments": request["arguments"], "subject": request["subject"], "own_key": request["own_key"], "state_dir": request["state_dir"], "home_env": os.environ.get("AAMIO_HOME"), "addon_env": os.environ.get("AAMIO_ADDON"), "secret_env": os.environ.get("AAMIO_TEST_SECRET"), "passthru_env": os.environ.get("AAMIO_TEST_PASSTHRU"), "path_env": bool(os.environ.get("PATH"))}}))
 """
 
@@ -572,6 +588,9 @@ def manifest_for(name, package, deadline=2, hosts=True, environment=None):
             "fail": {"help": "a refusal"},
             "flood": {"help": "writes without end"},
             "noisy": {"help": "complains without end"},
+            "spill": {"help": "a big answer, at once"},
+            "grumble": {"help": "too much on standard error, at once"},
+            "mutter": {"help": "exactly the limit on standard error"},
         },
         "tools": [
             {"name": "aamio_addon_%s_ping" % name, "description": "answers pong", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
@@ -594,8 +613,12 @@ def process_site(tmp_path, monkeypatch):
     """A contract-2 add-on as pip leaves it: a package with its manifest and process module, and a .dist-info with the entry point, on the path of this process and of its children."""
     folder = tmp_path / "site"
     folder.mkdir()
+    # An editable install's source tree, beside the site directory and on the path as its .pth puts it.
+    checkout = folder / "checkout"
+    checkout.mkdir()
     monkeypatch.syspath_prepend(str(folder))
-    monkeypatch.setenv("PYTHONPATH", str(folder) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    monkeypatch.syspath_prepend(str(checkout))
+    monkeypatch.setenv("PYTHONPATH", str(checkout) + os.pathsep + str(folder) + os.pathsep + os.environ.get("PYTHONPATH", ""))
     monkeypatch.setenv("AAMIO_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AAMIO_ADDONS", "")
     monkeypatch.setenv("AAMIO_TEST_SECRET", "not for the add-on")
@@ -605,20 +628,32 @@ def process_site(tmp_path, monkeypatch):
     for module in ("demo2_pkg", "demo2_pkg.process"):
         sys.modules.pop(module, None)
 
-    def install(distribution="demo2-pkg", package="demo2_pkg", name="demo2", version="0.0.2", manifest=None, entry=None):
-        pkg = folder / package
+    def install(distribution="demo2-pkg", package="demo2_pkg", name="demo2", version="0.0.2", manifest=None, entry=None, editable=False):
+        pkg = (checkout if editable else folder) / package
         pkg.mkdir()
         if entry is not None and "." in entry:
             (pkg / (entry.split(".", 1)[1] + ".py")).write_text("", encoding="utf-8")
         # Importing the package leaves a marker named by the process that did it.
-        (pkg / "__init__.py").write_text("import os\nopen(%r + '.imported.%%d' %% os.getpid(), 'w').close()\n" % str(folder / package), encoding="utf-8")
+        (pkg / "__init__.py").write_text("import os\nopen(%r + '.imported.%%d' %% os.getpid(), 'w').close()\n" % str(pkg), encoding="utf-8")
         (pkg / "process.py").write_text(PROCESS % {"name": name, "version": version}, encoding="utf-8")
         (pkg / "aamio-addon.json").write_text(json.dumps(manifest if manifest is not None else manifest_for(name, package)), encoding="utf-8")
-        info = folder / ("%s-%s.dist-info" % (distribution.replace("-", "_"), version))
+        stem = "%s-%s" % (distribution.replace("-", "_"), version)
+        info = folder / (stem + ".dist-info")
         info.mkdir()
         (info / "METADATA").write_text("Metadata-Version: 2.1\nName: %s\nVersion: %s\n" % (distribution, version), encoding="utf-8")
         (info / "entry_points.txt").write_text("[aamio.addons]\n%s = %s\n" % (name, entry or package), encoding="utf-8")
-        return pkg / "process.ran", folder / ("%s.imported.%d" % (package, os.getpid()))
+        # RECORD as pip writes it, relative to the site directory: the package's files for an
+        # ordinary install; for pip install -e, the .pth that puts the checkout on the path and
+        # direct_url.json saying editable, and nothing of the source tree.
+        listed = [info.name + "/METADATA", info.name + "/entry_points.txt", info.name + "/RECORD"]
+        if editable:
+            (folder / ("__editable__.%s.pth" % stem)).write_text(str(checkout) + "\n", encoding="utf-8")
+            (info / "direct_url.json").write_text(json.dumps({"url": checkout.as_uri(), "dir_info": {"editable": True}}), encoding="utf-8")
+            listed += ["__editable__.%s.pth" % stem, info.name + "/direct_url.json"]
+        else:
+            listed += ["%s/%s" % (package, item.name) for item in sorted(pkg.iterdir())]
+        (info / "RECORD").write_text("".join("%s,,\n" % item for item in listed), encoding="utf-8")
+        return pkg / "process.ran", pkg.parent / ("%s.imported.%d" % (package, os.getpid()))
 
     return install
 
@@ -641,7 +676,7 @@ def test_contract_two_enable_probes_and_the_commands_go_through_the_process(proc
     assert code == 0 and ran.read_text(encoding="utf-8") == "probe probe\n", "enable asked the process who it is, and nothing else of it ran"
     row = said["addons"][0]
     assert row["enabled"] is True and row["contract"] == 2 and row["version"] == "0.0.2"
-    assert row["commands"] == ["allow", "bytes", "check", "crash", "fail", "file", "flood", "forget", "garbage", "list", "local", "noisy", "ping", "sleep"], "the manifest's commands, and the three the core gives an add-on with hosts"
+    assert row["commands"] == ["allow", "bytes", "check", "crash", "fail", "file", "flood", "forget", "garbage", "grumble", "list", "local", "mutter", "noisy", "ping", "sleep", "spill"], "the manifest's commands, and the three the core gives an add-on with hosts"
     assert row["mcp_tools"] == ["aamio_addon_demo2_ping", "aamio_addon_demo2_check", "aamio_addon_demo2_sleep"]
     assert "a process of its own" in said["note"] and "never the home's key" in said["note"]
     assert enabled_in(tmp_path) == {"enabled": ["demo2-pkg"]} and not imported.exists(), "recorded by distribution, and this process imported none of it"
@@ -826,12 +861,17 @@ def test_the_example_add_on_hello_runs_as_the_page_says(tmp_path, monkeypatch):
 
 
 def test_contract_two_passes_only_the_environment_the_manifest_declares(process_site, monkeypatch, tmp_path):
-    process_site(manifest=manifest_for("demo2", "demo2_pkg", environment=["AAMIO_TEST_PASSTHRU"]))
+    ran, _ = process_site(manifest=manifest_for("demo2", "demo2_pkg", environment=["AAMIO_TEST_PASSTHRU"]))
     monkeypatch.setenv("AAMIO_TEST_PASSTHRU", "yes please")
-    assert main(["addon", "enable", "demo2"], monkeypatch)[0] == 0
+    passive = json.loads(main(["addon", "list"], monkeypatch)[1])["addons"][0]
+    assert passive["enabled"] is False and passive["environment"] == ["AAMIO_TEST_PASSTHRU"] and not ran.exists(), "the list says which variables the add-on asks for before it is enabled, running nothing"
+    # The fake process refuses the probe when it is given the variable: the probe gets the short list alone.
+    code, out, err = main(["addon", "enable", "demo2"], monkeypatch)
+    assert code == 0, err
+    assert ran.read_text(encoding="utf-8") == "probe probe\n" and "AAMIO_TEST_PASSTHRU, which its manifest asks for" in json.loads(out)["note"], "the probe ran without it, and the note names it"
     code, out, _ = main(["addon", "demo2", "ping"], monkeypatch)
     got = json.loads(out)
-    assert code == 0 and got["passthru_env"] == "yes please" and got["secret_env"] is None, "what the manifest declares comes through; the rest of the user's environment does not"
+    assert code == 0 and got["passthru_env"] == "yes please" and got["secret_env"] is None, "what the manifest declares comes through at a call; the rest of the user's environment does not"
     assert json.loads(main(["addon", "list"], monkeypatch)[1])["addons"][0]["environment"] == ["AAMIO_TEST_PASSTHRU"], "and the list says what the add-on asked for"
 
 
@@ -873,3 +913,40 @@ def test_a_process_that_floods_is_stopped_while_it_runs(process_site, monkeypatc
         assert pong["result"]["structuredContent"]["pong"] is True, "and the next call goes through"
     finally:
         runtime.close()
+
+
+def test_an_editable_install_is_found_in_its_source_tree(process_site, monkeypatch, tmp_path):
+    """pip install -e: the distribution's files are the installation's own metadata, and the manifest is in the checkout."""
+    ran, imported = process_site(editable=True)
+    code, out, _ = main(["addon", "list"], monkeypatch)
+    assert code == 0 and json.loads(out)["addons"][0] == {"name": "demo2", "version": "0.0.2", "distribution": "demo2-pkg", "enabled": False, "contract": 2, "fix": "aamio addon enable demo2"}
+    assert not imported.exists() and "demo2_pkg" not in sys.modules, "found through the finder, importing nothing"
+    code, out, err = main(["addon", "enable", "demo2"], monkeypatch)
+    assert code == 0 and json.loads(out)["addons"][0]["enabled"] is True and ran.read_text(encoding="utf-8") == "probe probe\n", err
+    code, out, _ = main(["addon", "demo2", "ping"], monkeypatch)
+    assert code == 0 and json.loads(out)["pong"] is True
+
+
+def test_a_manifest_the_distribution_does_not_list_is_not_its_own(process_site, monkeypatch, tmp_path):
+    """An ordinary install lists its files: a manifest beside them that the list does not have is a stray, and the add-on is on contract 1."""
+    ran, imported = process_site()
+    record = tmp_path / "site" / "demo2_pkg-0.0.2.dist-info" / "RECORD"
+    record.write_text("".join(line for line in record.read_text(encoding="utf-8").splitlines(keepends=True) if "aamio-addon.json" not in line), encoding="utf-8")
+    code, out, _ = main(["addon", "list"], monkeypatch)
+    assert code == 0 and json.loads(out)["addons"][0]["contract"] == 1 and not imported.exists() and not ran.exists()
+
+
+def test_the_limits_hold_when_the_process_exits_at_once(process_site, monkeypatch, tmp_path):
+    """The same answer whether the process was still writing at the next look or had already exited."""
+    process_site()
+    assert main(["addon", "enable", "demo2"], monkeypatch)[0] == 0
+    monkeypatch.setattr(addon_process, "MAX_ANSWER_BYTES", 1000)
+    monkeypatch.setattr(addon_process, "MAX_STDERR_BYTES", 500)
+    code, out, _ = main(["addon", "demo2", "spill"], monkeypatch)
+    said = json.loads(out)
+    assert code == 5 and said["reason"] == "addon_failed" and "bytes an answer may be" in said["fix"], "an answer past the limit from a process that exited at once is refused the same"
+    code, out, err = main(["addon", "demo2", "grumble"], monkeypatch)
+    said = json.loads(out)
+    assert code == 5 and said["reason"] == "addon_failed" and "standard error" in said["fix"] and "y" * 100 not in err, "a valid answer beside too much standard error is refused, and the error is not relayed"
+    code, out, err = main(["addon", "demo2", "mutter"], monkeypatch)
+    assert code == 0 and json.loads(out)["pong"] is True and "y" * 500 in err and "y" * 501 not in err, "exactly the limit passes, and is relayed whole"

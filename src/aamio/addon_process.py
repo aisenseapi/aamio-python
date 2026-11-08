@@ -9,11 +9,13 @@ key, the home and its lock, the address book, the messages this process
 verified, and the user's consent to the websites an add-on may read. The
 add-on gets the call's arguments, a subject the core resolved to a key, and a
 directory of its own, and a short list of environment variables rather than
-the user's. It is not a sandbox: the process runs as the same user and reads
-what the user reads. What it gives is that the key is never in the add-on's
-memory, that nothing an add-on answers changes state here, that an add-on that
-hangs or crashes does not take the runtime with it, and that list, help and
-enable run none of the add-on's code. It is for add-ons the user trusts.
+the user's. It is not a sandbox: the process runs as the same user, with the
+user's own file permissions, and reads what the user reads. What it gives is
+that the core never sends the home's key, only the public key a call asks for,
+that nothing an add-on answers changes state here, that an add-on that hangs
+or crashes does not take the runtime with it, and that list and help run none
+of the add-on's code: enable starts it once, before the choice is recorded, to
+see that it answers as its manifest says. It is for add-ons the user trusts.
 
 The manifest and the protocol are written up in the service repository under
 docs/aamio-tillegg-kontrakt-2-2026-11-08.md and on https://aamio.at/docs/addons.
@@ -106,12 +108,29 @@ def refusal(refused, **known):
 
 # ------------------------------------------------------------------ manifest
 
+def _editable(dist):
+    """Whether pip installed the distribution editable (PEP 610, pip install -e): its files are then the installation's own metadata, and the package is in its source tree."""
+    try:
+        text = dist.read_text("direct_url.json")
+    except Exception:
+        return False
+    if not text:
+        return False
+    try:
+        info = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(info, dict) and isinstance(info.get("dir_info"), dict) and info["dir_info"].get("editable") is True
+
+
 def manifest_path(module, dist=None):
     """Where the add-on's manifest would be, found without importing anything, or None.
 
     The manifest sits in the top-level package the entry point names. An
     installed distribution lists its files, and the manifest is looked for
-    there; a checkout named in AAMIO_ADDONS has no distribution, and
+    there: a manifest the list does not have is not the distribution's. An
+    editable install lists only the installation's own metadata, and a
+    checkout named in AAMIO_ADDONS has no distribution; for both,
     importlib.util.find_spec on the top-level name locates the package without
     running it. A dotted module name is never given to find_spec: that would
     import the parent package. A single-file module cannot carry a manifest.
@@ -128,7 +147,8 @@ def manifest_path(module, dist=None):
             parts = entry.parts
             if len(parts) == 2 and parts[0] == top and parts[1] == MANIFEST_FILE:
                 return str(entry.locate())
-        return None
+        if not _editable(dist):
+            return None
     try:
         spec = importlib.util.find_spec(top)
     except (ImportError, ValueError):
@@ -520,14 +540,16 @@ def _failure(manifest, reason, fix):
     return {"result": {"status": "unreachable", "reason": reason, "fix": fix, "addon": manifest.NAME}, "exit_code": 5, "is_error": True}
 
 
-def run(manifest, kind, name, arguments, subject=None, own_key=None, state_dir=None, stderr=None, deadline=None):
+def run(manifest, kind, name, arguments, subject=None, own_key=None, state_dir=None, stderr=None, deadline=None, declared=True):
     """One call to the add-on's process: the request on its standard input, its answer from standard output, within the deadline.
 
     stderr is a callable given what the process wrote to standard error, or None
-    to drop it. The answer is always a dict with result or raw, exit_code and
-    is_error; a process that cannot be started, answers nothing this aamio can
-    read or runs past the deadline becomes an unreachable result with the
-    reason, and the deadline kills it.
+    to drop it. declared False keeps the variables the manifest asks for out of
+    the environment: the probe at enable runs so, before the user has seen the
+    names in aamio addon list. The answer is always a dict with result or raw,
+    exit_code and is_error; a process that cannot be started, answers nothing
+    this aamio can read or runs past the deadline becomes an unreachable result
+    with the reason, and the deadline kills it.
     """
     deadline = manifest.deadline if deadline is None else deadline
     request = {
@@ -542,8 +564,9 @@ def run(manifest, kind, name, arguments, subject=None, own_key=None, state_dir=N
         "aamio": {"version": CORE_VERSION, "runtime": "python"},
     }
     # What the process gets of the environment: the short list, and what its
-    # manifest declared it reads, when set. Never the home or the user's rest.
-    env = {key: value for key, value in os.environ.items() if key.upper() in ENVIRONMENT or key in manifest.environment}
+    # manifest declared it reads, when set and when this is a call and not the
+    # probe at enable. Never the home or the user's rest.
+    env = {key: value for key, value in os.environ.items() if key.upper() in ENVIRONMENT or (declared and key in manifest.environment)}
     env["AAMIO_ADDON"] = "2"
     stop = "Reinstall it, or aamio addon disable %s to go on without it." % manifest.NAME
     # The request, the answer and standard error go through files in a directory
@@ -577,11 +600,15 @@ def run(manifest, kind, name, arguments, subject=None, own_key=None, state_dir=N
             out = handle.read(MAX_ANSWER_BYTES + 1)
         with open(paths["err"], "rb") as handle:
             err = handle.read(MAX_STDERR_BYTES + 1)
-    text = err[:MAX_STDERR_BYTES].decode("utf-8", "replace")
-    if stderr is not None and text:
-        stderr(text)
+    # The same limits whether the process was slow or had exited before the
+    # next look: past either, the answer is refused and nothing is relayed.
     if len(out) > MAX_ANSWER_BYTES:
         return _failure(manifest, "addon_failed", "the add-on %s answered with more than the %d bytes an answer may be. %s" % (manifest.NAME, MAX_ANSWER_BYTES, stop))
+    if len(err) > MAX_STDERR_BYTES:
+        return _failure(manifest, "addon_failed", "the add-on %s wrote more than %d bytes to standard error. %s" % (manifest.NAME, MAX_STDERR_BYTES, stop))
+    text = err.decode("utf-8", "replace")
+    if stderr is not None and text:
+        stderr(text)
     try:
         answer = json.loads(out.decode("utf-8"))
         if not isinstance(answer, dict):
@@ -616,8 +643,13 @@ def _stop(child):
 
 
 def probe(manifest):
-    """What enable asks before anything is recorded: the process starts, speaks the protocol, and is the add-on the manifest says."""
-    answer = run(manifest, "probe", "probe", {}, deadline=min(manifest.deadline, PROBE_DEADLINE))
+    """What enable asks before anything is recorded: the process starts, speaks the protocol, and is the add-on the manifest says.
+
+    It runs with the short list of environment variables and none the manifest
+    asks for: the user sees those names in aamio addon list before anything of
+    the add-on has run, and the first call is what gets them.
+    """
+    answer = run(manifest, "probe", "probe", {}, deadline=min(manifest.deadline, PROBE_DEADLINE), declared=False)
     said = answer.get("result")
     if not isinstance(said, dict) or said.get("ok") is not True:
         reason = said.get("reason") if isinstance(said, dict) else None
@@ -625,6 +657,16 @@ def probe(manifest):
         raise AddonError("the add-on %s did not answer the probe: %s" % (manifest.NAME, detail))
     if said.get("aamio_addon") != 2 or said.get("name") != manifest.NAME or said.get("version") != manifest.__version__:
         raise AddonError("the add-on %s answered the probe as %s %s on contract %s, and its manifest says %s %s on contract 2. Reinstall it, or %s to go on without it." % (manifest.NAME, said.get("name"), said.get("version"), said.get("aamio_addon"), manifest.NAME, manifest.__version__, manifest.fix))
+
+
+def enable_note(distribution, environment):
+    """What enable says of an add-on on contract 2: the same words as aamio-php and https://aamio.at/docs/addons."""
+    asked = (", and %s, which its manifest asks for" % ", ".join(environment)) if environment else ""
+    return ("%s runs here from now on, in a process of its own for each call. enable started it once just now, before the choice was recorded, "
+            "to see that it answers as its manifest says. A call gets its arguments, a key aamio resolved for it, the runtime's public key where a "
+            "command asks for it, a directory of its own under the home, and a short list of environment variables: the path, a temporary directory, "
+            "the locale, the interpreter's own settings, TLS roots and the proxy variables, which can carry credentials of their own%s, and never the "
+            "home's key or the rest of your environment. Nothing it answers changes state in aamio. It runs with your own file permissions." % (distribution, asked))
 
 
 def state_dir(runtime, manifest):
