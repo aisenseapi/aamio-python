@@ -15,6 +15,7 @@ import io
 import json
 import os
 import sys
+import time
 import textwrap
 
 import pytest
@@ -22,7 +23,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "domain-keys", "src"))
 
-from aamio import addons, cli, mcp_server
+from aamio import addon_process, addons, cli, mcp_server
 from aamio.runtime import Runtime
 
 DEMO = '''
@@ -110,7 +111,7 @@ def test_an_add_on_is_listed_once_with_its_commands_and_tools(tmp_path, loaded):
 
     said = addons.describe()
 
-    assert said["addons"] == [{"name": "demo", "distribution": None, "enabled": True, "named_in": "AAMIO_ADDONS", "version": "0.0.1", "module": "demo_addon", "commands": ["dry", "ping"], "mcp_tools": ["aamio_addon_demo_ping"]}]
+    assert said["addons"] == [{"name": "demo", "distribution": None, "enabled": True, "named_in": "AAMIO_ADDONS", "version": "0.0.1", "contract": 1, "module": "demo_addon", "commands": ["dry", "ping"], "mcp_tools": ["aamio_addon_demo_ping"]}]
     assert "note" not in said
     assert [t["name"] for t in mcp_server.tools()] == [t["name"] for t in mcp_server.TOOLS] + ["aamio_addon_demo_ping"]
 
@@ -260,7 +261,7 @@ def test_installed_is_not_enabled(site, monkeypatch):
 
     code, out, _ = main(["addon", "list"], monkeypatch)
     said = json.loads(out)
-    assert code == 0 and said["addons"] == [{"name": "demo", "version": "0.0.1", "distribution": "demo-pkg", "enabled": False, "fix": "aamio addon enable demo"}]
+    assert code == 0 and said["addons"] == [{"name": "demo", "version": "0.0.1", "distribution": "demo-pkg", "enabled": False, "contract": 1, "fix": "aamio addon enable demo"}]
     assert "note" not in said and not ran.exists(), "listed from its metadata: nothing of it ran"
     assert len(mcp_server.tools()) == 24, "and the local MCP has the core's tools and no more"
     code, _, err = main(["addon", "demo", "ping"], monkeypatch)
@@ -507,3 +508,302 @@ def test_disable_says_when_the_environment_holds_the_add_on(site, monkeypatch, t
     code, out, _ = main(["addon", "disable", "demo"], monkeypatch)
     said = json.loads(out)
     assert code == 0 and "demo is disabled" in said["note"] and "start it again" in said["note"] and "still runs" in said["note"]
+
+
+# ------------------------------------------------------------- contract 2 --
+#
+# An add-on in a process of its own: the manifest says what it offers, the
+# core reads it without running anything, and each call is a child process
+# with one request and one answer.
+
+PROCESS = """
+import base64, json, os, sys, time
+request = json.loads(sys.stdin.read())
+here = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(here, "process.ran"), "a", encoding="utf-8") as marker:
+    marker.write(request["kind"] + " " + request["name"] + "\\n")
+if request["kind"] == "probe":
+    print(json.dumps({"result": {"ok": True, "name": %(name)r, "version": %(version)r, "aamio_addon": 2}}))
+    sys.exit(0)
+short = request["name"].rsplit("_", 1)[-1]
+if short == "sleep":
+    time.sleep(30)
+if short == "crash":
+    sys.exit(3)
+if short == "garbage":
+    print("not json")
+    sys.exit(0)
+if short == "bytes":
+    print(json.dumps({"raw": base64.b64encode(b"raw\\n").decode("ascii")}))
+    sys.exit(0)
+if short == "fail":
+    print(json.dumps({"result": {"status": "no", "fix": "x"}, "exit_code": 3, "is_error": True, "stderr": "a note from the add-on"}))
+    sys.exit(3)
+print(json.dumps({"result": {"pong": True, "name": request["name"], "arguments": request["arguments"], "subject": request["subject"], "own_key": request["own_key"], "state_dir": request["state_dir"], "home_env": os.environ.get("AAMIO_HOME"), "addon_env": os.environ.get("AAMIO_ADDON"), "secret_env": os.environ.get("AAMIO_TEST_SECRET"), "path_env": bool(os.environ.get("PATH"))}}))
+"""
+
+
+def manifest_for(name, package, deadline=2, hosts=True):
+    data = {
+        "aamio_addon": 2,
+        "name": name,
+        "version": "0.0.2",
+        "process": {"python": package + ".process"},
+        "deadline_seconds": deadline,
+        "commands": {
+            "ping": {"help": "answers pong", "arguments": [{"name": "--word", "help": "a word to carry"}]},
+            "check": {"help": "a website and a partner", "arguments": [{"name": "site", "help": "the website", "host": True}, {"name": "--partner", "help": "a name in the address book", "required": True, "subject": "partner"}]},
+            "file": {"help": "the runtime's own key", "needs": ["own_key"]},
+            "local": {"help": "no home needed", "runtime": False, "arguments": [{"name": "path"}]},
+            "sleep": {"help": "never answers"},
+            "crash": {"help": "dies"},
+            "garbage": {"help": "talks nonsense"},
+            "bytes": {"help": "raw bytes"},
+            "fail": {"help": "a refusal"},
+        },
+        "tools": [
+            {"name": "aamio_addon_%s_ping" % name, "description": "answers pong", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+            {"name": "aamio_addon_%s_check" % name, "description": "a website and a subject", "inputSchema": {"type": "object", "properties": {"site": {"type": "string"}, "partner": {"type": "string"}, "message": {"type": "string"}}, "required": ["site"], "additionalProperties": False}, "host": "site", "subject": {"partner": "partner", "message": "message"}},
+            {"name": "aamio_addon_%s_sleep" % name, "description": "never answers", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+        ],
+    }
+    if hosts:
+        data["hosts"] = {"legacy_file": "old-hosts.json"}
+    else:
+        del data["commands"]["check"]
+        data["tools"] = [data["tools"][0], data["tools"][2]]
+    return data
+
+
+@pytest.fixture
+def process_site(tmp_path, monkeypatch):
+    """A contract-2 add-on as pip leaves it: a package with its manifest and process module, and a .dist-info with the entry point, on the path of this process and of its children."""
+    folder = tmp_path / "site"
+    folder.mkdir()
+    monkeypatch.syspath_prepend(str(folder))
+    monkeypatch.setenv("PYTHONPATH", str(folder) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    monkeypatch.setenv("AAMIO_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AAMIO_ADDONS", "")
+    monkeypatch.setenv("AAMIO_TEST_SECRET", "not for the add-on")
+    monkeypatch.setattr(addons, "_home", None)
+    monkeypatch.setattr(addons, "_cache", {})
+    monkeypatch.setattr(addon_process, "_limits", {})
+    for module in ("demo2_pkg", "demo2_pkg.process"):
+        sys.modules.pop(module, None)
+
+    def install(distribution="demo2-pkg", package="demo2_pkg", name="demo2", version="0.0.2", manifest=None):
+        pkg = folder / package
+        pkg.mkdir()
+        # Importing the package leaves a marker named by the process that did it.
+        (pkg / "__init__.py").write_text("import os\nopen(%r + '.imported.%%d' %% os.getpid(), 'w').close()\n" % str(folder / package), encoding="utf-8")
+        (pkg / "process.py").write_text(PROCESS % {"name": name, "version": version}, encoding="utf-8")
+        (pkg / "aamio-addon.json").write_text(json.dumps(manifest if manifest is not None else manifest_for(name, package)), encoding="utf-8")
+        info = folder / ("%s-%s.dist-info" % (distribution.replace("-", "_"), version))
+        info.mkdir()
+        (info / "METADATA").write_text("Metadata-Version: 2.1\nName: %s\nVersion: %s\n" % (distribution, version), encoding="utf-8")
+        (info / "entry_points.txt").write_text("[aamio.addons]\n%s = %s\n" % (name, package), encoding="utf-8")
+        return pkg / "process.ran", folder / ("%s.imported.%d" % (package, os.getpid()))
+
+    return install
+
+
+def test_contract_two_is_listed_from_its_manifest_and_runs_nothing(process_site, monkeypatch, tmp_path):
+    ran, imported = process_site()
+    code, out, _ = main(["addon", "list"], monkeypatch)
+    said = json.loads(out)
+    assert code == 0 and said["addons"] == [{"name": "demo2", "version": "0.0.2", "distribution": "demo2-pkg", "enabled": False, "contract": 2, "fix": "aamio addon enable demo2"}]
+    assert not ran.exists() and not imported.exists(), "listed from the manifest: nothing of it ran, here or in a process of its own"
+    assert len(mcp_server.tools()) == 24
+    code, _, err = main(["addon", "demo2", "ping"], monkeypatch)
+    assert code == 2 and "the add-on demo2 is installed and not enabled" in err and not ran.exists()
+
+
+def test_contract_two_enable_probes_and_the_commands_go_through_the_process(process_site, monkeypatch, tmp_path):
+    ran, imported = process_site()
+    code, out, _ = main(["addon", "enable", "demo2"], monkeypatch)
+    said = json.loads(out)
+    assert code == 0 and ran.read_text(encoding="utf-8") == "probe probe\n", "enable asked the process who it is, and nothing else of it ran"
+    row = said["addons"][0]
+    assert row["enabled"] is True and row["contract"] == 2 and row["version"] == "0.0.2"
+    assert row["commands"] == ["allow", "bytes", "check", "crash", "fail", "file", "forget", "garbage", "list", "local", "ping", "sleep"], "the manifest's commands, and the three the core gives an add-on with hosts"
+    assert row["mcp_tools"] == ["aamio_addon_demo2_ping", "aamio_addon_demo2_check", "aamio_addon_demo2_sleep"]
+    assert "a process of its own" in said["note"] and "never the home's key" in said["note"]
+    assert enabled_in(tmp_path) == {"enabled": ["demo2-pkg"]} and not imported.exists(), "recorded by distribution, and this process imported none of it"
+
+    code, out, _ = main(["addon", "demo2", "--help"], monkeypatch)
+    assert code == 0 and "ping" in out and "allow" in out and ran.read_text(encoding="utf-8") == "probe probe\n", "help comes from the manifest"
+
+    code, out, err = main(["addon", "demo2", "ping", "--word", "hi"], monkeypatch)
+    got = json.loads(out)
+    assert code == 0 and got["pong"] is True and got["arguments"] == {"word": "hi"} and got["subject"] is None and got["own_key"] is None
+    assert got["state_dir"] == os.path.join(str(tmp_path / "home"), "addons", "demo2") and os.path.isdir(got["state_dir"]), "a directory of its own under the home"
+    assert got["home_env"] is None and got["addon_env"] == "2", "the process sees no AAMIO_HOME, and knows what it is"
+    assert got["secret_env"] is None and got["path_env"] is True, "a token in the user's environment is not handed on; the path is"
+    assert ran.read_text(encoding="utf-8") == "probe probe\ncommand ping\n"
+
+    runtime = Runtime(home=str(tmp_path / "home"), host="https://fake.test", archive=False)
+    try:
+        own = runtime.keys.public
+    finally:
+        runtime.close()
+    code, out, _ = main(["addon", "demo2", "file"], monkeypatch)
+    assert code == 0 and json.loads(out)["own_key"] == own, "needs own_key gives the public key, and nothing else of the key"
+
+    code, out, err = main(["addon", "demo2", "fail"], monkeypatch)
+    assert code == 3 and json.loads(out) == {"status": "no", "fix": "x"} and "a note from the add-on" in err, "the add-on's result, code and note come back as they are"
+
+    code, out, _ = main(["addon", "demo2", "bytes"], monkeypatch)
+    assert code == 0 and out == "raw\n", "raw bytes reach standard output as they are"
+
+    code, out, _ = main(["addon", "demo2", "local", "somewhere"], monkeypatch)
+    got = json.loads(out)
+    assert code == 0 and got["state_dir"] is None and got["arguments"] == {"path": "somewhere"}, "a command that needs no home runs in the process too, with no directory"
+
+
+def test_contract_two_timeout_crash_and_garbage_leave_the_server_standing(process_site, monkeypatch, tmp_path):
+    process_site()
+    assert main(["addon", "enable", "demo2"], monkeypatch)[0] == 0
+    started = time.monotonic()
+    code, out, _ = main(["addon", "demo2", "sleep"], monkeypatch)
+    said = json.loads(out)
+    assert code == 5 and said["status"] == "unreachable" and said["reason"] == "addon_timeout" and "2 seconds" in said["fix"] and said["addon"] == "demo2"
+    assert time.monotonic() - started < 15, "stopped at the deadline, not when it felt like answering"
+    code, out, _ = main(["addon", "demo2", "crash"], monkeypatch)
+    said = json.loads(out)
+    assert code == 5 and said["reason"] == "addon_failed" and "code 3" in said["fix"]
+    code, out, _ = main(["addon", "demo2", "garbage"], monkeypatch)
+    assert code == 5 and json.loads(out)["reason"] == "addon_failed"
+    # The acceptance from the review of 8 November: a tool that hangs is stopped
+    # at its deadline, and the same server answers the next request.
+    runtime = Runtime(home=str(tmp_path / "home"), host="https://fake.test", archive=False)
+    try:
+        reply = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "aamio_addon_demo2_sleep", "arguments": {}}})
+        assert reply["result"]["isError"] is True and reply["result"]["structuredContent"]["reason"] == "addon_timeout"
+        listed = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        assert len(listed["result"]["tools"]) == 27
+        pong = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "aamio_addon_demo2_ping", "arguments": {}}})
+        assert pong["result"]["isError"] is False and pong["result"]["structuredContent"]["pong"] is True
+    finally:
+        runtime.close()
+
+
+def test_contract_two_hosts_are_the_core_s_consent(process_site, monkeypatch, tmp_path):
+    ran, _ = process_site()
+    assert main(["addon", "enable", "demo2"], monkeypatch)[0] == 0
+    code, out, _ = main(["addon", "demo2", "check", "Example.ORG", "--partner", "bob"], monkeypatch)
+    said = json.loads(out)
+    assert code == 2 and said["reason"] == "host_not_allowed" and "aamio addon demo2 allow example.org" in said["fix"] and "aamio_addon_demo2_check asks them" in said["fix"]
+    assert ran.read_text(encoding="utf-8") == "probe probe\n", "refused before the process started"
+    key = "A" * 43
+    assert main(["partner", "add", "bob", key], monkeypatch)[0] == 0
+    code, out, _ = main(["addon", "demo2", "allow", "Example.ORG"], monkeypatch)
+    said = json.loads(out)
+    assert code == 0 and said["host"] == "example.org" and said["added"] is True and said["hosts"] == ["example.org"] and "Nothing was read now" in said["note"]
+    assert json.loads((tmp_path / "home" / "addons" / "demo2.hosts.json").read_text(encoding="utf-8")) == ["example.org"], "kept beside the add-on's directory, not in it"
+    code, out, _ = main(["addon", "demo2", "check", "EXAMPLE.org", "--partner", "bob"], monkeypatch)
+    got = json.loads(out)
+    assert code == 0 and got["arguments"] == {"site": "example.org", "partner": "bob"}
+    assert got["subject"] == {"key": key, "subject_source": "partner", "partner": "bob", "signature_checked_locally": None}, "the core resolved the partner to a key; the add-on got the key and never the book"
+    code, out, _ = main(["addon", "demo2", "check", "example.org", "--partner", "nobody"], monkeypatch)
+    assert code == 2 and json.loads(out)["reason"] == "partner_unavailable"
+    code, out, _ = main(["addon", "demo2", "allow", "localhost"], monkeypatch)
+    assert code == 2 and json.loads(out)["reason"] == "invalid_host"
+    code, out, _ = main(["addon", "demo2", "forget", "example.org"], monkeypatch)
+    assert code == 0 and json.loads(out)["removed"] is True and json.loads(out)["hosts"] == []
+    assert json.loads(main(["addon", "demo2", "list"], monkeypatch)[1]) == {"hosts": []}
+
+
+def test_contract_two_reads_the_list_an_earlier_version_kept_once(process_site, monkeypatch, tmp_path):
+    process_site()
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / "old-hosts.json").write_text('["legacy.example"]', encoding="utf-8")
+    assert main(["addon", "enable", "demo2"], monkeypatch)[0] == 0
+    assert json.loads(main(["addon", "demo2", "list"], monkeypatch)[1]) == {"hosts": ["legacy.example"]}
+    assert json.loads((tmp_path / "home" / "addons" / "demo2.hosts.json").read_text(encoding="utf-8")) == ["legacy.example"]
+    (tmp_path / "home" / "old-hosts.json").write_text('["other.example"]', encoding="utf-8")
+    assert json.loads(main(["addon", "demo2", "list"], monkeypatch)[1]) == {"hosts": ["legacy.example"]}, "read once: from then on the list is the core's"
+
+
+def test_contract_two_over_mcp_asks_the_user_for_a_website(process_site, monkeypatch, tmp_path):
+    process_site()
+    assert main(["addon", "enable", "demo2"], monkeypatch)[0] == 0
+    key = "B" * 43
+    assert main(["partner", "add", "bob", key], monkeypatch)[0] == 0
+    runtime = Runtime(home=str(tmp_path / "home"), host="https://fake.test", archive=False)
+    try:
+        manifest = addons.by_name("demo2", runtime.home)
+        refused = addons.dispatch(runtime, "aamio_addon_demo2_check", {"site": "example.org", "partner": "bob"}, None)
+        assert refused["isError"] is True and refused["structuredContent"]["reason"] == "host_not_allowed" and "stop this server" in refused["structuredContent"]["fix"]
+        asked = []
+
+        def declines(question, about, tool_name, key_name):
+            asked.append((question, about, tool_name, key_name))
+            return {"action": "decline"}
+
+        declined = addons.dispatch(runtime, "aamio_addon_demo2_check", {"site": "example.org", "partner": "bob"}, declines)
+        assert declined["structuredContent"]["reason"] == "host_declined" and asked[0][2] == "aamio_addon_demo2_check" and asked[0][3] == addon_process.HOST_QUESTION
+        assert "your partner bob" in asked[0][0]["message"] and "example.org" not in asked[0][0]["message"], "the user is told who, and types the website themselves"
+        other = addons.dispatch(runtime, "aamio_addon_demo2_check", {"site": "example.org", "partner": "bob"}, lambda *a: {"action": "accept", "content": {"domain": "examp1e.org"}})
+        assert other["structuredContent"]["reason"] == "host_not_confirmed" and addon_process.allowed_hosts(runtime, manifest) == []
+        done = addons.dispatch(runtime, "aamio_addon_demo2_check", {"site": "example.org", "partner": "bob"}, lambda *a: {"action": "accept", "content": {"domain": "Example.org"}})
+        got = done["structuredContent"]
+        assert done["isError"] is False and got["arguments"] == {"site": "example.org", "partner": "bob"} and got["subject"]["key"] == key
+        assert addon_process.allowed_hosts(runtime, manifest) == ["example.org"], "the user's yes is kept"
+        both = addons.dispatch(runtime, "aamio_addon_demo2_check", {"site": "example.org", "partner": "bob", "message": "a" * 64}, None)
+        assert both["structuredContent"]["reason"] == "choose_subject"
+        extra = addons.dispatch(runtime, "aamio_addon_demo2_check", {"site": "example.org", "partner": "bob", "key": "x"}, None)
+        assert extra["isError"] is True and extra["structuredContent"]["given"] == ["key"], "a key beside the rest is refused, not passed over"
+    finally:
+        runtime.close()
+
+
+def test_a_contract_this_aamio_does_not_know_is_said_and_can_be_taken_out(process_site, monkeypatch, tmp_path):
+    ran, _ = process_site(manifest=dict(manifest_for("demo2", "demo2_pkg"), aamio_addon=3))
+    code, out, _ = main(["addon", "list"], monkeypatch)
+    row = json.loads(out)["addons"][0]
+    assert code == 0 and row["enabled"] is False and "contract 3" in row["error"] and "knows 1 and 2" in row["error"] and "contract" not in row
+    code, _, err = main(["addon", "enable", "demo2"], monkeypatch)
+    assert code == 2 and "contract 3" in err and not ran.exists() and not (tmp_path / "home" / "addons.json").exists()
+    # Enabled by an older aamio, say: the list says what is wrong, and disable works.
+    (tmp_path / "home").mkdir(exist_ok=True)
+    (tmp_path / "home" / "addons.json").write_text('{"enabled": ["demo2-pkg"]}', encoding="utf-8")
+    code, out, _ = main(["addon", "list"], monkeypatch)
+    assert code == 1 and "contract 3" in json.loads(out)["error"]
+    assert main(["addon", "disable", "demo2"], monkeypatch)[0] == 0 and enabled_in(tmp_path) == {"enabled": []} and not ran.exists()
+
+
+def test_enable_refuses_a_process_that_is_not_the_add_on_the_manifest_says(process_site, monkeypatch, tmp_path):
+    ran, _ = process_site(manifest=dict(manifest_for("demo2", "demo2_pkg"), version="9.9.9"))
+    code, _, err = main(["addon", "enable", "demo2"], monkeypatch)
+    assert code == 2 and "answered the probe as demo2 0.0.2" in err and "9.9.9" in err and not (tmp_path / "home" / "addons.json").exists()
+    assert ran.read_text(encoding="utf-8") == "probe probe\n"
+
+
+def test_a_module_that_claims_another_contract_without_a_manifest_is_refused(site, monkeypatch, tmp_path):
+    site("demo-pkg", "demo_pkg", text=DEMO % {"name": "demo", "tool": "aamio_addon_demo_ping"} + "\nCONTRACT = 2\n")
+    code, _, err = main(["addon", "enable", "demo"], monkeypatch)
+    assert code == 2 and "contract 2" in err and "aamio-addon.json" in err and not (tmp_path / "home" / "addons.json").exists()
+
+
+def test_the_example_add_on_hello_runs_as_the_page_says(tmp_path, monkeypatch):
+    """examples/hello is the example on https://aamio.at/docs/addons: a manifest and a dozen lines of process, named by AAMIO_ADDONS."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    monkeypatch.setenv("AAMIO_ADDONS", "aamio_hello")
+    monkeypatch.setenv("PYTHONPATH", os.path.join(here, "..", "examples", "hello", "src") + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    monkeypatch.setenv("AAMIO_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(addons, "_home", None)
+    monkeypatch.setattr(addons, "_cache", {})
+    monkeypatch.setattr(addon_process, "_limits", {})
+    code, out, _ = main(["addon", "list"], monkeypatch)
+    row = json.loads(out)["addons"][0]
+    assert code == 0 and row["name"] == "hello" and row["contract"] == 2 and row["commands"] == ["wave"] and row["mcp_tools"] == ["aamio_addon_hello_wave"]
+    code, out, _ = main(["addon", "hello", "wave", "--to", "Kari"], monkeypatch)
+    assert code == 0 and json.loads(out) == {"hello": "Kari"}
+    code, out, _ = main(["addon", "hello", "wave"], monkeypatch)
+    assert code == 0 and json.loads(out) == {"hello": "world"}
+    runtime = Runtime(home=str(tmp_path / "home"), host="https://fake.test", archive=False)
+    try:
+        reply = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "aamio_addon_hello_wave", "arguments": {"to": "Ola"}}})
+        assert reply["result"]["isError"] is False and reply["result"]["structuredContent"] == {"hello": "Ola"}
+    finally:
+        runtime.close()

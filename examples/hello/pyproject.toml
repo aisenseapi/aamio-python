@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# The smallest add-on on contract 2, as an example for anyone who writes one:
+# https://aamio.at/docs/addons. It is tested with the core and not published.
+name = "aamio-hello"
+version = "0.1.0"
+description = "An example add-on to aamio: one command and one tool that answer with a greeting, in a process of their own."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["aamio>=0.6.27"]
+
+[project.entry-points."aamio.addons"]
+hello = "aamio_hello"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+aamio_hello = ["aamio-addon.json"]

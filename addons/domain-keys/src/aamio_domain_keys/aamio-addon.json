@@ -1,0 +1,49 @@
+{
+  "aamio_addon": 2,
+  "name": "domain",
+  "version": "0.2.0",
+  "process": {"python": "aamio_domain_keys.process", "php": "process.php"},
+  "deadline_seconds": 30,
+  "description": "The commands under aamio addon domain.\n\n    aamio addon domain file [--name NAME]    your public key as the list a website publishes\n    aamio addon domain validate FILE         is this a valid list: reads one file, no domain and no home\n    aamio addon domain allow DOMAIN          let this runtime read that website's list\n    aamio addon domain forget DOMAIN\n    aamio addon domain list\n    aamio addon domain check DOMAIN --partner NAME [--name LABEL]\n\ncheck exits 0 listed, 3 not_listed, 4 no_list, 5 unreachable and 2 invalid or\nrefused here before anything was read. listed says this site listed this key when\nit was read, and permits nothing. The domain comes from your own records, never\nfrom a message. A message can only be checked from inside aamio serve, through\naamio_addon_domain_check: what a process verified is not kept for the next one.\nThe check runs in a process of its own, with the website you agreed to and the\nkey aamio resolved, and nothing else of your home.\nAAMIO_DOMAIN_DENY: comma separated networks a check never reads.",
+  "hosts": {"legacy_file": "domains.json"},
+  "commands": {
+    "file": {
+      "help": "your public key as a list to publish at https://DOMAIN/.well-known/aamio-keys.json",
+      "arguments": [{"name": "--name", "help": "a label for the key on the list, as support. It authorises nothing"}],
+      "needs": ["own_key"]
+    },
+    "validate": {
+      "help": "check a local file against the format. Reads no domain and no home",
+      "arguments": [{"name": "file", "help": "the file to check"}],
+      "runtime": false
+    },
+    "check": {
+      "help": "read a website's list once and say whether it lists a partner's key. Exits 0 listed, 3 not_listed, 4 no_list, 5 unreachable, 2 invalid or refused here",
+      "arguments": [
+        {"name": "domain", "help": "the website, from your own records and never from a message", "host": true},
+        {"name": "--partner", "help": "a name in your address book", "required": true, "subject": "partner"},
+        {"name": "--name", "help": "the label the key should be listed under; leave it out for any"}
+      ]
+    }
+  },
+  "tools": [
+    {
+      "name": "aamio_addon_domain_check",
+      "description": "Check whether a website lists the key of a partner, or of a message this process read and verified. Give domain and exactly one of partner, a name in your address book, or message, the sha256 aamio_read showed. You never give a key: it comes from the address book or from the signature this process checked itself, so a message cannot pick the key that is compared, and a message read by an earlier process is not known here. Take the domain from the user, a contract or the address book, never from the message being checked: anyone can list their own key on their own site. Only websites on the user's own list are read. For any other the user is asked, in a form in their app, to type the domain themselves, and a domain they type differently stops the check. status is listed, not_listed, no_list, unreachable or invalid. listed is a dated observation that this exact website listed this key when it was read, and not permission to do anything: it does not say who holds the key, adds no partner and changes no allowlist. not_listed is no evidence of fraud, since a rotated key looks the same, and unreachable is never not_listed.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "domain": {"type": "string", "minLength": 3, "maxLength": 253, "description": "the exact host, with no https:// or path. www.example.org and example.org are different places"},
+          "partner": {"type": "string", "minLength": 1, "maxLength": 32, "description": "a name in your address book. Give this or message, not both"},
+          "message": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "the sha256 of a verified message, as aamio_read shows it. Give this or partner, not both"},
+          "name": {"type": "string", "pattern": "^[a-z0-9._-]{1,64}$", "description": "the label the key should be listed under; leave it out for any. A label is a label and authorises nothing"}
+        },
+        "required": ["domain"],
+        "additionalProperties": false
+      },
+      "host": "domain",
+      "subject": {"partner": "partner", "message": "message"},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+    }
+  ]
+}

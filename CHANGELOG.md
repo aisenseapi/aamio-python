@@ -4,6 +4,27 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.27 - 2026-11-08
+
+- Add-ons have a contract number. Contract 1 is what 0.6.25 brought: a module
+  loaded into aamio's process with the runtime in its hands. Contract 2 is new:
+  the package carries `aamio-addon.json`, which the core reads without running
+  the add-on, and the core runs the add-on in a process of its own for each
+  call, with the call's arguments, a key it resolved from the address book or
+  from a signature it checked, a directory of its own under the home, a short
+  list of environment variables and a deadline, and never the home's key. A
+  process that hangs is stopped at the deadline and the server goes on; one
+  that crashes or answers something else is an `unreachable` answer with the
+  reason. The websites an add-on may read are the core's list from now on,
+  `aamio addon NAME allow`, `forget` and `list`, asked for in a form over MCP
+  as before, and a list an earlier version kept in the home is read once.
+  `aamio addon list` says each add-on's contract, and an add-on written for a
+  contract this aamio does not know is said and can be taken out. `run` is a
+  reserved name.
+- aamio-domain-keys 0.2.0 is on contract 2: the same commands and the same
+  tool, with the check in a process of its own, and its `domains.json` becomes
+  the core's list at the first command. It requires this version.
+
 ## 0.6.26 - 2026-11-08
 
 - `--home` and `--host` with an empty value, as `--home=` or `--home ""`, are

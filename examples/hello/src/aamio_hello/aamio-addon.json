@@ -1,0 +1,19 @@
+{
+  "aamio_addon": 2,
+  "name": "hello",
+  "version": "0.1.0",
+  "process": {"python": "aamio_hello.process", "php": "process.php"},
+  "deadline_seconds": 10,
+  "description": "An example add-on: aamio addon hello wave [--to NAME] answers with a greeting.",
+  "commands": {
+    "wave": {"help": "answer with a greeting", "arguments": [{"name": "--to", "help": "whom to greet; the world when left out"}]}
+  },
+  "tools": [
+    {
+      "name": "aamio_addon_hello_wave",
+      "description": "Answer with a greeting. An example tool: it reads nothing and changes nothing.",
+      "inputSchema": {"type": "object", "properties": {"to": {"type": "string", "maxLength": 64, "description": "whom to greet"}}, "additionalProperties": false},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    }
+  ]
+}

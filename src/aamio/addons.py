@@ -42,10 +42,12 @@ from importlib import metadata
 from . import storage
 from .runtime import home_dir
 
+from . import addon_process
+from .addon_process import AddonError, Manifest, RESERVED, probe, read_manifest
+
 GROUP = "aamio.addons"
 ENABLED_FILE = "addons.json"
 HOOKS = ("NAME", "__version__", "add_commands", "early", "command", "TOOLS", "dispatch")
-RESERVED = ("list", "enable", "disable")
 # How long a change waits for another aamio that is changing the same list.
 LOCK_WAIT = 10.0
 RESTART = "A local MCP server already running keeps the tools it started with: start it again to see the change."
@@ -54,10 +56,6 @@ RESTART = "A local MCP server already running keeps the tools it started with: s
 # in one process each see their own home's choice.
 _cache = {}
 _home = None
-
-
-class AddonError(RuntimeError):
-    """An add-on that cannot be used as one, with what to do about it."""
 
 
 def use_home(home):
@@ -211,27 +209,46 @@ def _well_formed(module, fix):
         raise AddonError("%s cannot be used as an add-on: a tool of its has no name. Reinstall it, or %s to go on without it." % (module.__name__, fix))
 
 
+def _bring(point, module_name, distribution, fix):
+    """The add-on as the registry holds it: its manifest, read without running it, on contract 2; the imported module with its hooks on contract 1.
+
+    A module that says CONTRACT is something else and carries no manifest is
+    refused: the contracts this aamio knows are 1, in this process, and 2, in a
+    process of the add-on's own, and 2 is declared in the manifest.
+    """
+    manifest = read_manifest(module_name, distribution, fix)
+    if manifest is not None:
+        return manifest
+    module = _import(point, distribution or module_name, fix)
+    _hooks(module, fix)
+    number = getattr(module, "CONTRACT", 1)
+    if number != 1:
+        raise AddonError("the add-on %s says it is written for contract %s of aamio's add-ons and carries no %s, which contract 2 and later have. This aamio knows 1 and 2. Reinstall it, or %s to go on without it." % (module.__name__, number, addon_process.MANIFEST_FILE, fix))
+    return module
+
+
 def _load(env, wanted):
-    """The modules of the enabled add-ons and of what AAMIO_ADDONS names, each checked; nothing cached."""
+    """The add-ons this installation runs: the enabled ones and what AAMIO_ADDONS names, each checked; nothing cached."""
     found = []
+    seen = set()
     for row in installed():
         if not _is_enabled(row, wanted):
             continue
         fix = "aamio addon disable %s" % row["distribution"]
-        module = _import(row["point"], row["distribution"], fix)
-        if module in found:
+        module_name = row["module"].split(":")[0]
+        if module_name in seen:
             continue
-        _hooks(module, fix)
+        seen.add(module_name)
+        module = _bring(row["point"], module_name, row["distribution"], fix)
         if module.NAME != row["name"]:
             raise AddonError("the add-on %s is called %s in its metadata and %s in its module. Reinstall it, or %s to go on without it." % (row["distribution"], row["name"], module.NAME, fix))
         _well_formed(module, fix)
         found.append(module)
     for name in env.split(","):
-        if name.strip():
-            module = _import(None, name.strip(), "uninstall it")
-            if module in found:
-                continue
-            _hooks(module, "uninstall it")
+        name = name.strip()
+        if name and name not in seen:
+            seen.add(name)
+            module = _bring(None, name, None, "uninstall it")
             _well_formed(module, "uninstall it")
             found.append(module)
     names = {}
@@ -271,11 +288,22 @@ def enable(which, given=None):
     distribution = pick(which, given)
     with _Lock(given):
         names = enabled(given)
+        contract = 1
         if not any(_normal(name) == _normal(distribution) for name in names):
-            _load(os.environ.get("AAMIO_ADDONS") or "", names + [distribution])
+            for module in _load(os.environ.get("AAMIO_ADDONS") or "", names + [distribution]):
+                if isinstance(module, Manifest) and module.distribution is not None and _normal(module.distribution) == _normal(distribution):
+                    # Before anything is recorded: the process starts, speaks
+                    # the protocol and is the add-on the manifest says.
+                    probe(module)
+                    contract = 2
             _write_enabled(given, names + [distribution])
+        else:
+            contract = next((row.get("contract", 1) for row in describe(given)["addons"] if row.get("distribution") is not None and _normal(row["distribution"]) == _normal(distribution)), 1)
     answer = describe(given)
-    answer["note"] = "%s runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can. %s" % (distribution, RESTART)
+    if contract == 2:
+        answer["note"] = "%s runs here from now on, in a process of its own for each call, with the call's arguments, a key aamio resolves for it and a directory of its own, and never the home's key. %s" % (distribution, RESTART)
+    else:
+        answer["note"] = "%s runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can. %s" % (distribution, RESTART)
     return answer
 
 
@@ -312,7 +340,7 @@ def commands_of(module):
 
 
 def _running(module):
-    return {"version": module.__version__, "module": module.__name__, "commands": commands_of(module), "mcp_tools": [tool["name"] for tool in module.TOOLS]}
+    return {"version": module.__version__, "contract": getattr(module, "CONTRACT", 1), "module": module.__name__, "commands": commands_of(module), "mcp_tools": [tool["name"] for tool in module.TOOLS]}
 
 
 def describe(given=None):
@@ -332,6 +360,12 @@ def describe(given=None):
     seen = set()
     for row in installed():
         entry = {"name": row["name"], "version": row["version"], "distribution": row["distribution"], "enabled": _is_enabled(row, wanted)}
+        # Which contract, from the manifest or its absence, running nothing; a
+        # manifest for a contract this aamio does not know is this row's error.
+        try:
+            entry["contract"] = 2 if read_manifest(row["module"].split(":")[0], row["distribution"], "aamio addon disable %s" % row["distribution"]) is not None else 1
+        except AddonError as failure:
+            entry["error"] = str(failure)
         module = running.get(row["name"])
         if not entry["enabled"] and module is not None and module.__name__ == row["module"].split(":")[0]:
             # Installed, and running because AAMIO_ADDONS names the same module:

@@ -9,6 +9,6 @@ aamio addon domain allow example.org                  # put a website on this ru
 aamio addon domain check example.org --partner NAME   # read the list once and compare
 ```
 
-The whole of it, with every command and what a result means, is in the [aamio README](https://github.com/aisenseapi/aamio-python#checking-a-key-against-a-website), and the format and a generator for the file are at [aamio.at/docs/domain-keys](https://aamio.at/docs/domain-keys). It is tested with the core, in the same repository.
+The whole of it, with every command and what a result means, is in the [aamio README](https://github.com/aisenseapi/aamio-python#checking-a-key-against-a-website), and the format and a generator for the file are at [aamio.at/docs/domain-keys](https://aamio.at/docs/domain-keys). It is tested with the core, in the same repository. From 0.2.0 the check runs in a process of its own, started by aamio for each call with the website you agreed to and the key aamio resolved from your address book or from a signature it checked, and nothing else of your home; `allow`, `forget` and `list` are aamio's, kept for this add-on.
 
 `listed` says that this exact website listed this key when it was read. It is not an identity and it permits nothing. Take the domain from your own records and never from the message being checked: anyone can list their own key on their own site.

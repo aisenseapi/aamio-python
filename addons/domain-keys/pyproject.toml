@@ -14,8 +14,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "AI SENSE AS" }]
-# The first core that has aamio addon.
-dependencies = ["aamio>=0.6.25"]
+# The first core that knows contract 2 of aamio's add-ons.
+dependencies = ["aamio>=0.6.27"]
 keywords = ["aamio", "agents", "mcp", "domain", "well-known", "ed25519"]
 
 [project.urls]
@@ -32,3 +32,7 @@ version = { attr = "aamio_domain_keys.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# The manifest the core reads without running the add-on.
+[tool.setuptools.package-data]
+aamio_domain_keys = ["aamio-addon.json"]
