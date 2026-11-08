@@ -4,6 +4,15 @@ aamio-sound, the add-on. Dates are the day the version was committed; it is
 tagged on release, and the two are the same day. Every entry says what changed
 for somebody using it.
 
+## 0.2.0 - 2026-11-08
+
+- Two engines. `--engine local` (engine over MCP) makes and reads the sound on
+  this machine, with a port of aisense's own implementation of aisense-audio-v2: the same sound byte for byte, read the same way, and
+  neither the card nor the recording leaves the machine. aisense stays the
+  default. When aisenseapi.com cannot be reached, the work is done here instead,
+  and the answer says so with engine local and a fallback. Every answer says
+  which engine did the work.
+
 ## 0.1.1 - 2026-11-08
 
 - A card says until when it is good, t= in Unix seconds: an hour after it is

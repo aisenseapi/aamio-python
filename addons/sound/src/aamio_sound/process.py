@@ -14,8 +14,15 @@ data, untrusted, for the core's own scope add and board post.
 An answer is {"result": …, "exit_code": n, "is_error": bool}. The sound itself
 never goes into an answer: the longest card is a WAV of a megabyte, over what an
 answer may be, and a recording is deleted as soon as it has been read.
+
+The engine makes and reads the sound: aisense, the default, at aisenseapi.com,
+or local, on this machine with codec.py, which makes the same sound byte for
+byte and sends nothing. When aisenseapi.com cannot be reached, the local engine
+does the work instead and the answer says so. A recording in which aisense hears
+nothing is not read again here: it would hear nothing either.
 """
 
+import base64
 import io
 import json
 import os
@@ -25,7 +32,7 @@ import tempfile
 import time
 import wave
 
-from . import NAME, __version__, audio, card, service
+from . import NAME, __version__, audio, card, codec, service
 
 CONTRACT = 2
 TOOL = "aamio_addon_sound_"
@@ -41,6 +48,7 @@ VALID_FOR_MIN = 60
 VALID_FOR_MAX = 86400
 # The clocks of two machines in a room may differ: a card is turned down this long after its time.
 SKEW = 120
+ENGINES = ("aisense", "local")
 
 HEARD = ("Heard from the air: anyone within earshot, or a speaker playing a recording, can put a card there. "
          "The address lets you post into a scope, and whoever holds the scope's key reads the post, so keep anything private out of it.")
@@ -97,6 +105,49 @@ def _by(kind, line, tool):
     return tool if kind == "tool" else line
 
 
+def _engine(value):
+    if value is None or value == "":
+        return "aisense"
+    if value in ENGINES:
+        return value
+    raise card.Refused("invalid_engine", "engine is aisense, the default, which sends the card or the recording to aisenseapi.com, or local, which makes and reads the sound on this machine and sends nothing.")
+
+
+def _fallback(said, error, done):
+    """What an answer says when aisenseapi.com could not be reached and the work was done here."""
+    if error is not None:
+        said["fallback"] = {"from": "aisense", "reason": error.reason}
+        said["engine_note"] = "aisenseapi.com could not be reached (%s), so the sound was %s on this machine instead, as aisense would have, and nothing went to it." % (error.reason, done)
+    return said
+
+
+def _make_sound(text, mode, engine, encode):
+    """The WAV for a card, from the engine asked for, or here when aisense cannot be reached."""
+    if engine == "local":
+        return codec.encode(text.encode("utf-8"), mode), "local", None
+    try:
+        return encode(text, mode), "aisense", None
+    except service.Unreachable as error:
+        return codec.encode(text.encode("utf-8"), mode), "local", error
+
+
+def _local_decode(sound, mode):
+    """What codec.py hears in a WAV, in the shape aisense answers in."""
+    try:
+        got = codec.decode(sound, mode)
+    except codec.BadRecording as error:
+        raise service.Refused("not_readable", "This file is not one the sound codec reads: %s" % error) from None
+    if got is None:
+        raise service.NothingHeard("No complete message was heard. Start listening before the sound plays, record the whole of it close to the speaker in a quiet room, and try audible mode if the high ranges are lost.")
+    data = got["data"]
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        text = None
+    return {"data_base64": base64.b64encode(data).decode("ascii"), "byte_length": len(data), "text": text, "protocol": got["protocol"],
+            "corrected_bits": got["corrected_bits"], "mode": got["mode"], "sample_rate": got["sample_rate"], "duration_seconds": got["duration_seconds"]}
+
+
 def _when(seconds):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
 
@@ -127,6 +178,7 @@ def broadcast(arguments, kind, encode, play, pause, now):
         text = card.make(arguments.get("address"), arguments.get("name"), expires)
         mode = _mode(arguments.get("mode"), service.MODES, "audible")
         repeat = _whole(arguments.get("repeat"), 1, REPEAT_MAX, 1, "repeat")
+        engine = _engine(arguments.get("engine"))
         out = arguments.get("out")
         if out is not None and out != "":
             if not isinstance(out, str):
@@ -141,12 +193,10 @@ def broadcast(arguments, kind, encode, play, pause, now):
     except card.Refused as error:
         return refused(error.reason, error.fix)
     try:
-        sound = encode(text, mode)
-    except service.Unreachable as error:
-        return unreachable(error.reason, error.fix, error.retry_after)
+        sound, used, error = _make_sound(text, mode, engine, encode)
     except service.Refused as error:
         return refused(error.reason, error.fix)
-    said = {"card": text, "mode": mode, "duration_seconds": _seconds_of(sound), "expires_at": expires}
+    said = _fallback({"card": text, "mode": mode, "duration_seconds": _seconds_of(sound), "expires_at": expires, "engine": used}, error, "made")
     if out is not None:
         try:
             with open(out, "xb") as handle:
@@ -174,15 +224,27 @@ def broadcast(arguments, kind, encode, play, pause, now):
                 note="Played on this machine's speaker. Agents within earshot that were listening can now post into the scope: read their posts with %s, and answer one with %s. %s" % (read_posts, _by(kind, "aamio board answer POST TEXT --scope NAME", "aamio_board_answer"), good))
 
 
-def _heard(sound, mode, kind, decode, now):
+def _heard(sound, mode, kind, decode, now, engine):
+    """What a recording carries, read by the engine asked for, or here when aisense cannot be reached."""
+    used = engine
+    reserve = None
     try:
-        said = decode(sound, mode)
-    except service.NothingHeard as error:
-        return {"status": "nothing_heard", "reason": "nothing_heard", "fix": error.fix}
+        if used == "local":
+            said = _local_decode(sound, mode)
+        else:
+            try:
+                said = decode(sound, mode)
+            except service.Unreachable as error:
+                reserve, used = error, "local"
+                said = _local_decode(sound, mode)
+    except service.NothingHeard as heard:
+        return _fallback({"status": "nothing_heard", "reason": "nothing_heard", "fix": heard.fix, "engine": used}, reserve, "read")
     except service.Refused as error:
-        return refused(error.reason, error.fix)
-    except service.Unreachable as error:
-        return unreachable(error.reason, error.fix, error.retry_after)
+        return _fallback(refused(error.reason, error.fix, engine=used), reserve, "read")
+    return _fallback(dict(_card_heard(said, kind, now), engine=used), reserve, "read")
+
+
+def _card_heard(said, kind, now):
     text = said.get("text") if isinstance(said.get("text"), str) else None
     try:
         found = card.read(text)
@@ -205,6 +267,7 @@ def listen(arguments, kind, decode, record, now):
     try:
         seconds = _whole(arguments.get("seconds"), SECONDS_MIN, SECONDS_MAX, SECONDS_DEFAULT, "seconds")
         mode = _mode(arguments.get("mode"), service.DECODE_MODES, "auto")
+        engine = _engine(arguments.get("engine"))
     except card.Refused as error:
         return refused(error.reason, error.fix)
     with tempfile.TemporaryDirectory(prefix="aamio-sound-", ignore_cleanup_errors=True) as folder:
@@ -220,7 +283,7 @@ def listen(arguments, kind, decode, record, now):
             return unreachable("recorder_failed", "The recorder said it was done, and left no recording. Check the microphone, or record the sound another way and read the file with decode.")
         # Gone from the disk before it goes anywhere.
         os.remove(path)
-    result = _heard(sound, mode, kind, decode, now)
+    result = _heard(sound, mode, kind, decode, now, engine)
     result["recorded_seconds"] = seconds
     result["recorder"] = recorder
     return result
@@ -229,6 +292,7 @@ def listen(arguments, kind, decode, record, now):
 def decode_file(arguments, kind, decode, now):
     try:
         mode = _mode(arguments.get("mode"), service.DECODE_MODES, "auto")
+        engine = _engine(arguments.get("engine"))
     except card.Refused as error:
         return refused(error.reason, error.fix)
     name = arguments.get("file")
@@ -244,7 +308,7 @@ def decode_file(arguments, kind, decode, now):
         return refused("too_big", "%s is over 8 MiB, more than aisenseapi.com reads. Record at most 40 seconds of mono 16-bit PCM." % name)
     if not service.is_wav(sound):
         return refused("not_a_wav", "%s is not a WAV file. Record or convert it to uncompressed 16-bit PCM WAV at 44.1 or 48 kHz: MP3, AAC and WebM are not read." % name)
-    return _heard(sound, mode, kind, decode, now)
+    return _heard(sound, mode, kind, decode, now, engine)
 
 
 def handle(request, encode=None, decode=None, play=None, record=None, pause=None, clock=None):

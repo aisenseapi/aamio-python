@@ -8,8 +8,9 @@ audio_decode endpoints, so the card and the recording go there over HTTPS.
 
 card.py is the card, and the one rule that carries the safety: only a write
 address of exactly 20 characters ever goes into the air, never a key.
-service.py is the two calls to aisenseapi.com, audio.py playing and recording
-on this machine, and process.py the process the core runs for each call.
+service.py is the two calls to aisenseapi.com, codec.py the same sound made and
+read on this machine instead, audio.py playing and recording, and process.py
+the process the core runs for each call.
 
 It is a distribution of its own, aamio-sound, on contract 2 of aamio's add-ons:
 aamio-addon.json beside this file says what it offers, and the core runs
@@ -18,7 +19,7 @@ home: no key, no address book and no scope key. Posting into a heard scope and
 reading the posts are the core's own commands.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 # The short name: the command is aamio addon sound, the tools aamio_addon_sound_*.
 NAME = "sound"
