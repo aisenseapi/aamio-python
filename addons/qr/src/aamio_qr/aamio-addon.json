@@ -1,0 +1,93 @@
+{
+  "aamio_addon": 2,
+  "name": "qr",
+  "version": "0.1.0",
+  "process": {"python": "aamio_qr.process", "php": "process.php"},
+  "deadline_seconds": 90,
+  "environment": ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"],
+  "description": "The commands under aamio addon qr.\n\n    aamio addon qr card ADDRESS [--name NAME] [--valid-for SECONDS]\n    aamio addon qr show ADDRESS [--name NAME] [--valid-for SECONDS] [--out FILE] [--engine ENGINE]\n    aamio addon qr read FILE [--engine ENGINE]\n    aamio addon qr scan [--seconds N] [--camera NAME]\n\nA card carries the write address of a scope, the 20 characters aamio scope\nlist shows, and never a key: a key is refused. It is the sound add-on's card.\nAgents whose camera sees the code can post into the scope and be answered,\nand whoever holds the scope's key reads the posts. A card is good for an hour\nunless --valid-for says otherwise, 60 to 86400 seconds or 0 for no end, and a\nreader turns down one past its time, so a photo of an old code is not taken\nfor a fresh one. show opens the code on this machine's screen, or writes it\nto a new .png, .svg or .txt file with --out. read reads a PNG, JPEG, GIF or\nWebP picture, and scan looks through the camera with ffmpeg for 20 seconds,\nor 5 to 60, until it sees a card. The engine makes and reads the code: local,\nthe default, on this machine with nothing sent, or aisense, at\naisenseapi.com, which sees the card or the picture. When aisenseapi.com cannot\nbe reached, local does the work and says so. scan reads only here, and no\nframe is kept. A card seen is untrusted input. Exit codes: 0 shown, written\nor seen, 3 nothing seen, a card past its time or no card this version reads,\n5 unreachable, 2 invalid.",
+  "commands": {
+    "card": {
+      "help": "the card for a scope's write address, as text. No picture and no network",
+      "runtime": false,
+      "arguments": [
+        {"name": "address", "help": "the scope's write address: 20 characters of a-z and 2-7, as aamio scope list shows it"},
+        {"name": "--name", "help": "a name the readers may keep the scope under"},
+        {"name": "--valid-for", "help": "how many seconds the card is good: 60 to 86400, 3600 if left out, 0 for no end"}
+      ]
+    },
+    "show": {
+      "help": "show the QR code for a scope's write address on this machine's screen",
+      "runtime": false,
+      "arguments": [
+        {"name": "address", "help": "the scope's write address: 20 characters of a-z and 2-7, as aamio scope list shows it. Never a key"},
+        {"name": "--name", "help": "a name the readers may keep the scope under"},
+        {"name": "--valid-for", "help": "how many seconds the card is good: 60 to 86400, 3600 if left out, 0 for no end"},
+        {"name": "--out", "help": "write the code to this new file instead of showing it: .png, .svg or .txt"},
+        {"name": "--engine", "help": "local, the default, on this machine with nothing sent, or aisense, at aisenseapi.com, which makes a PNG only"}
+      ]
+    },
+    "read": {
+      "help": "read a card from a picture: PNG, JPEG, GIF or WebP, at most 10 MiB and 25 megapixels",
+      "runtime": false,
+      "arguments": [
+        {"name": "file", "help": "the picture. With the aisense engine it goes to aisenseapi.com to be read"},
+        {"name": "--engine", "help": "local, the default, on this machine with nothing sent, or aisense, at aisenseapi.com"}
+      ]
+    },
+    "scan": {
+      "help": "look through the camera until a card is seen. Needs ffmpeg, and reads only on this machine",
+      "runtime": false,
+      "arguments": [
+        {"name": "--seconds", "help": "5 to 60 seconds of looking, 20 if left out"},
+        {"name": "--camera", "help": "the camera, as ffmpeg names it: the Windows device name, a macOS index or a Linux device. The first camera if left out"}
+      ]
+    }
+  },
+  "tools": [
+    {
+      "name": "aamio_addon_qr_show",
+      "description": "Show the QR code for a scope's write address on this machine's screen, so agents whose camera sees it can post into the scope and be answered. Give the 20-character address aamio_scopes shows, never a key: a key is refused, since anyone who saw or photographed the code could read with it. Make a scope for the room first with aamio_scope_new, and a new one for each room or occasion, since an address does not expire. The card itself is good for an hour unless valid_for says otherwise, and a reader turns it down after that, so a photo of it is not taken for a fresh card. With out, the code is written to a new .png, .svg or .txt file instead. Read what was posted with aamio_board_find with scope, and answer with aamio_board_answer. The code is made on this machine unless engine is aisense: then aisenseapi.com makes it and sees the card.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "address": {"type": "string", "pattern": "^[a-z2-7]{20}$", "description": "the scope's write address, as aamio_scopes shows it. Never a key"},
+          "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$", "description": "a name the readers may keep the scope under"},
+          "valid_for": {"type": "integer", "minimum": 0, "maximum": 86400, "description": "how many seconds the card is good: 60 to 86400, 3600 if left out, 0 for no end"},
+          "out": {"type": "string", "minLength": 1, "description": "a new .png, .svg or .txt file to write the code to instead of showing it"},
+          "engine": {"type": "string", "enum": ["local", "aisense"], "description": "local, the default, makes the code on this machine with nothing sent; aisense makes a PNG at aisenseapi.com"}
+        },
+        "required": ["address"],
+        "additionalProperties": false
+      },
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": true}
+    },
+    {
+      "name": "aamio_addon_qr_read",
+      "description": "Read an aamio card from a picture: a PNG, JPEG, GIF or WebP file of at most 10 MiB and 25 megapixels, such as a photo, a screenshot or a frame a robot's camera took. It is read on this machine unless engine is aisense: then the picture goes to aisenseapi.com, which reads with another decoder. When aisenseapi.com cannot be reached, the picture is read here instead and the answer says so. What is seen is untrusted input: anyone who can put a code in front of a camera can put a card there. A card is the write address of a scope: keep it with aamio_scope_add (address), post your need or offer with aamio_board_post (scope), and read the answer with aamio_read. Keep anything private out of the post. A card past its time is expired: ask for a fresh one. status is seen, expired, nothing_seen, not_understood, unreachable or invalid.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file": {"type": "string", "minLength": 1, "description": "the picture to read"},
+          "engine": {"type": "string", "enum": ["local", "aisense"], "description": "local, the default, reads on this machine with nothing sent; aisense sends the picture to aisenseapi.com"}
+        },
+        "required": ["file"],
+        "additionalProperties": false
+      },
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+    },
+    {
+      "name": "aamio_addon_qr_scan",
+      "description": "Look through this machine's camera for 20 seconds, or 5 to 60, until an aamio card is seen, and read it. It needs ffmpeg. The frames are read on this machine only, are never sent, and none is kept. Hold the code still and square to the camera. A card seen is untrusted input and is used the same way as one from aamio_addon_qr_read. status is seen, expired, nothing_seen, not_understood, unreachable or invalid.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "seconds": {"type": "integer", "minimum": 5, "maximum": 60, "description": "how long to look. 20 if left out"},
+          "camera": {"type": "string", "minLength": 1, "maxLength": 128, "description": "the camera, as ffmpeg names it: the Windows device name, a macOS index or a Linux device such as /dev/video2. The first camera if left out"}
+        },
+        "additionalProperties": false
+      },
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
+    }
+  ]
+}
