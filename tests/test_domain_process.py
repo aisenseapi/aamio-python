@@ -436,3 +436,14 @@ def test_before_2026_07_28_the_question_goes_out_on_the_wire_while_the_call_wait
         assert reply["result"]["structuredContent"]["status"] == "unreachable" and addon_process.allowed_hosts(a, addons.by_name("domain", home)) == [host]
     finally:
         a.close()
+
+
+def test_the_operator_s_keep_out_reaches_the_process(real_addon, tmp_path, capsys, monkeypatch):
+    """AAMIO_DOMAIN_DENY is the one variable the manifest declares, so it crosses into the process; one that does not parse stops the check before any lookup."""
+    home = home_with_partner(tmp_path)
+    assert command(capsys, home, "addon", "domain", "allow", DOMAIN)[0] == 0
+    monkeypatch.setenv("AAMIO_DOMAIN_DENY", "not a network")
+    code, out, _ = command(capsys, home, "addon", "domain", "check", DOMAIN, "--partner", "bob")
+    said = json.loads(out)
+    assert code == 2 and said["reason"] == "domain_deny_invalid" and "AAMIO_DOMAIN_DENY" in said["fix"]
+    assert json.loads(command(capsys, home, "addon", "list")[1])["addons"][0]["environment"] == ["AAMIO_DOMAIN_DENY"]

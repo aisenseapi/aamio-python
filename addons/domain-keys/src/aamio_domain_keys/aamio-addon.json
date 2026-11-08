@@ -4,6 +4,7 @@
   "version": "0.2.0",
   "process": {"python": "aamio_domain_keys.process", "php": "process.php"},
   "deadline_seconds": 30,
+  "environment": ["AAMIO_DOMAIN_DENY"],
   "description": "The commands under aamio addon domain.\n\n    aamio addon domain file [--name NAME]    your public key as the list a website publishes\n    aamio addon domain validate FILE         is this a valid list: reads one file, no domain and no home\n    aamio addon domain allow DOMAIN          let this runtime read that website's list\n    aamio addon domain forget DOMAIN\n    aamio addon domain list\n    aamio addon domain check DOMAIN --partner NAME [--name LABEL]\n\ncheck exits 0 listed, 3 not_listed, 4 no_list, 5 unreachable and 2 invalid or\nrefused here before anything was read. listed says this site listed this key when\nit was read, and permits nothing. The domain comes from your own records, never\nfrom a message. A message can only be checked from inside aamio serve, through\naamio_addon_domain_check: what a process verified is not kept for the next one.\nThe check runs in a process of its own, with the website you agreed to and the\nkey aamio resolved, and nothing else of your home.\nAAMIO_DOMAIN_DENY: comma separated networks a check never reads.",
   "hosts": {"legacy_file": "domains.json"},
   "commands": {

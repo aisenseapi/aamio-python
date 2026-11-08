@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -51,8 +52,14 @@ HOST_COMMANDS = ("allow", "forget", "list")
 RESERVED = ("list", "enable", "disable", "run")
 # The question a tool asks, under this name in inputRequests, for a website that is not on the user's list.
 HOST_QUESTION = "aamio_addon_host"
-# The most an answer may be: a process that streams is stopped, not read.
+# The most an answer may be, and the most standard error may carry: a process
+# that streams past either is stopped while it runs, not read to the end.
 MAX_ANSWER_BYTES = 1_000_000
+MAX_STDERR_BYTES = 65_536
+# How long a stopped process gets to go away before it is given up on.
+STOP_WAIT = 5.0
+# Names an add-on may not ask for in its environment list.
+NEVER_PASSED = ("AAMIO_HOME", "AAMIO_ADDONS", "AAMIO_ADDON")
 # What the process gets of the environment: what the interpreter, the path, a
 # temporary directory, the locale, TLS roots and a proxy need, and nothing else.
 # A token in the user's environment is not the add-on's to read.
@@ -70,6 +77,7 @@ _COMMAND = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _POSITIONAL = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 _OPTION = re.compile(r"--[a-z][a-z0-9-]{0,31}")
 _MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*")
+_VARIABLE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 _LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _NUMERIC = re.compile(r"[0-9]+")
 _KEY = re.compile(r"[A-Za-z0-9_-]{43}")
@@ -98,21 +106,44 @@ def refusal(refused, **known):
 
 # ------------------------------------------------------------------ manifest
 
-def read_manifest(module, distribution, fix):
-    """The add-on's manifest, read without importing it, or None for a package that has none and so is on contract 1.
+def manifest_path(module, dist=None):
+    """Where the add-on's manifest would be, found without importing anything, or None.
 
-    importlib.util.find_spec locates a top-level package without running it.
-    A single-file module cannot carry a manifest, and reads as contract 1.
+    The manifest sits in the top-level package the entry point names. An
+    installed distribution lists its files, and the manifest is looked for
+    there; a checkout named in AAMIO_ADDONS has no distribution, and
+    importlib.util.find_spec on the top-level name locates the package without
+    running it. A dotted module name is never given to find_spec: that would
+    import the parent package. A single-file module cannot carry a manifest.
     """
-    name = module.split(":")[0]
+    top = module.split(":")[0].split(".")[0]
+    files = None
+    if dist is not None:
+        try:
+            files = dist.files
+        except Exception:
+            files = None
+    if files is not None:
+        for entry in files:
+            parts = entry.parts
+            if len(parts) == 2 and parts[0] == top and parts[1] == MANIFEST_FILE:
+                return str(entry.locate())
+        return None
     try:
-        spec = importlib.util.find_spec(name)
+        spec = importlib.util.find_spec(top)
     except (ImportError, ValueError):
         return None
     if spec is None or not spec.submodule_search_locations:
         return None
     path = os.path.join(list(spec.submodule_search_locations)[0], MANIFEST_FILE)
-    if not os.path.exists(path):
+    return path if os.path.exists(path) else None
+
+
+def read_manifest(module, distribution, fix, dist=None):
+    """The add-on's manifest, read without importing it, or None for a package that has none and so is on contract 1."""
+    name = module.split(":")[0]
+    path = manifest_path(module, dist)
+    if path is None:
         return None
     try:
         with open(path, encoding="utf-8") as handle:
@@ -142,6 +173,7 @@ class Manifest:
         self.process_module = process.get("python") if isinstance(process, dict) else None
         self.deadline = data.get("deadline_seconds", DEADLINE_DEFAULT)
         self.description = data.get("description")
+        self.environment = data.get("environment") or []
         self.hosts = data.get("hosts")
         self.commands = data.get("commands") or {}
         self.tools_spec = data.get("tools") or []
@@ -164,6 +196,10 @@ class Manifest:
             self._wrong("deadline_seconds in its manifest is not a whole number from 1 to %d" % DEADLINE_MAX)
         if self.description is not None and not isinstance(self.description, str):
             self._wrong("description in its manifest is not text")
+        if not isinstance(self.environment, list) or any(not isinstance(name, str) or _VARIABLE.fullmatch(name) is None for name in self.environment):
+            self._wrong("environment in its manifest is not a list of variable names in A-Z, 0-9 and underscore")
+        if any(name in NEVER_PASSED for name in self.environment):
+            self._wrong("environment in its manifest asks for %s, which no add-on gets" % ", ".join(name for name in self.environment if name in NEVER_PASSED))
         if self.hosts is True:
             self.hosts = {}
         if self.hosts is not None and self.hosts is not False:
@@ -505,30 +541,54 @@ def run(manifest, kind, name, arguments, subject=None, own_key=None, state_dir=N
         "deadline_seconds": deadline,
         "aamio": {"version": CORE_VERSION, "runtime": "python"},
     }
-    env = {key: value for key, value in os.environ.items() if key.upper() in ENVIRONMENT}
+    # What the process gets of the environment: the short list, and what its
+    # manifest declared it reads, when set. Never the home or the user's rest.
+    env = {key: value for key, value in os.environ.items() if key.upper() in ENVIRONMENT or key in manifest.environment}
     env["AAMIO_ADDON"] = "2"
-    try:
-        child = subprocess.Popen([sys.executable, "-m", manifest.process_module], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-    except OSError as error:
-        return _failure(manifest, "addon_failed", "the process of the add-on %s could not be started: %s. Reinstall it, or aamio addon disable %s to go on without it." % (manifest.NAME, error, manifest.NAME))
-    try:
-        out, err = child.communicate(json.dumps(request).encode("utf-8"), timeout=deadline)
-    except subprocess.TimeoutExpired:
-        child.kill()
-        child.communicate()
-        return _failure(manifest, "addon_timeout", "the add-on %s did not answer within %d seconds and was stopped. Nothing else here was affected. Try again, or run the command by hand to see what it does." % (manifest.NAME, deadline))
-    text = err.decode("utf-8", "replace")
+    stop = "Reinstall it, or aamio addon disable %s to go on without it." % manifest.NAME
+    # The request, the answer and standard error go through files in a directory
+    # of this call's own, private from the start: a pipe would block a request
+    # the process does not read, and the files' sizes are watched while it runs.
+    with tempfile.TemporaryDirectory(prefix="aamio-addon-", ignore_cleanup_errors=True) as folder:
+        paths = {kind_: os.path.join(folder, kind_) for kind_ in ("in", "out", "err")}
+        with open(paths["in"], "wb") as handle:
+            handle.write(json.dumps(request).encode("utf-8"))
+        with open(paths["in"], "rb") as stdin, open(paths["out"], "wb") as stdout, open(paths["err"], "wb") as stderr_file:
+            try:
+                child = subprocess.Popen([sys.executable, "-m", manifest.process_module], stdin=stdin, stdout=stdout, stderr=stderr_file, env=env)
+            except OSError as error:
+                return _failure(manifest, "addon_failed", "the process of the add-on %s could not be started: %s. %s" % (manifest.NAME, error, stop))
+            until = time.monotonic() + deadline
+            stopped = None
+            while child.poll() is None:
+                if os.path.getsize(paths["out"]) > MAX_ANSWER_BYTES:
+                    stopped = ("addon_failed", "the add-on %s wrote more than the %d bytes an answer may be, and was stopped. %s" % (manifest.NAME, MAX_ANSWER_BYTES, stop))
+                elif os.path.getsize(paths["err"]) > MAX_STDERR_BYTES:
+                    stopped = ("addon_failed", "the add-on %s wrote more than %d bytes to standard error, and was stopped. %s" % (manifest.NAME, MAX_STDERR_BYTES, stop))
+                elif time.monotonic() > until:
+                    stopped = ("addon_timeout", "the add-on %s did not answer within %d seconds and was stopped. Nothing else here was affected. Try again, or run the command by hand to see what it does." % (manifest.NAME, deadline))
+                if stopped is not None:
+                    _stop(child)
+                    break
+                time.sleep(0.02)
+        if stopped is not None:
+            return _failure(manifest, *stopped)
+        with open(paths["out"], "rb") as handle:
+            out = handle.read(MAX_ANSWER_BYTES + 1)
+        with open(paths["err"], "rb") as handle:
+            err = handle.read(MAX_STDERR_BYTES + 1)
+    text = err[:MAX_STDERR_BYTES].decode("utf-8", "replace")
     if stderr is not None and text:
         stderr(text)
     if len(out) > MAX_ANSWER_BYTES:
-        return _failure(manifest, "addon_failed", "the add-on %s answered with %d bytes, more than the %d an answer may be. Reinstall it, or aamio addon disable %s to go on without it." % (manifest.NAME, len(out), MAX_ANSWER_BYTES, manifest.NAME))
+        return _failure(manifest, "addon_failed", "the add-on %s answered with more than the %d bytes an answer may be. %s" % (manifest.NAME, MAX_ANSWER_BYTES, stop))
     try:
         answer = json.loads(out.decode("utf-8"))
         if not isinstance(answer, dict):
             raise ValueError("not an object")
     except ValueError:
         said = text.strip().splitlines()
-        return _failure(manifest, "addon_failed", "the add-on %s exited with code %s and gave no answer this aamio can read%s. Reinstall it, or aamio addon disable %s to go on without it." % (manifest.NAME, child.returncode, (": " + said[-1][:200]) if said else "", manifest.NAME))
+        return _failure(manifest, "addon_failed", "the add-on %s exited with code %s and gave no answer this aamio can read%s. %s" % (manifest.NAME, child.returncode, (": " + said[-1][:200]) if said else "", stop))
     code = answer.get("exit_code", 0 if child.returncode == 0 else child.returncode)
     if not isinstance(code, int) or isinstance(code, bool) or not 0 <= code <= 255:
         code = 1
@@ -538,12 +598,21 @@ def run(manifest, kind, name, arguments, subject=None, own_key=None, state_dir=N
         try:
             normal["raw"] = base64.b64decode(answer["raw"], validate=True)
         except (ValueError, TypeError):
-            return _failure(manifest, "addon_failed", "the add-on %s answered with raw bytes that are not base64. Reinstall it, or aamio addon disable %s to go on without it." % (manifest.NAME, manifest.NAME))
+            return _failure(manifest, "addon_failed", "the add-on %s answered with raw bytes that are not base64. %s" % (manifest.NAME, stop))
     else:
         normal["result"] = answer.get("result")
     if isinstance(answer.get("stderr"), str) and answer["stderr"] and stderr is not None:
         stderr(answer["stderr"] if answer["stderr"].endswith("\n") else answer["stderr"] + "\n")
     return normal
+
+
+def _stop(child):
+    """Kill the process and give it a moment to go away, so the files it holds can be removed; after that it is left to the system."""
+    child.kill()
+    try:
+        child.wait(timeout=STOP_WAIT)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def probe(manifest):

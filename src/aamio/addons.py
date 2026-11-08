@@ -216,7 +216,7 @@ def _bring(point, module_name, distribution, fix):
     refused: the contracts this aamio knows are 1, in this process, and 2, in a
     process of the add-on's own, and 2 is declared in the manifest.
     """
-    manifest = read_manifest(module_name, distribution, fix)
+    manifest = read_manifest(module_name, distribution, fix, dist=point.dist if point is not None else None)
     if manifest is not None:
         return manifest
     module = _import(point, distribution or module_name, fix)
@@ -301,7 +301,7 @@ def enable(which, given=None):
             contract = next((row.get("contract", 1) for row in describe(given)["addons"] if row.get("distribution") is not None and _normal(row["distribution"]) == _normal(distribution)), 1)
     answer = describe(given)
     if contract == 2:
-        answer["note"] = "%s runs here from now on, in a process of its own for each call, with the call's arguments, a key aamio resolves for it and a directory of its own, and never the home's key. %s" % (distribution, RESTART)
+        answer["note"] = "%s runs here from now on, in a process of its own for each call, with the call's arguments, a key aamio resolves for it and a directory of its own, and never the home's key. It runs with your own file permissions, and enable started it once just now to check that it answers. %s" % (distribution, RESTART)
     else:
         answer["note"] = "%s runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can. %s" % (distribution, RESTART)
     return answer
@@ -340,7 +340,10 @@ def commands_of(module):
 
 
 def _running(module):
-    return {"version": module.__version__, "contract": getattr(module, "CONTRACT", 1), "module": module.__name__, "commands": commands_of(module), "mcp_tools": [tool["name"] for tool in module.TOOLS]}
+    said = {"version": module.__version__, "contract": getattr(module, "CONTRACT", 1), "module": module.__name__, "commands": commands_of(module), "mcp_tools": [tool["name"] for tool in module.TOOLS]}
+    if getattr(module, "environment", None):
+        said["environment"] = list(module.environment)
+    return said
 
 
 def describe(given=None):
@@ -363,7 +366,7 @@ def describe(given=None):
         # Which contract, from the manifest or its absence, running nothing; a
         # manifest for a contract this aamio does not know is this row's error.
         try:
-            entry["contract"] = 2 if read_manifest(row["module"].split(":")[0], row["distribution"], "aamio addon disable %s" % row["distribution"]) is not None else 1
+            entry["contract"] = 2 if read_manifest(row["module"].split(":")[0], row["distribution"], "aamio addon disable %s" % row["distribution"], dist=row["point"].dist) is not None else 1
         except AddonError as failure:
             entry["error"] = str(failure)
         module = running.get(row["name"])
