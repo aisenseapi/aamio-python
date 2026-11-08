@@ -18,7 +18,7 @@ home: no key, no address book and no scope key. Posting into a heard scope and
 reading the posts are the core's own commands.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # The short name: the command is aamio addon sound, the tools aamio_addon_sound_*.
 NAME = "sound"

@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import wave
 
@@ -29,6 +30,8 @@ ADDRESS = "k7rq2m4xw5tbz3yd6ena"
 SCOPE_KEY = "abcdefghijklmnopqrstuvwxyz"
 LONG_KEY = "a1" * 32
 READ_KEY = "0123456789abcdefghijklmnop"
+# The clock of these tests: a card made now is good until NOW + 3600 unless it says otherwise.
+NOW = 1794150000
 
 
 def wav(seconds=1.0, rate=48000):
@@ -99,10 +102,10 @@ class Microphone:
         return "fake-recorder"
 
 
-def run(req, aisense=None, speaker=None, microphone=None, pauses=None):
+def run(req, aisense=None, speaker=None, microphone=None, pauses=None, now=NOW):
     aisense = aisense or Aisense()
     pauses = pauses if pauses is not None else []
-    return process.handle(req, encode=aisense.encode, decode=aisense.decode, play=speaker or Speaker(), record=microphone or Microphone(), pause=pauses.append)
+    return process.handle(req, encode=aisense.encode, decode=aisense.decode, play=speaker or Speaker(), record=microphone or Microphone(), pause=pauses.append, clock=lambda: now)
 
 
 # ----------------------------------------------------------------- the card
@@ -114,12 +117,19 @@ def test_the_probe_names_the_add_on():
 
 def test_a_card_is_the_address_and_a_name_and_reads_back():
     assert card.make(ADDRESS) == "aamio:scope/" + ADDRESS
-    assert card.read(card.make(ADDRESS)) == {"kind": "scope", "address": ADDRESS, "name": None}
+    assert card.read(card.make(ADDRESS)) == {"kind": "scope", "address": ADDRESS, "name": None, "expires_at": None}
     named = card.make(ADDRESS, "rom-42")
-    assert named == "aamio:scope/%s?n=rom-42" % ADDRESS and card.read(named) == {"kind": "scope", "address": ADDRESS, "name": "rom-42"}
-    longest = card.make(ADDRESS, "R" + "x" * 31)
-    assert len(longest.encode("utf-8")) == 67 <= card.MAX_BYTES, "the longest card fits what a sound carries"
+    assert named == "aamio:scope/%s?n=rom-42" % ADDRESS and card.read(named) == {"kind": "scope", "address": ADDRESS, "name": "rom-42", "expires_at": None}
+    timed = card.make(ADDRESS, "rom-42", NOW + 3600)
+    assert timed == "aamio:scope/%s?n=rom-42&t=%d" % (ADDRESS, NOW + 3600) and card.read(timed)["expires_at"] == NOW + 3600
+    assert card.read("aamio:scope/%s?t=%d&n=rom-42" % (ADDRESS, NOW))["name"] == "rom-42", "the two parameters may come in either order"
+    assert card.make(ADDRESS, None, NOW) == "aamio:scope/%s?t=%d" % (ADDRESS, NOW)
+    longest = card.make(ADDRESS, "R" + "x" * 31, NOW)
+    assert len(longest.encode("utf-8")) == 80 <= card.MAX_BYTES, "the longest card fits what a sound carries"
     assert card.make(ADDRESS, "") == card.make(ADDRESS, None), "an empty name is no name"
+    for wrong in (-1, 12345678, 123456789012, "1794150000", True, 1.5):
+        with pytest.raises(card.Refused):
+            card.make(ADDRESS, None, wrong)
 
 
 @pytest.mark.parametrize("given,reason", [
@@ -161,6 +171,10 @@ def test_a_name_that_is_not_a_scope_name_is_refused(name):
     ("aamio:scope/%s?n" % ADDRESS, "not_this_version"),
     ("aamio:scope/%s?n=bad name" % ADDRESS, "invalid_name"),
     ("aamio:scope/%s?n=" % ADDRESS, "invalid_name"),
+    ("aamio:scope/%s?t=soon" % ADDRESS, "invalid_expiry"),
+    ("aamio:scope/%s?t=12345678" % ADDRESS, "invalid_expiry"),
+    ("aamio:scope/%s?t=1&t=2" % ADDRESS, "invalid_expiry"),
+    ("aamio:scope/%s?t=%d&t=%d" % (ADDRESS, NOW, NOW), "not_this_version"),
 ])
 def test_a_card_this_version_does_not_read_is_not_read_in_part(text, reason):
     with pytest.raises(card.NotUnderstood) as why:
@@ -171,7 +185,10 @@ def test_a_card_this_version_does_not_read_is_not_read_in_part(text, reason):
 def test_the_card_command_makes_the_text_without_sound_or_network():
     aisense = Aisense()
     said = run(request("command", "card", address=ADDRESS, name="rom-42"), aisense)
-    assert said["exit_code"] == 0 and said["result"]["status"] == "card" and said["result"]["card"] == "aamio:scope/%s?n=rom-42" % ADDRESS and said["result"]["bytes"] == 41
+    assert said["exit_code"] == 0 and said["result"]["status"] == "card" and said["result"]["card"] == "aamio:scope/%s?n=rom-42&t=%d" % (ADDRESS, NOW + 3600) and said["result"]["bytes"] == 54
+    assert said["result"]["expires_at"] == NOW + 3600, "good for an hour unless the caller says"
+    said = run(request("command", "card", address=ADDRESS, valid_for="0"), aisense)
+    assert said["result"]["card"] == "aamio:scope/" + ADDRESS and said["result"]["expires_at"] is None, "0 is a card with no end"
     assert aisense.encoded == [] and aisense.decoded == []
     said = run(request("command", "card", address=SCOPE_KEY))
     assert said["exit_code"] == 2 and said["is_error"] is True and said["result"]["reason"] == "a_key_not_an_address"
@@ -184,11 +201,14 @@ def test_broadcast_plays_the_card_and_leaves_nothing_behind():
     said = run(request("tool", "aamio_addon_sound_broadcast", address=ADDRESS, name="rom-42", repeat=2), aisense, speaker, pauses=pauses)
     result = said["result"]
     assert said["exit_code"] == 0 and said["is_error"] is False and result["status"] == "played"
-    assert aisense.encoded == [("aamio:scope/%s?n=rom-42" % ADDRESS, "audible")], "the card went to aisense once, in audible mode by default"
+    assert aisense.encoded == [("aamio:scope/%s?n=rom-42&t=%d" % (ADDRESS, NOW + 3600), "audible")], "the card went to aisense once, in audible mode by default, good for an hour"
     assert len(speaker.played) == 2 and all(existed for _path, existed in speaker.played) and pauses == [process.PAUSE]
     assert not os.path.exists(speaker.played[0][0]), "the sound file is gone once it has played"
-    assert result["duration_seconds"] == 8.1 and result["repeat"] == 2 and result["player"] == "fake-player" and result["mode"] == "audible"
-    assert "aamio_board_find" in result["note"] and "new scope" in result["note"]
+    assert result["duration_seconds"] == 8.1 and result["repeat"] == 2 and result["player"] == "fake-player" and result["mode"] == "audible" and result["expires_at"] == NOW + 3600
+    assert "aamio_board_find" in result["note"] and "new scope" in result["note"] and "turns the card down after" in result["note"]
+    aisense = Aisense()
+    said = run(request("tool", "aamio_addon_sound_broadcast", address=ADDRESS, valid_for=600), aisense, Speaker())
+    assert aisense.encoded[0][0] == "aamio:scope/%s?t=%d" % (ADDRESS, NOW + 600) and said["result"]["expires_at"] == NOW + 600
     said = run(request("command", "broadcast", address=ADDRESS, repeat="3", mode="high"), Aisense(), Speaker())
     assert said["result"]["repeat"] == 3 and said["result"]["mode"] == "high" and "aamio board find --scope" in said["result"]["note"], "the command line has its own words, and strings for numbers"
 
@@ -206,6 +226,9 @@ def test_broadcast_plays_the_card_and_leaves_nothing_behind():
     ({"address": ADDRESS, "repeat": "two"}, "invalid_repeat"),
     ({"address": ADDRESS, "repeat": True}, "invalid_repeat"),
     ({"address": ADDRESS, "out": 5}, "invalid_out"),
+    ({"address": ADDRESS, "valid_for": 59}, "invalid_valid_for"),
+    ({"address": ADDRESS, "valid_for": 86401}, "invalid_valid_for"),
+    ({"address": ADDRESS, "valid_for": "an hour"}, "invalid_valid_for"),
 ])
 def test_broadcast_refuses_before_anything_is_sent_or_played(arguments, reason):
     aisense, speaker = Aisense(), Speaker()
@@ -243,10 +266,10 @@ def test_listen_records_reads_and_deletes_the_recording_before_it_is_sent():
     said = run(request("tool", "aamio_addon_sound_listen"), aisense, microphone=microphone)
     result = said["result"]
     assert said["exit_code"] == 0 and said["is_error"] is False and result["status"] == "heard"
-    assert result["card"] == {"kind": "scope", "address": ADDRESS, "name": "rom-42"} and result["recorded_seconds"] == 30 and result["recorder"] == "fake-recorder"
+    assert result["card"] == {"kind": "scope", "address": ADDRESS, "name": "rom-42", "expires_at": None} and result["recorded_seconds"] == 30 and result["recorder"] == "fake-recorder"
     assert microphone.calls[0][0] == 30 and aisense.decoded == [(len(microphone.sound), "auto", False)], "30 seconds by default, read in auto mode, and the file was gone before it was sent"
     assert "aamio_scope_add with name rom-42 and address %s" % ADDRESS in result["next"] and "aamio_board_post with scope rom-42" in result["next"]
-    assert "untrusted" not in result["note"] and "anyone within earshot" in result["note"]
+    assert "untrusted" not in result["note"] and "anyone within earshot" in result["note"] and "may be a recording of any age" in result["note"], "a card with no end is said to be one"
     said = run(request("command", "listen", seconds="12"), Aisense(text="aamio:scope/" + ADDRESS), microphone=Microphone())
     assert said["result"]["recorded_seconds"] == 12 and "aamio scope add heard-k7rq2m --address %s" % ADDRESS in said["result"]["next"], "a card with no name gets one to keep it under, in the command line's words"
 
@@ -529,7 +552,8 @@ def test_the_core_lists_sound_from_its_manifest_without_running_it(real_addon, t
 def test_the_commands_run_in_a_process_of_their_own(real_addon, tmp_path, capsys):
     home = str(tmp_path / "home")
     code, out, _ = command(capsys, home, "addon", "sound", "card", ADDRESS, "--name", "rom-42")
-    assert code == 0 and json.loads(out)["card"] == "aamio:scope/%s?n=rom-42" % ADDRESS
+    made = json.loads(out)
+    assert code == 0 and made["card"] == "aamio:scope/%s?n=rom-42&t=%d" % (ADDRESS, made["expires_at"]) and 3500 < made["expires_at"] - time.time() <= 3600
     code, out, _ = command(capsys, home, "addon", "sound", "broadcast", SCOPE_KEY)
     said = json.loads(out)
     assert code == 2 and said["reason"] == "a_key_not_an_address", "a key is refused by the process before anything is sent"
@@ -556,11 +580,26 @@ def test_over_mcp_a_key_is_refused_and_a_file_is_read(real_addon, tmp_path):
 @pytest.mark.skipif(os.environ.get("AAMIO_LIVE") != "1", reason="calls aisenseapi.com; set AAMIO_LIVE=1")
 def test_live_a_card_made_into_sound_at_aisense_reads_back_the_same(tmp_path):
     out = tmp_path / "card.wav"
-    said = process.handle(request("command", "broadcast", address=ADDRESS, name="rom-42", out=str(out)))
-    assert said["exit_code"] == 0 and said["result"]["status"] == "written" and 7 < said["result"]["duration_seconds"] < 12
+    longest = "R" + "x" * 31
+    said = process.handle(request("command", "broadcast", address=ADDRESS, name=longest, out=str(out)))
+    made = said["result"]
+    assert said["exit_code"] == 0 and made["status"] == "written" and len(made["card"]) == 80 and 7 < made["duration_seconds"] <= 12.5, made
     said = process.handle(request("tool", "aamio_addon_sound_decode", file=str(out)))
-    assert said["exit_code"] == 0 and said["result"]["card"] == {"kind": "scope", "address": ADDRESS, "name": "rom-42"} and said["result"]["corrected_bits"] == 0
+    assert said["exit_code"] == 0 and said["result"]["card"] == {"kind": "scope", "address": ADDRESS, "name": longest, "expires_at": made["expires_at"]} and said["result"]["corrected_bits"] == 0
     silence = tmp_path / "silence.wav"
     silence.write_bytes(wav(3))
     said = process.handle(request("tool", "aamio_addon_sound_decode", file=str(silence)))
     assert said["exit_code"] == 3 and said["result"]["status"] == "nothing_heard"
+
+
+def test_a_card_past_its_time_is_turned_down_and_one_in_time_is_heard():
+    timed = "aamio:scope/%s?n=rom-42&t=%d" % (ADDRESS, NOW)
+    said = run(request("tool", "aamio_addon_sound_listen"), Aisense(text=timed), now=NOW + process.SKEW + 1)
+    result = said["result"]
+    assert said["exit_code"] == 3 and said["is_error"] is True and result["status"] == "expired" and result["reason"] == "card_expired"
+    assert result["card"]["expires_at"] == NOW and "recording played again" in result["fix"] and "next" not in result, "no next steps for a card past its time"
+    said = run(request("tool", "aamio_addon_sound_listen"), Aisense(text=timed), now=NOW + process.SKEW)
+    assert said["result"]["status"] == "heard" and "It is good until" in said["result"]["note"], "the clocks of two machines may differ by two minutes"
+    said = run(request("tool", "aamio_addon_sound_decode", file=__file__), Aisense(text=timed), now=NOW - 10)
+    assert said["result"]["reason"] == "not_a_wav", "decode reads only a WAV, before the time matters"
+

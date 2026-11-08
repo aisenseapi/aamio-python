@@ -29,12 +29,18 @@ from . import NAME, __version__, audio, card, service
 
 CONTRACT = 2
 TOOL = "aamio_addon_sound_"
-EXIT_CODES = {"card": 0, "played": 0, "written": 0, "heard": 0, "nothing_heard": 3, "not_understood": 3, "invalid": 2, "unreachable": 5}
+EXIT_CODES = {"card": 0, "played": 0, "written": 0, "heard": 0, "nothing_heard": 3, "not_understood": 3, "expired": 3, "invalid": 2, "unreachable": 5}
 REPEAT_MAX = 3
 SECONDS_DEFAULT = 30
 SECONDS_MIN = 5
 SECONDS_MAX = 40
 PAUSE = 1.0
+# How long a card is good, in seconds: an hour unless the caller says, a day at most, 0 for no end.
+VALID_FOR_DEFAULT = 3600
+VALID_FOR_MIN = 60
+VALID_FOR_MAX = 86400
+# The clocks of two machines in a room may differ: a card is turned down this long after its time.
+SKEW = 120
 
 HEARD = ("Heard from the air: anyone within earshot, or a speaker playing a recording, can put a card there. "
          "The address lets you post into a scope, and whoever holds the scope's key reads the post, so keep anything private out of it.")
@@ -69,7 +75,7 @@ def _whole(value, low, high, default, what):
         return default
     if isinstance(value, int) and not isinstance(value, bool):
         number = value
-    elif isinstance(value, str) and re.fullmatch(r"[0-9]{1,3}", value):
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]{1,6}", value):
         number = int(value)
     else:
         number = None
@@ -91,18 +97,34 @@ def _by(kind, line, tool):
     return tool if kind == "tool" else line
 
 
-def card_text(arguments):
+def _when(seconds):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+
+
+def _expires(arguments, now):
+    """The Unix time the card stops being good, or None for a card with no end."""
+    valid_for = _whole(arguments.get("valid_for"), 0, VALID_FOR_MAX, VALID_FOR_DEFAULT, "valid_for")
+    if valid_for == 0:
+        return None
+    if valid_for < VALID_FOR_MIN:
+        raise card.Refused("invalid_valid_for", "valid_for is how many seconds the card is good: %d to %d, %d if left out, or 0 for a card with no end." % (VALID_FOR_MIN, VALID_FOR_MAX, VALID_FOR_DEFAULT))
+    return int(now) + valid_for
+
+
+def card_text(arguments, now):
     try:
-        text = card.make(arguments.get("address"), arguments.get("name"))
+        expires = _expires(arguments, now)
+        text = card.make(arguments.get("address"), arguments.get("name"), expires)
     except card.Refused as error:
         return refused(error.reason, error.fix)
-    return {"status": "card", "card": text, "bytes": len(text.encode("utf-8")),
+    return {"status": "card", "card": text, "bytes": len(text.encode("utf-8")), "expires_at": expires,
             "note": "This is the text the sound carries, and it fits a QR code as well. aamio addon sound broadcast plays it."}
 
 
-def broadcast(arguments, kind, encode, play, pause):
+def broadcast(arguments, kind, encode, play, pause, now):
     try:
-        text = card.make(arguments.get("address"), arguments.get("name"))
+        expires = _expires(arguments, now)
+        text = card.make(arguments.get("address"), arguments.get("name"), expires)
         mode = _mode(arguments.get("mode"), service.MODES, "audible")
         repeat = _whole(arguments.get("repeat"), 1, REPEAT_MAX, 1, "repeat")
         out = arguments.get("out")
@@ -124,7 +146,7 @@ def broadcast(arguments, kind, encode, play, pause):
         return unreachable(error.reason, error.fix, error.retry_after)
     except service.Refused as error:
         return refused(error.reason, error.fix)
-    said = {"card": text, "mode": mode, "duration_seconds": _seconds_of(sound)}
+    said = {"card": text, "mode": mode, "duration_seconds": _seconds_of(sound), "expires_at": expires}
     if out is not None:
         try:
             with open(out, "xb") as handle:
@@ -147,11 +169,12 @@ def broadcast(arguments, kind, encode, play, pause):
         except audio.Unavailable as error:
             return unreachable(error.reason, error.fix)
     read_posts = _by(kind, "aamio board find --scope NAME --wait 25", "aamio_board_find with scope and wait")
+    good = ("A listener turns the card down after %s, so a recording played later is not taken for it; the address itself does not expire, so use a new scope for the next room or occasion." % _when(expires)) if expires else "The card has no end, and neither does the address: use a new scope for the next room or occasion."
     return dict(said, status="played", repeat=repeat, player=player,
-                note="Played on this machine's speaker. Agents within earshot that were listening can now post into the scope: read their posts with %s, and answer one with %s. The address does not expire, so use a new scope for the next room or occasion." % (read_posts, _by(kind, "aamio board answer POST TEXT --scope NAME", "aamio_board_answer")))
+                note="Played on this machine's speaker. Agents within earshot that were listening can now post into the scope: read their posts with %s, and answer one with %s. %s" % (read_posts, _by(kind, "aamio board answer POST TEXT --scope NAME", "aamio_board_answer"), good))
 
 
-def _heard(sound, mode, kind, decode):
+def _heard(sound, mode, kind, decode, now):
     try:
         said = decode(sound, mode)
     except service.NothingHeard as error:
@@ -166,15 +189,19 @@ def _heard(sound, mode, kind, decode):
     except card.NotUnderstood as why:
         return {"status": "not_understood", "reason": why.reason, "heard": {"text": text, "data_base64": said.get("data_base64"), "byte_length": said.get("byte_length")},
                 "protocol": said.get("protocol"), "note": NOT_UNDERSTOOD}
+    if found["expires_at"] is not None and now > found["expires_at"] + SKEW:
+        return {"status": "expired", "reason": "card_expired", "card": found, "protocol": said.get("protocol"),
+                "fix": "This card stopped being good at %s, so it may be a recording played again. Ask whoever holds the scope to play a fresh one." % _when(found["expires_at"])}
     name = found["name"] or "heard-" + found["address"][:6]
     steps = _by(kind,
                 "aamio scope add %s --address %s, then aamio board post offer TITLE TEXT --scope %s (or need). The post opens an inbox of its own, and an answer to it comes there: read it with aamio read." % (name, found["address"], name),
                 "aamio_scope_add with name %s and address %s, then aamio_board_post with scope %s. The post opens an inbox of its own, and an answer to it comes there: read it with aamio_read." % (name, found["address"], name))
+    age = (" It is good until %s." % _when(found["expires_at"])) if found["expires_at"] is not None else " It says no time it stops being good, so it may be a recording of any age."
     return {"status": "heard", "card": found, "protocol": said.get("protocol"), "corrected_bits": said.get("corrected_bits"), "mode": said.get("mode"),
-            "note": HEARD, "next": steps}
+            "note": HEARD + age, "next": steps}
 
 
-def listen(arguments, kind, decode, record):
+def listen(arguments, kind, decode, record, now):
     try:
         seconds = _whole(arguments.get("seconds"), SECONDS_MIN, SECONDS_MAX, SECONDS_DEFAULT, "seconds")
         mode = _mode(arguments.get("mode"), service.DECODE_MODES, "auto")
@@ -193,13 +220,13 @@ def listen(arguments, kind, decode, record):
             return unreachable("recorder_failed", "The recorder said it was done, and left no recording. Check the microphone, or record the sound another way and read the file with decode.")
         # Gone from the disk before it goes anywhere.
         os.remove(path)
-    result = _heard(sound, mode, kind, decode)
+    result = _heard(sound, mode, kind, decode, now)
     result["recorded_seconds"] = seconds
     result["recorder"] = recorder
     return result
 
 
-def decode_file(arguments, kind, decode):
+def decode_file(arguments, kind, decode, now):
     try:
         mode = _mode(arguments.get("mode"), service.DECODE_MODES, "auto")
     except card.Refused as error:
@@ -217,16 +244,17 @@ def decode_file(arguments, kind, decode):
         return refused("too_big", "%s is over 8 MiB, more than aisenseapi.com reads. Record at most 40 seconds of mono 16-bit PCM." % name)
     if not service.is_wav(sound):
         return refused("not_a_wav", "%s is not a WAV file. Record or convert it to uncompressed 16-bit PCM WAV at 44.1 or 48 kHz: MP3, AAC and WebM are not read." % name)
-    return _heard(sound, mode, kind, decode)
+    return _heard(sound, mode, kind, decode, now)
 
 
-def handle(request, encode=None, decode=None, play=None, record=None, pause=None):
-    """The answer to one request. The four seams are for tests: by default the calls to aisenseapi.com and this machine's speaker and microphone."""
+def handle(request, encode=None, decode=None, play=None, record=None, pause=None, clock=None):
+    """The answer to one request. The seams are for tests: by default the calls to aisenseapi.com, this machine's speaker and microphone, and its clock."""
     encode = encode or service.encode
     decode = decode or service.decode
     play = play or audio.play
     record = record or audio.record
     pause = pause or time.sleep
+    now = (clock or time.time)()
     if not isinstance(request, dict) or request.get("aamio_addon") != CONTRACT:
         return answer(refused("not_contract_2", "This add-on speaks contract %d of aamio's add-ons, and the request is not on it. Upgrade aamio, or install the version of aamio-sound made for yours." % CONTRACT))
     kind = request.get("kind")
@@ -236,13 +264,13 @@ def handle(request, encode=None, decode=None, play=None, record=None, pause=None
         return {"result": {"ok": True, "name": NAME, "version": __version__, "aamio_addon": CONTRACT}, "exit_code": 0, "is_error": False}
     short = name if kind == "command" else (name[len(TOOL):] if kind == "tool" and isinstance(name, str) and name.startswith(TOOL) else None)
     if kind == "command" and short == "card":
-        return answer(card_text(arguments))
+        return answer(card_text(arguments, now))
     if short == "broadcast":
-        return answer(broadcast(arguments, kind, encode, play, pause))
+        return answer(broadcast(arguments, kind, encode, play, pause, now))
     if short == "listen":
-        return answer(listen(arguments, kind, decode, record))
+        return answer(listen(arguments, kind, decode, record, now))
     if short == "decode":
-        return answer(decode_file(arguments, kind, decode))
+        return answer(decode_file(arguments, kind, decode, now))
     return answer(refused("unknown_call", "The add-on %s has no %s called %s. aamio addon %s --help lists its commands, and aamio addon list its tools." % (NAME, kind, name, NAME)))
 
 

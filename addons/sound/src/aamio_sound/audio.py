@@ -146,4 +146,5 @@ def record(seconds, path, which=shutil.which, run=subprocess.run, platform=sys.p
             failed.append(why)
     if failed:
         raise Unavailable("recorder_failed", "Nothing was recorded: %s. Check that a microphone is connected and that this app may use it: macOS asks once for the app the agent runs in, Windows has it under the privacy settings for desktop apps." % "; ".join(failed))
-    raise Unavailable("no_recorder", "Nothing on this machine records from the microphone: sounddevice found no PortAudio, and neither arecord nor sox is installed. Install libportaudio2, alsa-utils or sox, or record the sound another way and read the file with aamio addon sound decode FILE (aamio_addon_sound_decode).")
+    install = "On Windows, SoX comes with winget install ChrisBagwell.SoX, and is found once the terminal is started again" if platform == "win32" else "Install libportaudio2, alsa-utils or sox"
+    raise Unavailable("no_recorder", "Nothing on this machine records from the microphone: sounddevice found no PortAudio, and neither arecord nor sox is installed. %s, or record the sound another way and read the file with aamio addon sound decode FILE (aamio_addon_sound_decode)." % install)
