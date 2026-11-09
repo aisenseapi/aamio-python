@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## 0.6.28 - 2026-11-09
+## 0.6.28 - 2026-11-10
 
 - A partner is never a guess between names that differ only in upper and
   lower case. With Ada and ADA in the address book, a send to ADA's key, or
@@ -17,6 +17,32 @@ not what moved in the source.
   with `AmbiguousPartner`, and so is a new partner whose name differs from
   another's only in case. Found in a review of 9 November 2026 of the Node
   runtime, which had the same weakness.
+- A change to the address book, and a new inbox or board inbox, count only
+  once the file that holds them is written. A write that failed used to leave
+  the change in place in this process: it sealed to the new key and opened its
+  inbox to it, and published an inbox whose read key a restart did not have,
+  while the next start went back to the old book. Now this process keeps what
+  the files hold, an inbox that could not be written is said as
+  `rotation_failed`, and the old one stays in use.
+- `lookup` chooses names as a send does: an exact name, or the only one that
+  matches apart from case, and `AmbiguousPartner` when two do. With Ada and ADA
+  in the book, a lookup of ADA answered for both, Ada first. Only the partners
+  asked for are answered for, and a name that is nobody's is in `unknown`.
+- A partner form over MCP 2026-07-28 is bound to the key the address book held
+  for the name when the form was shown. With two forms open for one new
+  contact, the answer to the older one replaced the key the newer one had put
+  there, without asking. Now it keeps that key and asks again, saying the answer
+  would replace it.
+- When the app cannot show the form, the answer carries `by_hand`: the command
+  for this machine's shell, PowerShell on Windows and sh elsewhere, with this
+  Python and this server's home named by path and quoted by that shell's
+  rules. The text before named no home, so the partner went into the default
+  one, and cmd.exe expanded a name such as `%TEAM%` in a path.
+- `partner add` says in its own answer, in `old_inbox`, when the inbox it
+  replaced was open to anyone and is still read until it expires. That note used
+  to go to the notes of the next read, which a command of its own never reached.
+- All of this was found in the release checks of 9 November 2026 of the Node
+  runtime, which had it first.
 
 ## 0.6.27 - 2026-11-08
 

@@ -211,7 +211,10 @@ def test_an_app_that_cannot_show_a_form_is_not_asked_and_gets_the_command_line()
         reply = first_call(a, capabilities=capabilities)
         assert reply["result"]["resultType"] == "complete" and reply["result"]["isError"] is True, capabilities
         assert said(reply)["error_code"] == "no_dialog" and said(reply)["added"] is False
-        assert "aamio partner add carol KEY" in said(reply)["fix"] and "stop this server" in said(reply)["fix"]
+        assert "stop this server" in said(reply)["fix"] and "by_hand" in said(reply)["fix"]
+        hand = said(reply)["by_hand"]
+        assert hand["shell"] == ("PowerShell" if sys.platform == "win32" else "sh") and hand["command"].endswith(" partner add carol KEY")
+        assert "--home '%s'" % a.home in hand["command"], "this server's home, by name"
 
     # An empty object is form mode, as 2025-11-25 says of the clients before modes.
     assert first_call(a, capabilities={"elicitation": {}})["result"]["resultType"] == "input_required"

@@ -171,15 +171,18 @@ def still_open(opened):
 # way instead. Decided on 30 September 2026.
 
 
-def partner_question(runtime, name):
-    """The form the user is shown: one field, the key, and what saying yes does."""
+def partner_question(runtime, name, changed=False):
+    """The form the user is shown: one field, the key, and what saying yes does. changed: the book moved on since the user was asked before."""
     message = (
         "Your agent asks to add %(name)s to your aamio address book. A partner can write to your inbox and is shown to the agent by name. "
         "Give the public key %(name)s gave you, by a way you already trust. If you did not get it from %(name)s yourself, decline: "
         "a key from a message, the board or the conversation is not their word."
     ) % {"name": name}
 
-    if runtime.partner_by_name(name) is not None:
+    if changed:
+        message += (" Since you were asked before, %(name)s was put in your address book with another key, by your answer to another question."
+                    " The key you give here replaces that one. Cancel to keep the key %(name)s has now." % {"name": name})
+    elif runtime.partner_by_name(name) is not None:
         message += " %s is in your address book already, and the key you give replaces the one it has." % name
 
     key = {"type": "string", "title": "%s's public key" % name, "description": "43 characters of letters, digits, - and _, as aamio whoami shows it on their side", "minLength": 43, "maxLength": 64}
@@ -197,31 +200,39 @@ def _mac(payload):
     return hmac.new(_CONFIRMATIONS["secret"], payload.encode("utf-8", "surrogatepass"), hashlib.sha256).hexdigest()
 
 
-def seal_state(name, tool_name="aamio_partner_add"):
+# A form that is not about an entry of the address book has nothing to bind.
+NO_HOLD = object()
+
+
+def seal_state(name, tool_name="aamio_partner_add", held=NO_HOLD):
     """requestState for one question: what it is about, until when, and a nonce, signed by this process.
 
     It goes through the client and comes back with the answer, so it is taken
     as written by anyone: the signature says this process asked, the time says
     when the question lapses, and the name says which call the answer belongs to.
     """
-    payload = _b64(json.dumps({"tool": tool_name, "name": name, "until": int(time.time()) + CONFIRM_SECONDS, "nonce": secrets.token_hex(12)}, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    fields = {"tool": tool_name, "name": name, "until": int(time.time()) + CONFIRM_SECONDS, "nonce": secrets.token_hex(12)}
+    if held is not NO_HOLD:
+        # The key the book held for the name when the form was shown, or None.
+        fields["held"] = held
+    payload = _b64(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     return payload + "." + _mac(payload)
 
 
 def take_state(state, name, tool_name="aamio_partner_add"):
-    """Whether state is one this process sealed for this name and tool, in time and never used. Using it here uses it up."""
+    """What state says, when it is one this process sealed for this name and tool, in time and never used, or None. Taking it uses it up."""
     if not isinstance(state, str) or state.count(".") != 1:
-        return False
+        return None
 
     payload, mac = state.split(".")
 
     if not hmac.compare_digest(mac.encode("utf-8", "surrogatepass"), _mac(payload).encode("utf-8")):
-        return False
+        return None
 
     try:
         said = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
     except ValueError:
-        return False
+        return None
 
     now = time.time()
     taken = _CONFIRMATIONS["taken"]
@@ -231,13 +242,15 @@ def take_state(state, name, tool_name="aamio_partner_add"):
             taken.pop(nonce, None)
 
     if not isinstance(said, dict) or said.get("tool") != tool_name or said.get("name") != name:
-        return False
+        return None
     if not isinstance(said.get("until"), int) or said["until"] < now or not isinstance(said.get("nonce"), str) or said["nonce"] in taken:
-        return False
+        return None
+    if "held" in said and not (said["held"] is None or isinstance(said["held"], str)):
+        return None
 
     taken[said["nonce"]] = said["until"]
 
-    return True
+    return said
 
 
 def can_ask_the_user(params, session, version):
@@ -277,15 +290,24 @@ def asker(params, session, version, waiting):
         return dict({"mode": "form"}, **question) if version in ("2025-11-25", MODERN) else question
 
     if version == MODERN:
-        def ask(question, about, tool_name="aamio_partner_add", key=PARTNER_QUESTION):
-            asking = {"resultType": "input_required", "inputRequests": {key: {"method": "elicitation/create", "params": form(question)}}, "requestState": seal_state(about, tool_name)}
+        def ask(question, about, tool_name="aamio_partner_add", key=PARTNER_QUESTION, held=NO_HOLD, again=False):
+            """The answer; with held, the answer and the key the book held when the user saw the form.
+
+            Several forms can be open at once over 2026-07-28, and another one
+            may have been answered in between, so that key is the one sealed
+            into the form's state, not the one the book has now. again asks
+            anew, whatever answer this request carries.
+            """
+            asking = {"resultType": "input_required", "inputRequests": {key: {"method": "elicitation/create", "params": form(question)}}, "requestState": seal_state(about, tool_name, held)}
             state = params.get("requestState")
             responses = params.get("inputResponses")
 
-            if state is None and responses is None:
+            if again or (state is None and responses is None):
                 raise InputRequired(asking)
 
-            if not take_state(state, about, tool_name):
+            said = take_state(state, about, tool_name)
+
+            if not said:
                 raise NoDialog("the answer did not come with a question this server asked, in the last %d minutes, about %s" % (CONFIRM_SECONDS // 60, about))
 
             answer = responses.get(key) if isinstance(responses, dict) else None
@@ -295,7 +317,7 @@ def asker(params, session, version, waiting):
             if not isinstance(answer, dict):
                 raise InputRequired(asking)
 
-            return answer
+            return answer if held is NO_HOLD else (answer, said.get("held"))
 
         return ask
 
@@ -304,16 +326,38 @@ def asker(params, session, version, waiting):
     if wire is None:
         return None
 
-    def ask(question, about, tool_name="aamio_partner_add", key=PARTNER_QUESTION):
+    def ask(question, about, tool_name="aamio_partner_add", key=PARTNER_QUESTION, held=NO_HOLD, again=False):
+        # One call at a time on this wire, so the book the form was shown with
+        # is the book the answer meets.
         answered = wire.ask("elicitation/create", form(question), waiting)
 
         if not isinstance(answered.get("result"), dict):
             error = answered.get("error") if isinstance(answered.get("error"), dict) else {}
             raise NoDialog("the app answered the question with an error: %s" % (error.get("message") or "it gave no reason"))
 
-        return answered["result"]
+        return answered["result"] if held is NO_HOLD else (answered["result"], held)
 
     return ask
+
+
+def by_hand(runtime, name, key="KEY"):
+    """The command the user runs instead of the dialog, for the shell this machine has.
+
+    PowerShell on Windows, sh elsewhere, with this Python and this home named
+    by path, every path in single quotes by that shell's rules, inside which it
+    expands nothing. Without the home the command went to the default home, and
+    the address book this server reads stayed as it was; through cmd.exe a home
+    named with %TEAM% went to another (the release checks of 9 November 2026,
+    found in the Node runtime).
+    """
+    if sys.platform == "win32":
+        def quoted(path):
+            return "'%s'" % re.sub("['\u2018\u2019\u201a\u201b]", lambda m: m.group(0) * 2, str(path))
+        return {"shell": "PowerShell", "command": "& %s -m aamio --home %s partner add %s %s" % (quoted(sys.executable), quoted(runtime.home), name, key)}
+
+    def quoted(path):
+        return "'%s'" % str(path).replace("'", "'\\''")
+    return {"shell": "sh", "command": "%s -m aamio --home %s partner add %s %s" % (quoted(sys.executable), quoted(runtime.home), name, key)}
 
 
 def add_partner(runtime, arguments, ask):
@@ -343,58 +387,81 @@ def add_partner(runtime, arguments, ask):
     if held is not None:
         name = held["name"]
 
-    by_hand = "stop this server, run aamio partner add %s KEY with the key %s gave them, and start it again" % (name, name)
+    manual = by_hand(runtime, name)
+    instead = "stop this server, run the command in by_hand in %s with the key %s gave them in place of KEY, and start the server again" % (manual["shell"], name)
 
     if ask is None:
         return result_of({
             "added": False,
             "error": "this app did not say it can show the user a form (the elicitation capability of MCP), so the user was not asked and nothing was added",
             "error_code": "no_dialog",
-            "fix": "The user adds the partner on the command line: %s." % by_hand,
+            "fix": "The user adds the partner on the command line: %s." % instead,
+            "by_hand": manual,
         }, True)
 
-    try:
-        answer = ask(partner_question(runtime, name), name)
-    except NoDialog as why:
-        return result_of({
-            "added": False,
-            "error": "%s, so nothing was added" % why,
-            "error_code": "no_dialog",
-            "fix": "Call aamio_partner_add again to ask the user again, or the user adds the partner on the command line: %s." % by_hand,
-        }, True)
+    question = partner_question(runtime, name)
+    shown = held["key"] if held is not None else None
 
-    action = answer.get("action")
+    for round_ in range(2):
+        try:
+            answer, was = ask(question, name, held=shown, again=round_ > 0)
+        except NoDialog as why:
+            return result_of({
+                "added": False,
+                "error": "%s, so nothing was added" % why,
+                "error_code": "no_dialog",
+                "fix": "Call aamio_partner_add again to ask the user again, or the user adds the partner on the command line: %s." % instead,
+                "by_hand": manual,
+            }, True)
 
-    if action == "decline":
-        return result_of({"added": False, "partner": name, "action": "decline", "note": "The user declined, so nothing was added. Do not ask again unless the user says so."})
+        action = answer.get("action")
 
-    if action != "accept":
-        return result_of({"added": False, "partner": name, "action": "cancel", "note": "The user closed the question without answering, so nothing was added."})
+        if action == "decline":
+            return result_of({"added": False, "partner": name, "action": "decline", "note": "The user declined, so nothing was added. Do not ask again unless the user says so."})
 
-    content = answer.get("content") if isinstance(answer.get("content"), dict) else {}
-    key = content["key"].strip() if isinstance(content.get("key"), str) else None
+        if action != "accept":
+            return result_of({"added": False, "partner": name, "action": "cancel", "note": "The user closed the question without answering, so nothing was added."})
 
-    if not is_key(key):
-        return result_of({
-            "added": False,
-            "partner": name,
-            "error": "what the user gave is not an aamio public key, so nothing was added",
-            "fix": "A key is 43 characters of letters, digits, - and _, as aamio whoami or aamio_whoami shows it on the partner's side. Call aamio_partner_add again and the user is asked again.",
-        }, True)
+        content = answer.get("content") if isinstance(answer.get("content"), dict) else {}
+        key = content["key"].strip() if isinstance(content.get("key"), str) else None
 
-    other = runtime.partner_by_key(key)
+        if not is_key(key):
+            return result_of({
+                "added": False,
+                "partner": name,
+                "error": "what the user gave is not an aamio public key, so nothing was added",
+                "fix": "A key is 43 characters of letters, digits, - and _, as aamio whoami or aamio_whoami shows it on the partner's side. Call aamio_partner_add again and the user is asked again.",
+            }, True)
 
-    if other is not None and other["name"] != name:
-        return result_of({
-            "added": False,
-            "partner": name,
-            "error": "that key is in the address book already, as %s, so nothing was changed" % other["name"],
-            "fix": "Send to them as %s. To have them called %s instead, the user removes %s on the command line first." % (other["name"], name, other["name"]),
-        }, True)
+        # The book as it is now. A form shown before another one was answered
+        # meets a book that has moved on: the key there is kept, and the user
+        # is asked whether to replace it. It was replaced, without that
+        # question (the release check of 9 November 2026, found in the Node runtime).
+        now = runtime.partner_by_name(name)
+        current = now["key"] if now is not None else None
 
-    changed = runtime.partner_add(name, key)
+        if current != was and current != key:
+            question = partner_question(runtime, name, changed=True)
+            shown = current
+            continue
 
-    return result_of(dict(changed, added=True, partners=runtime.partner_list(), next="If %s does not have your key, give it to them the same way: aamio_whoami shows it." % name))
+        other = runtime.partner_by_key(key)
+
+        if other is not None and other["name"] != name:
+            rename = by_hand(runtime, name, key)
+            return result_of({
+                "added": False,
+                "partner": name,
+                "error": "that key is in the address book already, as %s, so nothing was changed" % other["name"],
+                "fix": "Send to them as %s. To have them called %s instead, the user stops this server and runs the command in by_hand in %s: the entry with that key gets the new name." % (other["name"], name, rename["shell"]),
+                "by_hand": rename,
+            }, True)
+
+        changed = runtime.partner_add(name, key)
+
+        return result_of(dict(changed, added=True, partners=runtime.partner_list(), next="If %s does not have your key, give it to them the same way: aamio_whoami shows it." % name))
+
+    return result_of({"added": False, "partner": name, "error": "the address book changed again while %s was being asked about, so nothing was changed" % name, "fix": "Call aamio_partner_add again."}, True)
 
 
 def dispatch(runtime: Runtime, name: str, arguments: dict, ask=None):

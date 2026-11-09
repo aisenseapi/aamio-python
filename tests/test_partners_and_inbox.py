@@ -175,9 +175,13 @@ def test_an_open_inbox_gets_its_first_partner():
     inbox = runtime.channels["inbox"]
     assert outcome["rotated"] is True and service.threads[inbox.w]["allow"] == [B]
     # The old one was open to anyone and stays open until it expires; it is
-    # still read, and attention says it is open, since nothing was removed.
+    # still read, and the answer of partner add says it is open, since nothing
+    # was removed. In the answer and not in attention: partner add on the
+    # command line is a process of its own, and its notes were gone before the
+    # next read (the release check of 9 November 2026).
     assert old.muted is False and old in runtime.channels.values()
-    assert notes(runtime) == {"open"}
+    assert outcome["old_inbox"]["open"] is True and "was open to anyone, signed or not" in outcome["old_inbox"]["note"]
+    assert "open" not in notes(runtime)
 
 
 def test_a_rotation_that_fails_keeps_the_old_inbox_and_says_so():

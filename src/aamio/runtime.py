@@ -13,6 +13,7 @@ opens a new one and republishes presence, so partners keep finding it.
 """
 
 import copy
+import errno
 import json
 import os
 import queue
@@ -1128,9 +1129,14 @@ class Runtime:
                 "%s is in the address book with another key, and %s differs from it only in upper and lower case, which would make a send by name a guess. "
                 "Give %s exactly to replace its key, or choose another name." % (near[0]["name"], name, near[0]["name"])
             )
-        self.partners = [p for p in self.partners if p["name"] != name and p["key"] != key]
-        self.partners.append({"name": name, "key": key})
-        self._save_json("partners.json", self.partners)
+        # The new book counts only once partners.json holds it. Put in place
+        # first, a write that failed left this process sealing to the new key
+        # and opening its inbox to it, and the next start back on the old one
+        # (the release check of 9 November 2026, found in the Node runtime).
+        partners = [p for p in self.partners if p["name"] != name and p["key"] != key]
+        partners.append({"name": name, "key": key})
+        self._save_json("partners.json", partners)
+        self.partners = partners
         return self._inbox_after_change("partner %s was added" % name, {"partner": name, "key": key})
 
     def partner_remove(self, name):
@@ -1144,8 +1150,9 @@ class Runtime:
         anyone at an address the partners were given.
         """
         known = self.partner_by_name(name)
-        self.partners = [p for p in self.partners if p["name"] != name]
-        self._save_json("partners.json", self.partners)
+        partners = [p for p in self.partners if p["name"] != name]
+        self._save_json("partners.json", partners)
+        self.partners = partners
         outcome = {"partner": name, "known": known is not None}
         if known is None:
             inbox = self.channels.get("inbox")
@@ -1164,7 +1171,7 @@ class Runtime:
         if self._inbox_matches(inbox, self._wanted_allow()):
             outcome.update({"inbox": inbox.w, "rotated": False, "expire_at": inbox.expire_at})
             return outcome
-        outcome.update(self._rotate_inbox(reason))
+        outcome.update(self._rotate_inbox(reason, caller=True))
         return outcome
 
     def partner_list(self):
@@ -1442,7 +1449,7 @@ class Runtime:
             return list(inbox.allow or []) in ([], ["*"])
         return sorted(inbox.allow or []) == sorted(wanted)
 
-    def _rotate_inbox(self, reason):
+    def _rotate_inbox(self, reason, caller=False):
         """A new inbox with the list as it is now; the old one is dealt with by what changed.
 
         Keys only added, or an old inbox open to anyone: the old one is still
@@ -1469,7 +1476,15 @@ class Runtime:
             return {"rotated": False, "inbox": old.w if old else None, "allow": self._allow_names(old.allow if old else []), "error": what}
         inbox = Channel("inbox", read_key, w, data["expire_at"], wanted)
         outcome = {"rotated": True, "inbox": w, "allow": self._allow_names(inbox.allow), "expire_at": inbox.expire_at}
+        # The new inbox, and what it changes in the older ones, count only once
+        # state.json holds them. Kept when the save failed, the next read
+        # published an address whose read key this home did not have after a
+        # restart, and a partner wrote where nobody could read (the release
+        # check of 9 November 2026, found in the Node runtime).
         with self.lock:
+            before = dict(self.channels)
+            flags = [(channel, channel.label, channel.muted) for channel in before.values()]
+            noted = dict(getattr(self, "attention", {}))
             if old is not None:
                 self._retire_channel(old)
             self.channels["inbox"] = inbox
@@ -1479,12 +1494,30 @@ class Runtime:
         # contact.
         muted = self._mute_generations(reason)
         if old is not None:
-            if not old.muted and not old.allow:
-                self._note(old, "open", "inbox %s was open to anyone and is still read until %d; after %s the new inbox %s names %d key(s)" % (old.w, old.expire_at, reason, w, len(inbox.allow or [])))
             outcome["old_inbox"] = {"w": old.w, "muted": old.muted, "until": old.expire_at}
+            if not old.muted and not old.allow:
+                # In the answer of the call that changed the book, since partner
+                # add on the command line is a process of its own and its notes
+                # were gone before the next read; in the notes of a read otherwise.
+                if caller and inbox.allow:
+                    who = "any signed key" if "*" in inbox.allow else "the %d key(s) in the address book" % len(inbox.allow)
+                    outcome["old_inbox"].update(open=True, note="inbox %s was open to anyone, signed or not, and is still read until %d: whoever has that address can write there until then. After %s the new inbox %s takes writes from %s only." % (old.w, old.expire_at, reason, w, who))
+                else:
+                    self._note(old, "open", "inbox %s was open to anyone and is still read until %d; after %s the new inbox %s names %d key(s)" % (old.w, old.expire_at, reason, w, len(inbox.allow or [])))
         if muted:
             outcome["muted"] = muted
-        self.save_state()
+        try:
+            self.save_state()
+        except OSError as error:
+            with self.lock:
+                self.channels = before
+                for channel, label, was_muted in flags:
+                    channel.label, channel.muted = label, was_muted
+                self.attention = noted
+            what = "the inbox opened again after %s could not be written down (%s), so it is not used: a partner would write where this home cannot read after a restart. %s" % (
+                reason, errno.errorcode.get(error.errno, error.__class__.__name__), "The old inbox stays in use with its old list." if old is not None else "There is no inbox until state.json can be written.")
+            self._note_trouble("inbox", "rotation_failed", what, w=old.w if old else None)
+            return {"rotated": False, "inbox": old.w if old else None, "allow": self._allow_names(old.allow if old else []), "error": what}
         self.log("inbox %s until %d, %s%s" % (w, inbox.expire_at, reason, " (allowlist %d keys)" % len(inbox.allow) if inbox.allow else ""))
         outcome["presence"] = self.publish_presence(force=True)
         return outcome
@@ -1773,10 +1806,20 @@ class Runtime:
             raise RuntimeError("could not open the board inbox: %s %s" % (status, data))
         channel = Channel("board", read_key, w, data["expire_at"], ["*"])
         with self.lock:
+            before = dict(self.channels)
+            label = held.label if held is not None else None
             if held is not None:
                 self._retire_channel(held)
             self.channels["board"] = channel
-        self.save_state()
+        try:
+            self.save_state()
+        except OSError as error:
+            # As with the inbox: an address this home cannot read after a restart is never put on a post.
+            with self.lock:
+                self.channels = before
+                if held is not None:
+                    held.label = label
+            raise RuntimeError("the board inbox could not be written down (%s), so nothing was posted or sent: an answer would come where this home cannot read after a restart" % errno.errorcode.get(error.errno, error.__class__.__name__)) from None
         self.log("board inbox %s until %d (any key, signed only)" % (w, channel.expire_at))
         if self.listener is not None:
             self._start_poller(channel)
@@ -2192,25 +2235,49 @@ class Runtime:
     # ----------------------------------------------------------- lookup --
 
     def lookup(self, names=None, wait=0):
-        partners = self.partners if not names else [p for p in self.partners if p["name"].lower() in [str(n).lower() for n in names]]
+        """Which partners are reachable now, and where.
+
+        A name is chosen as a send chooses it: exactly, or apart from case when
+        only one partner is so named, and AmbiguousPartner when two are.
+        Matched without regard to case, ADA brought Ada back as well, and a
+        caller that took the first address answered the wrong partner (the
+        release check of 9 November 2026, found in the Node runtime). A name
+        that is nobody's is said in unknown, and only the partners asked for
+        are answered for.
+        """
+        unknown = []
+        if names:
+            partners = []
+            for name in names:
+                partner = self.partner_by_name(name)
+                if partner is None:
+                    unknown.append(str(name))
+                elif all(p["key"] != partner["key"] for p in partners):
+                    partners.append(partner)
+        else:
+            partners = self.partners
         if not partners:
-            return {"online": [], "offline": [], "error": "no partners to look up"}
+            return dict({"online": [], "offline": [], "error": "no partners to look up"}, **({"unknown": unknown} if unknown else {}))
         prefixes = [key_hash(p["key"])[:8] for p in partners]
         status, data = self.client.presence_lookup(prefixes, wait)
         if status != 200:
             return {"online": [], "offline": [p["name"] for p in partners], "error": "lookup failed: %s %s" % (status, data)}
         online = []
         found = set()
+        asked = {p["key"] for p in partners}
         for match in data.get("matches", []):
             partner = self.partner_by_key(match.get("key"))
-            if partner is None:
+            if partner is None or partner["key"] not in asked:
                 continue
             found.add(partner["name"])
             with self.lock:
                 self.peers[match["w"]] = partner["key"]
             online.append({"name": partner["name"], "w": match["w"], "tags": match.get("tags", []), "expires_at": match.get("expire_at")})
         self.save_state()
-        return {"online": online, "offline": [p["name"] for p in partners if p["name"] not in found]}
+        result = {"online": online, "offline": [p["name"] for p in partners if p["name"] not in found]}
+        if unknown:
+            result["unknown"] = unknown
+        return result
 
     def address_for(self, name):
         """The write address a partner currently answers on, from presence: that partner's own record, never another's.
