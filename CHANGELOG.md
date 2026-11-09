@@ -4,6 +4,20 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.28 - 2026-11-09
+
+- A partner is never a guess between names that differ only in upper and
+  lower case. With Ada and ADA in the address book, a send to ADA's key, or
+  to ada, could go to Ada, sealed to Ada's key, or to the inbox of the one who
+  could not open it: a name was matched without regard to case and the first
+  partner won, a key given was turned into its name and looked up again, and
+  the first partner presence answered for was taken. Now an exact name wins, a
+  key given is kept through the lookup, and only that partner's own presence
+  record is used. A name that matches two partners apart from case is refused
+  with `AmbiguousPartner`, and so is a new partner whose name differs from
+  another's only in case. Found in a review of 9 November 2026 of the Node
+  runtime, which had the same weakness.
+
 ## 0.6.27 - 2026-11-08
 
 - Add-ons have a contract number. Contract 1 is what 0.6.25 brought: a module

@@ -563,6 +563,17 @@ def trace_note(sent, received, delivered, no_claim, elsewhere):
     return note
 
 
+class AmbiguousPartner(ValueError):
+    """A name that matches two partners apart from upper and lower case, and neither exactly.
+
+    A name used to be matched without regard to case, and the first partner in
+    the book won. With Ada and ADA in it, a send to ADA's key, or to ada, went
+    to Ada, sealed to Ada's key, and Ada opened a message meant for someone
+    else (finding 1 of the review of 9 November 2026, found in the Node runtime
+    first). Two such partners is an error now, never a guess.
+    """
+
+
 class Channel:
     def __init__(self, label, read_key, w, expire_at, allow=None, after=0, created_at=None):
         self.label = label
@@ -1111,6 +1122,12 @@ class Runtime:
         """
         if not is_key(key):
             raise ValueError("not a base64url Ed25519 public key of 32 bytes")
+        near = [p for p in self.partners if p["name"] != name and p["name"].lower() == str(name).lower() and p["key"] != key]
+        if near:
+            raise AmbiguousPartner(
+                "%s is in the address book with another key, and %s differs from it only in upper and lower case, which would make a send by name a guess. "
+                "Give %s exactly to replace its key, or choose another name." % (near[0]["name"], name, near[0]["name"])
+            )
         self.partners = [p for p in self.partners if p["name"] != name and p["key"] != key]
         self.partners.append({"name": name, "key": key})
         self._save_json("partners.json", self.partners)
@@ -1187,10 +1204,21 @@ class Runtime:
         return keys
 
     def partner_by_name(self, name):
+        """The partner with this name: the one so named exactly, or the only one so named apart from upper and lower case.
+
+        Two of those and no exact one raises AmbiguousPartner: a guess seals the
+        message to the wrong key.
+        """
         for p in self.partners:
-            if p["name"].lower() == str(name).lower():
+            if p["name"] == str(name):
                 return p
-        return None
+        folded = [p for p in self.partners if p["name"].lower() == str(name).lower()]
+        if len(folded) > 1:
+            raise AmbiguousPartner(
+                "%d partners are called %s apart from upper and lower case (%s). Give the name exactly as it is in the address book, or the key."
+                % (len(folded), name, ", ".join(p["name"] for p in folded))
+            )
+        return folded[0] if folded else None
 
     def partner_by_key(self, key):
         for p in self.partners:
@@ -2185,13 +2213,19 @@ class Runtime:
         return {"online": online, "offline": [p["name"] for p in partners if p["name"] not in found]}
 
     def address_for(self, name):
-        """The write address a partner currently answers on, from presence."""
-        partner = self.partner_by_name(name)
+        """The write address a partner currently answers on, from presence: that partner's own record, never another's.
+
+        The lookup is by name without regard to case, so with Ada and ADA in the
+        book both came back, and the first one online was taken whichever was
+        asked for: a message sealed to one key went to the other's inbox.
+        """
+        partner = name if isinstance(name, dict) else self.partner_by_name(name)
         if partner is None:
             raise ValueError("unknown partner: " + str(name))
-        result = self.lookup([name])
+        result = self.lookup([partner["name"]])
         for entry in result["online"]:
-            return entry["w"], partner["key"]
+            if entry["name"] == partner["name"]:
+                return entry["w"], partner["key"]
         raise LookupError("%s is not online right now" % partner["name"])
 
     # ------------------------------------------------------------- send --
@@ -2217,10 +2251,13 @@ class Runtime:
         their recipient the same way.
         """
         if is_key(str(to)):
+            # The partner the key names, kept as it is: turned into its name and
+            # looked up again, it could become another partner of that name.
             partner = self.partner_by_key(to)
             if partner is None:
                 raise ValueError("key is not in partners")
-            to = partner["name"]
+            w, key = self.address_for(partner)
+            return w, key, partner["name"]
         if isinstance(to, str) and re.fullmatch(r"[a-z2-7]{20}", to):
             key = self.peers.get(to)
             if key is None:
@@ -2235,8 +2272,13 @@ class Runtime:
                     "on the command line" % to
                 )
             return to, key, None
-        w, key = self.address_for(to)
-        return w, key, to
+        partner = self.partner_by_name(to)
+        if partner is None:
+            raise ValueError("unknown partner: " + str(to))
+        w, key = self.address_for(partner)
+        # The book's own spelling, so asking presence again after a 404 or a
+        # 410 asks for this partner and no other.
+        return w, key, partner["name"]
 
     def _send(self, w, key, partner, text=None, data=None, reply_to=None, archived_data=None, answers=None):
         """One message sealed to key and written to w.
