@@ -4,6 +4,27 @@ aamio-earshot, the add-on, called aamio-sound up to 0.2.0. Dates are the day the
 tagged on release, and the two are the same day. Every entry says what changed
 for somebody using it.
 
+## 0.3.2 - 2026-11-09
+
+- When aisenseapi.com answers but cannot do the work, with a 503 or a 429, or
+  cannot be reached, the sound is made or read is done on this machine as before, and the
+  answer now says that the card or recording had gone to aisenseapi.com with the request,
+  or may have. 0.3.1 said nothing went to it, also when aisenseapi.com had
+  the whole card or recording before it answered 503. `fallback.sent` is `yes` when
+  aisenseapi.com answered and `maybe` when the connection failed.
+- A timeout or a cut connection while aisenseapi.com's answer is read falls
+  back to the local engine like any other failure. 0.3.1 let the error out of
+  the add-on, and the call failed with nothing done.
+- `broadcast --out` writes the whole WAV or nothing: a file the disk could not
+  take to the end is removed again, and the answer is `out_not_written`, so the
+  same name can be given again.
+- A card heard by `listen` is judged by the clock when the recording ended, not
+  when listening began, so a card that runs out while the microphone is open is
+  turned down.
+- A WAV with the WAVE_FORMAT_EXTENSIBLE header over 16-bit PCM, as many
+  recorders write it, is read. It goes to aisenseapi.com with the same samples
+  under the plain PCM header, the one aisense reads.
+
 ## 0.3.1 - 2026-11-09
 
 - The README says how to enable the add-on under its new name, `aamio addon enable earshot`.

@@ -1,7 +1,7 @@
 {
   "aamio_addon": 2,
   "name": "earshot",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "process": {"python": "aamio_earshot.process", "php": "process.php"},
   "deadline_seconds": 90,
   "environment": ["XDG_RUNTIME_DIR", "PULSE_SERVER"],

@@ -141,6 +141,31 @@ def test_a_file_the_codec_does_not_read_is_turned_down_in_aisense_s_words(data, 
     assert words in str(refused.value)
 
 
+def extensible(pcm, rate=48000, channels=1, subtype=None, valid=16, size=22):
+    """PCM under a WAVE_FORMAT_EXTENSIBLE header, as many recorders write it."""
+    import struct
+
+    fmt = (struct.pack("<HHIIHH", 0xFFFE, channels, rate, rate * channels * 2, channels * 2, 16)
+           + struct.pack("<HHI", size, valid, 4 if channels == 1 else 3) + (subtype or codec.PCM_SUBTYPE))
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(pcm)) + pcm
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+def test_the_extensible_header_over_16_bit_pcm_is_read_as_the_plain_one():
+    classic = codec.encode(CARD, "audible")
+    pcm = classic[44:]
+    assert codec.decode(extensible(pcm), "auto") == codec.decode(classic, "auto"), "the same samples under either header, the same card"
+    assert codec.classic_wav(extensible(pcm)) == classic and codec.classic_wav(classic) is classic, "for aisense, the plain header over the same samples"
+    stereo = bytes(b for i in range(0, len(pcm), 2) for b in (pcm[i:i + 2] * 2))
+    assert codec.decode(extensible(stereo, channels=2), "auto")["data"] == CARD
+    float_subtype = b"\x03" + codec.PCM_SUBTYPE[1:]
+    for odd, why in ((extensible(pcm, subtype=float_subtype), "a float subtype"), (extensible(pcm, valid=12), "12 of 16 bits"), (extensible(pcm, size=0), "no extension")):
+        with pytest.raises(codec.BadRecording) as refused:
+            codec.decode(odd, "auto")
+        assert "Use PCM16 WAV" in str(refused.value), why
+        assert codec.classic_wav(odd) == odd, "and aisense gets it as it came, to judge for itself"
+
+
 def test_php_round_takes_halves_away_from_zero():
     assert [codec.php_round(x) for x in (2.5, -2.5, 0.5, -0.5, 1.4999, -1.4999, 3.0)] == [3, -3, 1, -1, 1, -1, 3]
 

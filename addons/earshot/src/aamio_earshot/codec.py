@@ -273,8 +273,20 @@ def encode(payload, mode="audible"):
 
 # ------------------------------------------------------------------ reading a recording
 
-def parse_wav(data):
-    """The samples of the stronger channel and the recording's shape, with the same checks aisense makes."""
+PCM = 1
+EXTENSIBLE = 0xFFFE
+# KSDATAFORMAT_SUBTYPE_PCM, 00000001-0000-0010-8000-00aa00389b71, as its bytes lie in a file.
+PCM_SUBTYPE = bytes.fromhex("0100000000001000800000aa00389b71")
+
+
+def _layout(data):
+    """The format of a WAV and where its samples lie, with the checks aisense makes, as (fmt, (start, length), samples).
+
+    One header more is taken than aisense takes: WAVE_FORMAT_EXTENSIBLE, which many
+    recorders write, when its subtype is PCM and every one of the 16 bits is used.
+    The samples after it are the same as after a plain PCM header, and fmt says
+    extensible so classic_wav can give aisense the plain one.
+    """
     size = len(data)
     if size > MAX_WAV_BYTES:
         raise BadRecording("WAV is larger than 8 MiB.")
@@ -301,12 +313,17 @@ def parse_wav(data):
             if fmt is not None or length < 16:
                 raise BadRecording("Invalid or duplicate WAV format chunk.")
             fmt = dict(zip(("format", "channels", "rate", "bytes_per_second", "align", "bits"), struct.unpack("<HHIIHH", data[start:start + 16])))
+            fmt["extensible"] = False
+            if (fmt["format"] == EXTENSIBLE and length >= 40 and struct.unpack("<H", data[start + 16:start + 18])[0] >= 22
+                    and struct.unpack("<H", data[start + 18:start + 20])[0] == fmt["bits"] and data[start + 24:start + 40] == PCM_SUBTYPE):
+                fmt["format"] = PCM
+                fmt["extensible"] = True
         elif tag == b"data":
             if chunk is not None:
                 raise BadRecording("Duplicate WAV data chunk.")
             chunk = (start, length)
         offset = start + length + (length & 1)
-    if fmt is None or chunk is None or fmt["format"] != 1 or fmt["bits"] != 16 or fmt["channels"] not in (1, 2) or fmt["rate"] not in (44100, 48000):
+    if fmt is None or chunk is None or fmt["format"] != PCM or fmt["bits"] != 16 or fmt["channels"] not in (1, 2) or fmt["rate"] not in (44100, 48000):
         raise BadRecording("Use PCM16 WAV, mono or stereo, at 44100 or 48000 Hz.")
     stride = fmt["channels"] * 2
     if fmt["align"] != stride or fmt["bytes_per_second"] != fmt["rate"] * stride or chunk[1] % stride != 0:
@@ -314,6 +331,25 @@ def parse_wav(data):
     samples = chunk[1] // stride
     if samples < 1 or samples > MAX_SECONDS * fmt["rate"]:
         raise BadRecording("Recording must contain at most 40 seconds of audio.")
+    return fmt, chunk, samples
+
+
+def classic_wav(data):
+    """The same recording under the plain PCM header, for aisense, which reads no other: a WAVE_FORMAT_EXTENSIBLE
+    file of 16-bit PCM is written again with format 1 and its samples untouched. Any other file comes back as it
+    was, for aisense to judge."""
+    try:
+        fmt, chunk, _ = _layout(data)
+    except BadRecording:
+        return data
+    if not fmt["extensible"]:
+        return data
+    return wav(bytes(data[chunk[0]:chunk[0] + chunk[1]]), fmt["rate"], fmt["channels"])
+
+
+def parse_wav(data):
+    """The samples of the stronger channel and the recording's shape, with the same checks aisense makes and the one header more that _layout takes."""
+    fmt, chunk, samples = _layout(data)
     values = array.array("h")
     values.frombytes(data[chunk[0]:chunk[0] + chunk[1]])
     if sys.byteorder == "big":

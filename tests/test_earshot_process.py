@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "ears
 from aamio import addon_process, addons, cli, mcp_server
 from aamio.runtime import Runtime
 from aamio_earshot import __version__ as ADDON_VERSION, audio, card, codec, process, service
+from local_aisense import Receiver, busy, cut, direct, stall
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOURCE = os.pathsep.join([os.path.join(HERE, "..", "src"), os.path.join(HERE, "..", "addons", "earshot", "src")])
@@ -254,13 +255,17 @@ def test_broadcast_to_a_file_writes_a_new_file_and_plays_nothing(tmp_path):
 
 
 def test_when_aisense_cannot_be_reached_the_sound_is_made_here_and_the_answer_says_so():
-    busy = service.Unreachable("rate_limited", "aisenseapi.com counts requests per address and day. Try again after 3600 seconds.", "3600")
-    aisense, speaker = Aisense(error=busy), Speaker()
+    limited = service.Unreachable("rate_limited", "aisenseapi.com counts requests per address and day. Try again after 3600 seconds.", "3600", answered=True)
+    aisense, speaker = Aisense(error=limited), Speaker()
     said = run(request("tool", "aamio_addon_earshot_broadcast", address=ADDRESS), aisense, speaker)
     result = said["result"]
-    assert said["exit_code"] == 0 and result["status"] == "played" and result["engine"] == "local" and result["fallback"] == {"from": "aisense", "reason": "rate_limited"}
-    assert "could not be reached (rate_limited)" in result["engine_note"] and len(aisense.encoded) == 1, "aisense was asked once"
+    assert said["exit_code"] == 0 and result["status"] == "played" and result["engine"] == "local"
+    assert result["fallback"] == {"from": "aisense", "reason": "rate_limited", "sent": "yes"}, "a 429 is an answer, so aisense had the card"
+    assert "answered but did not do it (rate_limited)" in result["engine_note"] and "The card had gone to aisenseapi.com with the request." in result["engine_note"]
+    assert "nothing went" not in result["engine_note"] and len(aisense.encoded) == 1, "aisense was asked once"
     assert speaker.sounds[0] == codec.encode(result["card"].encode(), "audible"), "and the sound it would have made was made here and played"
+    said = run(request("tool", "aamio_addon_earshot_broadcast", address=ADDRESS), Aisense(error=service.Unreachable("service_unreachable", "aisenseapi.com could not be reached.")), Speaker())
+    assert said["result"]["fallback"]["sent"] == "maybe" and "The card may have reached aisenseapi.com before the connection failed." in said["result"]["engine_note"]
     said = run(request("tool", "aamio_addon_earshot_broadcast", address=ADDRESS), Aisense(), Speaker(error=audio.Unavailable("no_player", "Nothing on this machine plays a sound file.")))
     assert said["exit_code"] == 5 and said["result"]["reason"] == "no_player"
 
@@ -325,12 +330,121 @@ def test_when_aisense_cannot_be_reached_the_recording_is_read_here():
     said = run(request("tool", "aamio_addon_earshot_listen"), Aisense(error=down), microphone=Microphone(sound=codec.encode(TIMED, "audible")))
     result = said["result"]
     assert said["exit_code"] == 0 and result["status"] == "heard" and result["engine"] == "local" and result["fallback"]["reason"] == "service_unreachable" and "read on this machine" in result["engine_note"]
+    assert result["fallback"]["sent"] == "maybe" and "The recording may have reached aisenseapi.com before the connection failed." in result["engine_note"]
     said = run(request("tool", "aamio_addon_earshot_listen"), Aisense(error=down), microphone=Microphone())
     result = said["result"]
     assert result["status"] == "nothing_heard" and result["engine"] == "local" and result["fallback"]["reason"] == "service_unreachable", "and says so when nothing was heard here either"
     nothing = service.NothingHeard("No complete message was heard.")
     said = run(request("tool", "aamio_addon_earshot_listen"), Aisense(error=nothing), microphone=Microphone(sound=codec.encode(TIMED, "audible")))
     assert said["result"]["status"] == "nothing_heard" and said["result"]["engine"] == "aisense" and "fallback" not in said["result"], "what aisense heard nothing in is not read again here"
+
+
+def test_a_sound_made_here_after_aisense_answered_says_the_card_had_gone_there(monkeypatch, tmp_path):
+    recording = codec.encode(TIMED, "audible")
+    heard = tmp_path / "heard.wav"
+    heard.write_bytes(recording)
+    with Receiver(busy) as aisense:
+        monkeypatch.setattr(service, "BASE", aisense.base)
+        said = process.handle(request("command", "broadcast", address=ADDRESS, name="rom-42", out=str(tmp_path / "card.wav")),
+                              encode=lambda text, mode: service.encode(text, mode, opener=direct), clock=lambda: NOW)
+        result = said["result"]
+        assert json.loads(aisense.bodies[0])["data"] == result["card"], "the card had reached it whole when it answered 503"
+        assert said["exit_code"] == 0 and result["engine"] == "local" and result["fallback"] == {"from": "aisense", "reason": "service_busy", "sent": "yes"}
+        assert "The card had gone to aisenseapi.com with the request." in result["engine_note"] and "nothing went" not in result["engine_note"]
+        said = process.handle(request("command", "decode", file=str(heard)), decode=lambda sound, mode: service.decode(sound, mode, opener=direct), clock=lambda: NOW)
+        result = said["result"]
+        assert aisense.bodies[1] == recording, "the recording had reached it whole"
+        assert result["status"] == "heard" and result["engine"] == "local" and result["fallback"]["sent"] == "yes" and "The recording had gone to aisenseapi.com" in result["engine_note"]
+
+
+@pytest.mark.parametrize("answer", [cut, stall])
+def test_an_answer_that_breaks_off_is_done_here_too(monkeypatch, tmp_path, answer):
+    monkeypatch.setattr(service, "TIMEOUT", 0.5)
+    heard = tmp_path / "heard.wav"
+    heard.write_bytes(codec.encode(TIMED, "audible"))
+    with Receiver(answer) as aisense:
+        monkeypatch.setattr(service, "BASE", aisense.base)
+        said = process.handle(request("command", "broadcast", address=ADDRESS, out=str(tmp_path / "card.wav")),
+                              encode=lambda text, mode: service.encode(text, mode, opener=direct), clock=lambda: NOW)
+        assert said["exit_code"] == 0 and said["result"]["engine"] == "local" and said["result"]["fallback"]["sent"] == "yes", "the sound is made here all the same"
+        said = process.handle(request("command", "decode", file=str(heard)), decode=lambda sound, mode: service.decode(sound, mode, opener=direct), clock=lambda: NOW)
+        assert said["result"]["status"] == "heard" and said["result"]["engine"] == "local" and said["result"]["fallback"]["sent"] == "yes"
+
+
+class ShortFile:
+    """A file that takes this many bytes and then says the disk is full."""
+
+    def __init__(self, real, room):
+        self.real = real
+        self.room = room
+
+    def write(self, data):
+        self.real.write(data[:self.room])
+        raise OSError(27, "File too large")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.real.close()
+        return False
+
+
+def test_a_file_that_cannot_be_written_whole_is_not_left_behind(monkeypatch, tmp_path):
+    out = tmp_path / "card.wav"
+    monkeypatch.setattr(process, "open", lambda path, mode="r": ShortFile(open(path, mode), 400), raising=False)
+    said = run(request("command", "broadcast", address=ADDRESS, out=str(out)))
+    assert said["exit_code"] == 2 and said["result"]["reason"] == "out_not_written" and "File too large" in said["result"]["fix"]
+    assert not out.exists(), "the 400 bytes written are taken away again"
+    speaker = Speaker()
+    said = run(request("command", "broadcast", address=ADDRESS), speaker=speaker)
+    assert said["exit_code"] == 5 and said["result"]["reason"] == "temporary_file_not_written" and speaker.played == [], "no player plays half a sound"
+    monkeypatch.undo()
+    said = run(request("command", "broadcast", address=ADDRESS, out=str(out)))
+    assert said["result"]["status"] == "written" and out.stat().st_size == said["result"]["bytes"], "the same name can be given again"
+
+
+def test_a_card_is_judged_by_the_clock_when_the_recording_ended_not_when_the_call_began():
+    expires = NOW + 3600
+    timed = "aamio:scope/%s?n=rom-42&t=%d" % (ADDRESS, expires)
+    for late, status in ((process.SKEW, "heard"), (process.SKEW + 1, "expired"), (140, "expired")):
+        clock = {"now": expires + 100}
+        microphone = Microphone()
+
+        def record(seconds, path, microphone=microphone, clock=clock, late=late):
+            clock["now"] = expires + late
+            return microphone(seconds, path)
+
+        aisense = Aisense(text=timed)
+        said = process.handle(request("tool", "aamio_addon_earshot_listen"), encode=aisense.encode, decode=aisense.decode, play=Speaker(), record=record,
+                              pause=lambda seconds: None, clock=lambda clock=clock: clock["now"])
+        assert said["result"]["status"] == status, "listening begun 100 seconds after the card ran out, the recording ended %d seconds after" % late
+
+
+def test_a_recording_with_the_extensible_header_is_heard_and_goes_to_aisense_under_the_plain_one(tmp_path):
+    classic = codec.encode(TIMED, "audible")
+    heard = tmp_path / "extensible.wav"
+    heard.write_bytes(extensible(classic[44:]))
+    said = process.handle(request("command", "decode", file=str(heard), engine="local"), clock=lambda: NOW)
+    assert said["exit_code"] == 0 and said["result"]["status"] == "heard" and said["result"]["card"]["name"] == "rom-42", "read here as the same PCM"
+    sent = []
+
+    def decode(sound, mode):
+        sent.append(sound)
+        return {"data_base64": "", "byte_length": len(TIMED), "text": TIMED.decode(), "protocol": "aisense-audio-v2", "corrected_bits": 0, "mode": "audible"}
+
+    said = process.handle(request("command", "decode", file=str(heard)), decode=decode, clock=lambda: NOW)
+    assert said["result"]["status"] == "heard" and sent == [classic], "aisense gets the same samples under the plain PCM header it reads"
+
+
+def extensible(pcm, rate=48000, channels=1, subtype=None, valid=16):
+    """PCM under a WAVE_FORMAT_EXTENSIBLE header, as many recorders write it."""
+    import struct
+
+    fmt = (struct.pack("<HHIIHH", 0xFFFE, channels, rate, rate * channels * 2, channels * 2, 16)
+           + struct.pack("<HHI", 22, valid, 4 if channels == 1 else 3) + (subtype or codec.PCM_SUBTYPE))
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(pcm)) + pcm
+    return b"RIFF" + struct.pack("<I", len(body)) + body
 
 
 def test_the_local_engine_turns_down_a_file_it_does_not_read(tmp_path):
@@ -445,15 +559,15 @@ def test_what_aisense_answers_when_it_cannot():
     with pytest.raises(service.Refused) as refused:
         service.decode(b"RIFF", "auto", opener_answering(400, json.dumps({"error": "Use PCM16 WAV.", "fix": "Check the format."}).encode()))
     assert refused.value.reason == "not_readable" and "Use PCM16 WAV." in refused.value.fix
-    with pytest.raises(service.Unreachable) as busy:
+    with pytest.raises(service.Unreachable) as limited:
         service.encode("x", "audible", opener_answering(429, b"{}", {"Retry-After": "3600"}))
-    assert busy.value.reason == "rate_limited" and busy.value.retry_after == "3600" and "3600 seconds" in busy.value.fix
-    with pytest.raises(service.Unreachable) as busy:
+    assert limited.value.reason == "rate_limited" and limited.value.retry_after == "3600" and "3600 seconds" in limited.value.fix and limited.value.answered is True
+    with pytest.raises(service.Unreachable) as full:
         service.decode(b"RIFF", "auto", opener_answering(503, b"{}", {"Retry-After": "20"}))
-    assert busy.value.reason == "service_busy" and busy.value.retry_after == "20"
+    assert full.value.reason == "service_busy" and full.value.retry_after == "20" and full.value.answered is True
     with pytest.raises(service.Unreachable) as down:
         service.encode("x", "audible", opener_answering(502, b"bad gateway"))
-    assert down.value.reason == "service_unreachable" and "HTTP 502" in down.value.fix
+    assert down.value.reason == "service_unreachable" and "HTTP 502" in down.value.fix and down.value.answered is True
 
 
 def test_a_network_that_fails_is_unreachable_and_says_what_to_look_at():
@@ -468,7 +582,7 @@ def test_a_network_that_fails_is_unreachable_and_says_what_to_look_at():
 
     with pytest.raises(service.Unreachable) as stopped:
         service.encode("x", "audible", refusing)
-    assert stopped.value.reason == "service_unreachable" and "could not be reached" in stopped.value.fix
+    assert stopped.value.reason == "service_unreachable" and "could not be reached" in stopped.value.fix and stopped.value.answered is False
     with pytest.raises(service.Unreachable) as stopped:
         service.decode(b"RIFF", "auto", untrusted)
     assert "SSL_CERT_FILE" in stopped.value.fix and "never switched off" in stopped.value.fix

@@ -56,9 +56,10 @@ The engine makes and reads the sound. aisense, the default, does it at
 aisenseapi.com. local does it on this machine, with a port of aisense's own implementation of its protocol, aisense-audio-v2: the same sound byte for
 byte, read the same way, and neither the card nor the recording leaves the
 machine. It is `--engine local` on the command line and `engine: local` over
-MCP. When aisenseapi.com cannot be reached, the add-on makes or reads the sound
-here instead and says so, with `engine: local` and a `fallback` in the answer.
-A recording in which aisense heard nothing is not read again here, since it
+MCP. When aisenseapi.com cannot be reached or cannot do it, the add-on makes or
+reads the sound here instead and says so, with `engine: local` and a `fallback`
+in the answer: its `sent` is `yes` when aisenseapi.com answered, so it had the
+card or the recording, and `maybe` when the connection failed. A recording in which aisense heard nothing is not read again here, since it
 would hear nothing either. Every answer says which engine did the work.
 
 ## The flow

@@ -11,6 +11,7 @@ now. An answer that is not what the endpoint documents is unreachable here,
 never guessed at.
 """
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -30,11 +31,14 @@ AGENT = "aamio-earshot/" + __version__
 
 
 class Unreachable(Exception):
-    def __init__(self, reason, fix, retry_after=None):
+    """aisenseapi.com did not do it. answered is True when it sent an answer back, so the request, with the card or the recording, had reached it."""
+
+    def __init__(self, reason, fix, retry_after=None, answered=False):
         super().__init__(fix)
         self.reason = reason
         self.fix = fix
         self.retry_after = retry_after
+        self.answered = answered
 
 
 class Refused(Exception):
@@ -73,10 +77,16 @@ def _post(path, body, content_type, limit, opener):
         if "CERTIFICATE_VERIFY_FAILED" in str(reason):
             raise Unreachable("service_unreachable", "The certificate of aisenseapi.com could not be verified on this machine. If the site opens in a browser, this machine's store may lack the root: SSL_CERT_FILE can point Python at a CA bundle. Verification is never switched off.") from None
         raise Unreachable("service_unreachable", "aisenseapi.com, which makes and reads the sound, could not be reached: %s. Check the network and try again." % reason) from None
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, http.client.HTTPException) as error:
         raise Unreachable("service_unreachable", "aisenseapi.com, which makes and reads the sound, could not be reached: %s. Check the network and try again." % error.__class__.__name__) from None
-    with response:
-        return response.status, response.headers, response.read(limit + 1)
+    # Reading the answer can fail as well, a timeout or a connection cut halfway,
+    # and that is aisenseapi.com unreachable too, not an error out of the add-on:
+    # the local engine takes over. It had the request by then.
+    try:
+        with response:
+            return response.status, response.headers, response.read(limit + 1)
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        raise Unreachable("service_unreachable", "aisenseapi.com answered, and the answer broke off: %s. Try again." % error.__class__.__name__, answered=True) from None
 
 
 def _words(payload):
@@ -96,13 +106,13 @@ def _failure(status, headers, payload, done, refused):
     retry = headers.get("Retry-After") if headers is not None else None
     later = (" Try again after %s seconds." % retry) if retry else " Try again later."
     if status == 429:
-        return Unreachable("rate_limited", "aisenseapi.com counts requests per address and day, and this address has used its share for now." + later, retry)
+        return Unreachable("rate_limited", "aisenseapi.com counts requests per address and day, and this address has used its share for now." + later, retry, answered=True)
     if status == 503:
-        return Unreachable("service_busy", "aisenseapi.com cannot serve this right now." + later, retry)
+        return Unreachable("service_busy", "aisenseapi.com cannot serve this right now." + later, retry, answered=True)
     if 400 <= status < 500:
         error, fix = _words(payload)
         return Refused(refused, ("aisenseapi.com would not take it: %s %s" % (error or "HTTP %d." % status, fix or "")).strip())
-    return Unreachable("service_unreachable", "aisenseapi.com answered HTTP %d, so nothing was %s." % (status, done) + later)
+    return Unreachable("service_unreachable", "aisenseapi.com answered HTTP %d, so nothing was %s." % (status, done) + later, answered=True)
 
 
 def encode(card, mode, opener=None):
@@ -112,7 +122,7 @@ def encode(card, mode, opener=None):
     if status != 200:
         raise _failure(status, headers, payload, "played", "service_refused")
     if not is_wav(payload) or len(payload) > MAX_SOUND_BYTES:
-        raise Unreachable("service_answered_something_else", "aisenseapi.com answered with something other than the WAV file it documents, so nothing was played. Try again later.")
+        raise Unreachable("service_answered_something_else", "aisenseapi.com answered with something other than the WAV file it documents, so nothing was played. Try again later.", answered=True)
     return payload
 
 
@@ -130,5 +140,5 @@ def decode(sound, mode, opener=None):
     except (ValueError, UnicodeDecodeError):
         said = None
     if not isinstance(said, dict) or not isinstance(said.get("data_base64"), str):
-        raise Unreachable("service_answered_something_else", "aisenseapi.com answered with something other than the JSON it documents, so nothing was read. Try again later.")
+        raise Unreachable("service_answered_something_else", "aisenseapi.com answered with something other than the JSON it documents, so nothing was read. Try again later.", answered=True)
     return said

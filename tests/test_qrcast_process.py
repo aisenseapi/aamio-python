@@ -23,6 +23,7 @@ from aamio import addon_process, addons, cli, mcp_server
 from aamio.runtime import Runtime
 from aamio_qrcast import __version__ as ADDON_VERSION, camera, card, process, reader, screen, service, symbol
 from aamio_earshot import card as sound_card
+from local_aisense import Receiver, busy, cut, direct, stall
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOURCE = os.pathsep.join([os.path.join(HERE, "..", "src"), os.path.join(HERE, "..", "addons", "qrcast", "src")])
@@ -231,13 +232,82 @@ def test_aisense_makes_the_code_when_asked_and_only_as_png(tmp_path):
 
 def test_when_aisense_cannot_be_reached_the_code_is_made_here_and_the_answer_says_so():
     screen_ = Screen()
-    aisense = Aisense(error=service.Unreachable("service_busy", "aisenseapi.com cannot serve this right now.", "5"))
+    aisense = Aisense(error=service.Unreachable("service_busy", "aisenseapi.com cannot serve this right now.", "5", answered=True))
     said = run(request("command", "show", address=ADDRESS, engine="aisense"), aisense, display=screen_)
     result = said["result"]
-    assert said["exit_code"] == 0 and result["status"] == "shown" and result["engine"] == "local" and result["fallback"] == {"from": "aisense", "reason": "service_busy"}
-    assert "nothing went to it" in result["engine_note"] and result["code"]["error_correction"] == "M" and screen_.shown
+    assert said["exit_code"] == 0 and result["status"] == "shown" and result["engine"] == "local"
+    assert result["fallback"] == {"from": "aisense", "reason": "service_busy", "sent": "yes"}, "aisense answered, so it had the card"
+    assert "The card had gone to aisenseapi.com with the request." in result["engine_note"] and "nothing went" not in result["engine_note"]
+    assert result["code"]["error_correction"] == "M" and screen_.shown
+    said = run(request("command", "show", address=ADDRESS, engine="aisense"), Aisense(error=service.Unreachable("service_unreachable", "aisenseapi.com could not be reached.")), display=Screen())
+    assert said["result"]["fallback"] == {"from": "aisense", "reason": "service_unreachable", "sent": "maybe"}
+    assert "The card may have reached aisenseapi.com before the connection failed." in said["result"]["engine_note"]
     said = run(request("command", "show", address=ADDRESS, engine="aisense"), Aisense(error=service.Refused("service_refused", "aisenseapi.com would not take it.")))
     assert said["exit_code"] == 2 and said["result"]["reason"] == "service_refused", "a refusal is not a reason to make it here instead"
+
+
+def test_a_code_made_here_after_aisense_answered_says_the_card_had_gone_there(monkeypatch, tmp_path):
+    with Receiver(busy) as aisense:
+        monkeypatch.setattr(service, "BASE", aisense.base)
+        said = process.handle(request("command", "show", address=ADDRESS, name="stue-tv", engine="aisense"), encode=lambda text: service.encode(text, opener=direct),
+                              display=Screen(), clock=lambda: NOW)
+        result = said["result"]
+        assert json.loads(aisense.bodies[0]) == {"data": CARD}, "the card had reached it whole when it answered 503"
+        assert said["exit_code"] == 0 and result["engine"] == "local" and result["fallback"] == {"from": "aisense", "reason": "service_busy", "sent": "yes"}
+        assert "answered but did not do it (service_busy)" in result["engine_note"] and "The card had gone to aisenseapi.com" in result["engine_note"]
+        data = symbol.png(symbol.encode(CARD), scale=4)
+        said = process.handle(request("command", "read", file=picture(tmp_path, data), engine="aisense"), decode=lambda picture_, kind: service.decode(picture_, kind, opener=direct),
+                              read_local=Local(), clock=lambda: NOW)
+        result = said["result"]
+        assert data in aisense.bodies[1], "the picture had reached it whole"
+        assert result["status"] == "seen" and result["engine"] == "local" and result["fallback"]["sent"] == "yes" and "The picture had gone to aisenseapi.com" in result["engine_note"]
+
+
+@pytest.mark.parametrize("answer,reasons", [(cut, ("service_unreachable", "service_answered_something_else")), (stall, ("service_unreachable",))])
+def test_an_answer_that_breaks_off_is_done_here_too(monkeypatch, tmp_path, answer, reasons):
+    monkeypatch.setattr(service, "TIMEOUT", 0.5)
+    with Receiver(answer) as aisense:
+        monkeypatch.setattr(service, "BASE", aisense.base)
+        said = process.handle(request("command", "show", address=ADDRESS, engine="aisense"), encode=lambda text: service.encode(text, opener=direct),
+                              display=Screen(), clock=lambda: NOW)
+        assert said["exit_code"] == 0 and said["result"]["engine"] == "local", "the answer broke off after its head, and the code is made here all the same"
+        assert said["result"]["fallback"]["reason"] in reasons and said["result"]["fallback"]["sent"] == "yes"
+        said = process.handle(request("command", "read", file=picture(tmp_path), engine="aisense"), decode=lambda picture_, kind: service.decode(picture_, kind, opener=direct),
+                              read_local=Local(), clock=lambda: NOW)
+        assert said["result"]["status"] == "seen" and said["result"]["engine"] == "local" and said["result"]["fallback"]["sent"] == "yes"
+
+
+class ShortFile:
+    """A file that takes this many bytes and then says the disk is full."""
+
+    def __init__(self, real, room):
+        self.real = real
+        self.room = room
+
+    def write(self, data):
+        self.real.write(data[:self.room])
+        raise OSError(27, "File too large")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.real.close()
+        return False
+
+
+def test_a_file_that_cannot_be_written_whole_is_not_left_behind(monkeypatch, tmp_path):
+    out = tmp_path / "card.png"
+    monkeypatch.setattr(process, "open", lambda path, mode="r": ShortFile(open(path, mode), 400), raising=False)
+    said = run(request("command", "show", address=ADDRESS, out=str(out)))
+    assert said["exit_code"] == 2 and said["result"]["reason"] == "out_not_written" and "File too large" in said["result"]["fix"]
+    assert not out.exists(), "the 400 bytes written are taken away again"
+    screen_ = Screen()
+    said = run(request("command", "show", address=ADDRESS), display=screen_)
+    assert said["exit_code"] == 5 and said["result"]["reason"] == "temporary_file_not_written" and screen_.shown == [], "no viewer opens half a picture"
+    monkeypatch.undo()
+    said = run(request("command", "show", address=ADDRESS, out=str(out)))
+    assert said["result"]["status"] == "written" and out.stat().st_size == said["result"]["bytes"], "the same name can be given again"
 
 
 def test_a_screen_that_cannot_show_it_leaves_nothing_behind():
@@ -276,7 +346,8 @@ def test_read_with_aisense_sends_the_picture_and_falls_back_here_when_it_cannot_
     aisense = Aisense(error=service.Unreachable("service_unreachable", "aisenseapi.com could not be reached."))
     said = run(request("tool", "aamio_addon_qrcast_read", file=picture(tmp_path, name="two.png"), engine="aisense"), aisense, local=local)
     result = said["result"]
-    assert result["status"] == "seen" and result["engine"] == "local" and result["fallback"] == {"from": "aisense", "reason": "service_unreachable"} and local.read
+    assert result["status"] == "seen" and result["engine"] == "local" and result["fallback"] == {"from": "aisense", "reason": "service_unreachable", "sent": "maybe"} and local.read
+    assert "The picture may have reached aisenseapi.com before the connection failed." in result["engine_note"]
     said = run(request("tool", "aamio_addon_qrcast_read", file=picture(tmp_path, name="three.png"), engine="aisense"), Aisense(error=service.NothingSeen("aisense found no code in the picture.")), local=Local())
     assert said["exit_code"] == 3 and said["result"]["status"] == "nothing_seen" and said["result"]["engine"] == "aisense" and "fallback" not in said["result"]
 
@@ -352,6 +423,37 @@ def test_scan_refuses_what_it_should_not_open_and_says_when_the_camera_cannot_be
     missing = Camera([], error=camera.Unavailable("no_ffmpeg", "ffmpeg, which reads the camera, is not on this machine."))
     said = run(request("command", "scan"), frames=missing)
     assert said["exit_code"] == 5 and said["result"]["reason"] == "no_ffmpeg" and missing.closed
+
+
+class Clock:
+    def __init__(self, now):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def test_a_card_is_judged_by_the_clock_when_it_was_read_not_when_the_call_began(tmp_path):
+    expires = NOW + 3600
+    text = "aamio:scope/%s?t=%d" % (ADDRESS, expires)
+    for late, status in ((process.SKEW, "seen"), (process.SKEW + 1, "expired"), (140, "expired")):
+        clock = Clock(expires + 100)
+        frames = Camera([(4, 2, "card")], seen={"card": [text]})
+
+        def slow(seconds, which, frames=frames, clock=clock, late=late):
+            clock.now = expires + late
+            yield from frames(seconds, which)
+
+        said = process.handle(request("command", "scan"), frames=slow, read_frame=frames.read, clock=clock)
+        assert said["result"]["status"] == status, "a scan begun 100 seconds after the card ran out, its frame read %d seconds after" % late
+    clock = Clock(expires + 100)
+
+    def decode(picture_, kind):
+        clock.now = expires + process.SKEW + 1
+        return [text]
+
+    said = process.handle(request("command", "read", file=picture(tmp_path), engine="aisense"), decode=decode, read_local=Local(), clock=clock)
+    assert said["result"]["status"] == "expired", "a picture read at aisense is judged when its answer came"
 
 
 # ----------------------------------------------------------------- the camera
@@ -461,6 +563,20 @@ def test_a_camera_that_gives_no_frame_says_why():
     assert failed.value.reason == "no_ffmpeg" and "winget install Gyan.FFmpeg" in failed.value.fix and "aamio addon qrcast read FILE" in failed.value.fix
 
 
+def test_a_camera_that_stops_halfway_is_a_camera_failure_and_not_a_scan_without_a_code():
+    gone = Process(pgm(4, 2, 1), code=1, said=b"[dshow @ 01] Could not read frame\r\nvideo=Logi C270 HD WebCam: I/O error\r\n")
+    stream = camera.frames(20, "Logi C270 HD WebCam", which=lambda name: "ffmpeg", platform="win32", environ={}, popen=ffmpeg(gone))
+    assert next(stream) == (4, 2, bytes([1]) * 8)
+    with pytest.raises(camera.Unavailable) as failed:
+        next(stream)
+    assert failed.value.reason == "camera_failed" and "after 1" in failed.value.fix and "exit code 1" in failed.value.fix and "I/O error" in failed.value.fix
+    for code, status, exit_code in ((1, "unreachable", 5), (0, "nothing_seen", 3)):
+        running = Process(pgm(4, 2, 1) + pgm(4, 2, 2), code=code, said=b"I/O error\n")
+        said = process.handle(request("command", "scan"), read_frame=lambda width, height, gray: [], clock=lambda: NOW,
+                              frames=lambda seconds, chosen, running=running: camera.frames(seconds, "Logi C270 HD WebCam", which=lambda name: "ffmpeg", platform="win32", environ={}, popen=ffmpeg(running)))
+        assert said["result"]["status"] == status and said["exit_code"] == exit_code and said["result"].get("reason") == ("camera_failed" if code else "nothing_seen")
+
+
 # ----------------------------------------------------------------- the screen
 
 class Child:
@@ -555,15 +671,24 @@ def test_aisenses_answers_are_told_apart():
         service.decode(b"png", "png", opener=opener(413, json.dumps({"error": "Request body too large."}).encode()))
     with pytest.raises(service.Unreachable) as busy:
         service.decode(b"png", "png", opener=opener(503, b"{}", {"Retry-After": "5"}))
-    assert busy.value.reason == "service_busy" and busy.value.retry_after == "5"
+    assert busy.value.reason == "service_busy" and busy.value.retry_after == "5" and busy.value.answered is True
     with pytest.raises(service.Unreachable) as limited:
         service.encode(CARD, opener=opener(429, b"{}"))
-    assert limited.value.reason == "rate_limited"
+    assert limited.value.reason == "rate_limited" and limited.value.answered is True
     with pytest.raises(service.Unreachable) as other:
         service.encode(CARD, opener=opener(200, b'{"qrcode_image": "bm90IGEgcG5n"}'))
-    assert other.value.reason == "service_answered_something_else"
+    assert other.value.reason == "service_answered_something_else" and other.value.answered is True
     with pytest.raises(service.Unreachable):
         service.decode(b"png", "png", opener=opener(200, b"[]"))
+
+    def nowhere(request_, timeout=None):
+        import urllib.error
+
+        raise urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
+
+    with pytest.raises(service.Unreachable) as away:
+        service.encode(CARD, opener=nowhere)
+    assert away.value.reason == "service_unreachable" and away.value.answered is False, "no answer, so perhaps nothing went"
 
 
 # ----------------------------------------------------------------- the reader

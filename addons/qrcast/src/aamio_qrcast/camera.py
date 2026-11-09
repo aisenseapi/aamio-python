@@ -184,6 +184,14 @@ def frames(seconds, camera=None, which=shutil.which, platform=sys.platform, envi
         if got == 0:
             errors.seek(0)
             raise Unavailable("camera_failed", "ffmpeg gave no picture from the camera %s: %s. %s" % (camera, _last_line(errors.read(8192)), privacy_hint(platform)))
+        # The pictures stop either because the time is up, and ffmpeg ends well,
+        # or because the camera went away, and ffmpeg ends with an error. Only the
+        # exit code tells the two apart: without it a camera unplugged halfway
+        # would read as a scan in which no code was seen.
+        if process.returncode not in (None, 0):
+            errors.seek(0)
+            raise Unavailable("camera_failed", "The camera %s stopped giving pictures after %d, and ffmpeg ended with exit code %d: %s. Check that the camera is connected and not taken by another program, and scan again." % (
+                camera, got, process.returncode, _last_line(errors.read(8192))))
     finally:
         if process.poll() is None:
             process.terminate()

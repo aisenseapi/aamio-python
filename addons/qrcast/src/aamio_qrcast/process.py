@@ -16,10 +16,11 @@ goes into an answer, and a frame from the camera never touches the disk.
 
 The engine makes and reads the code: local, the default, on this machine, so
 nothing is sent, or aisense, at aisenseapi.com, which sees the card or the
-picture. When aisenseapi.com cannot be reached, the local engine does the work
-instead and the answer says so. The other way round never happens by itself:
-a picture is only sent when aisense is asked for, and the camera is only ever
-read here.
+picture. When aisenseapi.com cannot be reached or cannot do it, the local
+engine does the work instead, and the answer says so and whether the card or
+the picture had gone to aisenseapi.com all the same. The other way round never
+happens by itself: a picture is only sent when aisense is asked for, and the
+camera is only ever read here.
 """
 
 import json
@@ -110,12 +111,46 @@ def _camera(value):
 
 
 def _fallback(said, error, done):
-    """What an answer says when aisenseapi.com could not be reached and the work was done here."""
+    """What an answer says when aisenseapi.com did not do the work and it was done here.
+
+    The request went out before anything failed, so the card or the picture may
+    be at aisenseapi.com all the same: certainly when it answered, with a 503
+    say, and perhaps when the connection broke. sent says which, yes or maybe.
+    """
     if error is not None:
-        said["fallback"] = {"from": "aisense", "reason": error.reason}
-        said["engine_note"] = "aisenseapi.com could not be reached (%s), so the %s on this machine instead, and nothing went to it." % (
-            error.reason, "code was made" if done == "made" else "picture was read")
+        answered = getattr(error, "answered", False)
+        what, work = ("card", "the code was made") if done == "made" else ("picture", "the picture was read")
+        said["fallback"] = {"from": "aisense", "reason": error.reason, "sent": "yes" if answered else "maybe"}
+        if answered:
+            said["engine_note"] = "aisenseapi.com answered but did not do it (%s), so %s on this machine instead. The %s had gone to aisenseapi.com with the request." % (error.reason, work, what)
+        else:
+            said["engine_note"] = "aisenseapi.com could not be reached (%s), so %s on this machine instead. The %s may have reached aisenseapi.com before the connection failed." % (error.reason, work, what)
     return said
+
+
+def _write_new(path, data):
+    """data in a new file, whole or not at all: a file that could not be written to the end is removed again,
+    as this call made it. None, or the reason it was not written and the error."""
+    try:
+        handle = open(path, "xb")
+    except FileExistsError:
+        return "out_exists", None
+    except OSError as failure:
+        return "out_not_written", failure
+    try:
+        with handle:
+            handle.write(data)
+    except OSError as failure:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return "out_not_written", failure
+    return None, None
+
+
+def _why(failure):
+    return (failure.strerror or str(failure)) if failure is not None else "unknown error"
 
 
 def _when(seconds):
@@ -207,20 +242,23 @@ def show(arguments, kind, encode, display, now):
         said["code"] = code
     said = _fallback(said, error, "made")
     if out is not None:
-        try:
-            with open(out, "xb") as handle:
-                handle.write(picture)
-        except FileExistsError:
+        reason, failure = _write_new(out, picture)
+        if reason == "out_exists":
             return refused("out_exists", "%s is there already and was left as it is. Give the name of a new file." % out)
-        except OSError as failure:
-            return refused("out_not_written", "%s could not be written: %s." % (out, failure.strerror or failure))
+        if reason is not None:
+            return refused("out_not_written", "%s could not be written whole: %s. Nothing was left there, so the same name can be given again." % (out, _why(failure)))
         how = ("Drawn as text, it reads on a terminal with a dark background; on a light one, use .png or .svg. " if fmt == "text" else "")
         return dict(said, status="written", file=out, format=fmt, bytes=len(picture),
                     note="Nothing was shown. %sShow the whole code with its white margin where the agents with a camera can see it: a cropped or squeezed code may not be read." % how)
-    folder = tempfile.mkdtemp(prefix="aamio-qrcast-")
+    try:
+        folder = tempfile.mkdtemp(prefix="aamio-qrcast-")
+    except OSError as failure:
+        return unreachable("no_temporary_folder", "No private folder could be made in the temporary directory for the picture: %s. Check the temporary directory." % _why(failure))
     path = os.path.join(folder, "card.png")
-    with open(path, "wb") as handle:
-        handle.write(picture)
+    reason, failure = _write_new(path, picture)
+    if reason is not None:
+        shutil.rmtree(folder, ignore_errors=True)
+        return unreachable("temporary_file_not_written", "The picture could not be written whole in the temporary directory for the viewer: %s. Check the space there." % _why(failure))
     try:
         viewer = display(path)
     except screen.Unavailable as failure:
@@ -264,8 +302,9 @@ def _cards_seen(texts, kind, now):
     return {"status": "not_understood", "reason": other[0]["reason"], "seen": other[:SEEN_KEPT], "note": NOT_UNDERSTOOD}
 
 
-def _seen_in(data, picture_kind, kind, engine, decode, read_local, now):
-    """What a picture carries, read by the engine asked for, or here when aisense cannot be reached."""
+def _seen_in(data, picture_kind, kind, engine, decode, read_local, clock):
+    """What a picture carries, read by the engine asked for, or here when aisense cannot be reached.
+    A card is judged by the clock when it has been read, not when the call began."""
     used = engine
     reserve = None
     try:
@@ -287,10 +326,10 @@ def _seen_in(data, picture_kind, kind, engine, decode, read_local, now):
         return _fallback(refused(error.reason, error.fix, engine=used), reserve, "read")
     if not texts:
         return _fallback({"status": "nothing_seen", "reason": "nothing_seen", "fix": NOTHING_HERE, "engine": used}, reserve, "read")
-    return _fallback(dict(_cards_seen(texts, kind, now), engine=used), reserve, "read")
+    return _fallback(dict(_cards_seen(texts, kind, clock()), engine=used), reserve, "read")
 
 
-def read_file(arguments, kind, decode, read_local, now):
+def read_file(arguments, kind, decode, read_local, clock):
     try:
         engine = _engine(arguments.get("engine"))
     except card.Refused as error:
@@ -309,10 +348,12 @@ def read_file(arguments, kind, decode, read_local, now):
     picture_kind = reader.kind_of(data[:16])
     if picture_kind is None:
         return refused("not_a_picture", "%s is not a PNG, JPEG, GIF or WebP picture. Take the picture in one of those formats, or convert it." % name)
-    return _seen_in(data, picture_kind, kind, engine, decode, read_local, now)
+    return _seen_in(data, picture_kind, kind, engine, decode, read_local, clock)
 
 
-def scan(arguments, kind, frames, read_frame, now):
+def scan(arguments, kind, frames, read_frame, clock):
+    """Frames from the camera until a card is read in one. A scan lasts up to a minute, so each frame's codes are
+    judged by the clock when that frame was read: a card that runs out halfway through is turned down."""
     try:
         seconds = _whole(arguments.get("seconds"), SECONDS_MIN, SECONDS_MAX, SECONDS_DEFAULT, "seconds")
         chosen = _camera(arguments.get("camera"))
@@ -330,7 +371,7 @@ def scan(arguments, kind, frames, read_frame, now):
                 return unreachable(error.reason, error.fix, engine="local")
             if not texts:
                 continue
-            said = _cards_seen(texts, kind, now)
+            said = _cards_seen(texts, kind, clock())
             if said["status"] in ("seen", "expired"):
                 return dict(said, engine="local", frames=count, frame_size=[width, height])
             for item in said["seen"]:
@@ -356,7 +397,8 @@ def handle(request, encode=None, decode=None, read_local=None, display=None, fra
     display = display or screen.show
     frames = frames or camera.frames
     read_frame = read_frame or reader.read_frame
-    now = (clock or time.time)()
+    clock = clock or time.time
+    now = clock()
     if not isinstance(request, dict) or request.get("aamio_addon") != CONTRACT:
         return answer(refused("not_contract_2", "This add-on speaks contract %d of aamio's add-ons, and the request is not on it. Upgrade aamio, or install the version of aamio-qrcast made for yours." % CONTRACT))
     kind = request.get("kind")
@@ -370,9 +412,9 @@ def handle(request, encode=None, decode=None, read_local=None, display=None, fra
     if short == "show":
         return answer(show(arguments, kind, encode, display, now))
     if short == "read":
-        return answer(read_file(arguments, kind, decode, read_local, now))
+        return answer(read_file(arguments, kind, decode, read_local, clock))
     if short == "scan":
-        return answer(scan(arguments, kind, frames, read_frame, now))
+        return answer(scan(arguments, kind, frames, read_frame, clock))
     return answer(refused("unknown_call", "The add-on %s has no %s called %s. aamio addon %s --help lists its commands, and aamio addon list its tools." % (NAME, kind, name, NAME)))
 
 
