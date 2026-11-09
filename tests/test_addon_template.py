@@ -72,6 +72,32 @@ def test_rename_refuses_a_name_the_core_would_not_take(tmp_path):
     assert (copy / "python" / "src" / "aamio_example").exists(), "nothing was changed"
 
 
+def test_rename_runs_once_and_says_so_when_it_is_run_again(tmp_path):
+    php_half = ("aamio-addon.json", "composer.json", "autoload.php", "process.php", "src", "tests")
+    for halves in ("both", "php", "python"):
+        copy = tmp_path / halves
+        shutil.copytree(TEMPLATE, copy, ignore=IGNORE)
+        if halves == "php":
+            shutil.rmtree(copy / "python")
+        if halves == "python":
+            for name in php_half:
+                target = copy / name
+                shutil.rmtree(target) if target.is_dir() else target.unlink()
+        first = run(sys.executable, str(copy / "rename.py"), "weather")
+        assert first.returncode in (0, 1) and "example is weather now" in first.stdout, (halves, first.stdout, first.stderr)
+        again = run(sys.executable, str(copy / "rename.py"), "garden")
+        assert again.returncode == 2 and "Nothing was changed" in again.stderr and "is named weather" in again.stderr and "garden now" not in again.stdout, (halves, again.stdout, again.stderr)
+        if halves != "python":
+            assert json.loads((copy / "aamio-addon.json").read_text(encoding="utf-8"))["name"] == "weather", "the first name stays"
+        if halves != "php":
+            assert json.loads((copy / "python" / "src" / "aamio_weather" / "aamio-addon.json").read_text(encoding="utf-8"))["name"] == "weather"
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    shutil.copy(os.path.join(TEMPLATE, "rename.py"), empty / "rename.py")
+    done = run(sys.executable, str(empty / "rename.py"), "weather")
+    assert done.returncode == 2 and "neither half" in done.stderr
+
+
 def test_the_template_s_own_python_tests_pass(tmp_path):
     copy = tmp_path / "copy"
     shutil.copytree(TEMPLATE, copy, ignore=IGNORE)

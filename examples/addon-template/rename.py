@@ -11,6 +11,8 @@ Composer package your-vendor/aamio-NAME, where your-vendor is yours to set in
 composer.json. README.md and LICENSE are left as they are: write your own.
 """
 
+import glob
+import json
 import os
 import re
 import subprocess
@@ -28,14 +30,45 @@ FILES = (
 )
 
 
+def _name_in(path):
+    """The name a manifest gives, or None when it cannot be read."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            name = json.load(handle).get("name")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return name if isinstance(name, str) else None
+
+
+def _halves(here):
+    """The name in the manifest of each half this copy has: the PHP half at the top, with composer.json, and the Python half under python/."""
+    found = {}
+    if os.path.exists(os.path.join(here, "composer.json")):
+        found["PHP"] = _name_in(os.path.join(here, "aamio-addon.json"))
+    if os.path.isdir(os.path.join(here, "python")):
+        manifests = glob.glob(os.path.join(here, "python", "src", "aamio_*", "aamio-addon.json"))
+        found["Python"] = _name_in(manifests[0]) if len(manifests) == 1 else None
+    return found
+
+
 def main(argv):
     if len(argv) != 1 or NEW.fullmatch(argv[0]) is None or argv[0] in TAKEN:
         print("Give the new name: 1 to 32 lowercase letters and digits, starting with a letter, and not %s." % ", ".join(TAKEN), file=sys.stderr)
         return 2
     new = argv[0]
     package = os.path.join(HERE, "python", "src", "aamio_" + OLD)
-    if not os.path.isdir(package) and not os.path.exists(os.path.join(HERE, "composer.json")):
-        print("This copy has been renamed already, or has neither half: nothing was changed.", file=sys.stderr)
+    # Each half there is must still be the template's own, named example in its
+    # manifest, before a file is touched: a copy renamed once has no example
+    # left to replace, and a second run would say it gave the new name while
+    # the add-on kept the first.
+    halves = _halves(HERE)
+    if not halves:
+        print("This copy has neither half, PHP or Python: nothing was changed.", file=sys.stderr)
+        return 2
+    named = ["the %s half is named %s" % (half, name) if name else "the %s half has no manifest that can be read" % half
+             for half, name in sorted(halves.items()) if name != OLD]
+    if named:
+        print("Nothing was changed: rename.py names a fresh copy of the template, once, and here %s. Rename by hand, or start again from a fresh copy." % " and ".join(named), file=sys.stderr)
         return 2
     pairs = (("AamioExample", "Aamio" + new.capitalize()), ("aamio_addon_%s_" % OLD, "aamio_addon_%s_" % new), ("aamio_" + OLD, "aamio_" + new), ("aamio-" + OLD, "aamio-" + new))
     changed = 0
