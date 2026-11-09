@@ -4,6 +4,12 @@ aamio-earshot, the add-on, called aamio-sound up to 0.2.0. Dates are the day the
 tagged on release, and the two are the same day. Every entry says what changed
 for somebody using it.
 
+## 0.3.1 - 2026-11-09
+
+- The README says how to enable the add-on under its new name, `aamio addon enable earshot`.
+  0.3.0 still said enable sound, which is no longer there, and opened with the
+  old name.
+
 ## 0.3.0 - 2026-11-09
 
 - aamio-sound is now aamio-earshot: the package, the command `aamio addon

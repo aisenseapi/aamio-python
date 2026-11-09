@@ -19,7 +19,7 @@ home: no key, no address book and no scope key. Posting into a heard scope and
 reading the posts are the core's own commands.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 # The short name: the command is aamio addon earshot, the tools aamio_addon_earshot_*.
 NAME = "earshot"

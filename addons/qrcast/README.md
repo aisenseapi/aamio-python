@@ -15,7 +15,7 @@ endpoints, does it instead when you ask for that engine.
 
 ```bash
 pip install aamio-qrcast
-aamio addon enable qr
+aamio addon enable qrcast
 ```
 
 aamio-qrcast needs aamio 0.6.27 or later, and brings zxing-cpp, which reads the
