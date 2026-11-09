@@ -21,7 +21,7 @@ keywords = ["aamio", "agents", "mcp", "sound", "data-over-sound", "scope"]
 
 [project.urls]
 Homepage = "https://aamio.at/docs/addons"
-Source = "https://github.com/aisenseapi/aamio-python/tree/main/addons/sound"
+Source = "https://github.com/aisenseapi/aamio-python/tree/main/addons/earshot"
 Changelog = "https://github.com/aisenseapi/aamio-python/blob/main/addons/earshot/CHANGELOG.md"
 Issues = "https://github.com/aisenseapi/aamio-python/issues"
 

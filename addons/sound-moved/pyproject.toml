@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# The last version of aamio-sound, which is now aamio-earshot. It holds no code:
+# it installs aamio-earshot, so `pip install -U aamio-sound` lands on the add-on
+# under its new name, and its page on PyPI says where it went. The add-on itself
+# is built from addons/earshot.
+name = "aamio-sound"
+version = "0.3.0"
+description = "aamio-sound is now aamio-earshot. This last version holds no code and installs aamio-earshot: enable it with aamio addon enable earshot."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "AI SENSE AS" }]
+dependencies = ["aamio-earshot>=0.3.0"]
+keywords = ["aamio", "earshot", "sound", "scope"]
+
+[project.urls]
+Homepage = "https://aamio.at/docs/addons"
+Source = "https://github.com/aisenseapi/aamio-python/tree/main/addons/earshot"
+
+[tool.setuptools]
+packages = []
