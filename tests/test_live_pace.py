@@ -375,16 +375,16 @@ def test_every_live_file_takes_its_turn():
     # day it uses the client it writes too, and is counted with the others.
     reader = open(os.path.join(HERE, "test_domain_fetch.py"), encoding="utf-8").read()
     assert "aamio_client" not in reader and "AamioClient" not in reader, "test_domain_fetch.py uses the client now, and must take its turn"
-    # test_sound_process.py, test_sound_codec.py and test_qr_process.py call
+    # test_earshot_process.py, test_earshot_codec.py and test_qrcast_process.py call
     # aisenseapi.com and never aamio.at, so they have no turn to take either
     # (8 November 2026). The same guard holds them to that.
-    for name in ("test_sound_process.py", "test_sound_codec.py", "test_qr_process.py"):
+    for name in ("test_earshot_process.py", "test_earshot_codec.py", "test_qrcast_process.py"):
         sound = open(os.path.join(HERE, name), encoding="utf-8").read()
         assert "aamio_client" not in sound and "AamioClient" not in sound and "aamio.at" not in sound, "%s reaches aamio.at now, and must take its turn" % name
 
     live = [name for name in sorted(os.listdir(HERE)) if name.startswith("test_") and name.endswith(".py")
             and 'os.environ.get("AAMIO_LIVE") != "1"' in open(os.path.join(HERE, name), encoding="utf-8").read()
-            and name not in ("test_live_gate.py", "test_live_pace.py", "test_domain_fetch.py", "test_sound_process.py", "test_sound_codec.py", "test_qr_process.py")]
+            and name not in ("test_live_gate.py", "test_live_pace.py", "test_domain_fetch.py", "test_earshot_process.py", "test_earshot_codec.py", "test_qrcast_process.py")]
 
     assert live == ["test_e2e.py", "test_first_exchange.py", "test_robust.py"], live
 

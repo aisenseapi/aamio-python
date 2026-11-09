@@ -19,9 +19,9 @@ import urllib.request
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "sound", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "earshot", "src"))
 
-from aamio_sound import codec  # noqa: E402
+from aamio_earshot import codec  # noqa: E402
 
 CARD = b"aamio:scope/k7rq2m4xw5tbz3yd6ena?n=rom-42&t=1794200000"
 # sha256 of encode(b"Hello", mode): what aisenseapi.com made for "Hello" on 8 November 2026, byte for byte.
@@ -148,13 +148,13 @@ def test_php_round_takes_halves_away_from_zero():
 @pytest.mark.skipif(os.environ.get("AAMIO_LIVE") != "1", reason="calls aisenseapi.com; set AAMIO_LIVE=1")
 @pytest.mark.parametrize("mode", codec.MODES)
 def test_live_aisense_makes_the_same_bytes_and_each_reads_the_other(mode):
-    headers = {"User-Agent": "aamio-sound-test", "Content-Type": "application/json"}
+    headers = {"User-Agent": "aamio-earshot-test", "Content-Type": "application/json"}
     req = urllib.request.Request("https://aisenseapi.com/services/v1/audio_encode", data=json.dumps({"data": CARD.decode(), "input_encoding": "utf8", "mode": mode}).encode(), headers=headers)
     with urllib.request.urlopen(req, timeout=60) as answer:
         theirs = answer.read()
     mine = codec.encode(CARD, mode)
     assert mine == theirs, "the same sound, byte for byte"
-    req = urllib.request.Request("https://aisenseapi.com/services/v1/audio_decode/auto", data=mine, headers={"User-Agent": "aamio-sound-test", "Content-Type": "audio/wav"})
+    req = urllib.request.Request("https://aisenseapi.com/services/v1/audio_decode/auto", data=mine, headers={"User-Agent": "aamio-earshot-test", "Content-Type": "audio/wav"})
     with urllib.request.urlopen(req, timeout=60) as answer:
         assert json.load(answer)["text"] == CARD.decode()
     assert codec.decode(theirs, "auto")["data"] == CARD

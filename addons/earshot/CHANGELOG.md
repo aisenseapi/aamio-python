@@ -1,8 +1,16 @@
 # Changelog
 
-aamio-sound, the add-on. Dates are the day the version was committed; it is
+aamio-earshot, the add-on, called aamio-sound up to 0.2.0. Dates are the day the version was committed; it is
 tagged on release, and the two are the same day. Every entry says what changed
 for somebody using it.
+
+## 0.3.0 - 2026-11-09
+
+- aamio-sound is now aamio-earshot: the package, the command `aamio addon
+  earshot` and the MCP tools aamio_addon_earshot_broadcast,
+  aamio_addon_earshot_listen and aamio_addon_earshot_decode. Install it with
+  `pip install aamio-earshot` and enable it with `aamio addon enable earshot`.
+  The card, the sound and the two engines are those of 0.2.0.
 
 ## 0.2.0 - 2026-11-08
 

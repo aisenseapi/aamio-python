@@ -7,7 +7,7 @@ modules large: the same card at level H would be version 8, 49 modules wide.
 The quiet zone around the code is the four modules the standard asks for.
 
 Reed-Solomon over GF(256) with the primitive polynomial 0x11d and first
-consecutive root 0: the field and generator of the sound add-on's codec, which
+consecutive root 0: the field and generator of the earshot add-on's codec, which
 QR uses too. Of the eight masks, the one with the lowest penalty by the four
 rules of the standard is used, the first of them on a tie, with the rules
 counted as ZXing counts them and the area outside the code taken as light. The

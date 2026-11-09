@@ -1,6 +1,6 @@
 """The process the core runs for each call of this add-on: one request on standard input, one answer on standard output.
 
-    python -m aamio_sound.process < request.json
+    python -m aamio_earshot.process < request.json
 
 The request and the answer are contract 2 of aamio's add-ons, written up at
 https://aamio.at/docs/addons. Nothing here needs the home: a card carries a
@@ -9,7 +9,7 @@ data, untrusted, for the core's own scope add and board post.
 
     kind    command | tool | probe
     name    card | broadcast | listen | decode
-            aamio_addon_sound_broadcast | aamio_addon_sound_listen | aamio_addon_sound_decode
+            aamio_addon_earshot_broadcast | aamio_addon_earshot_listen | aamio_addon_earshot_decode
 
 An answer is {"result": …, "exit_code": n, "is_error": bool}. The sound itself
 never goes into an answer: the longest card is a WAV of a megabyte, over what an
@@ -35,7 +35,7 @@ import wave
 from . import NAME, __version__, audio, card, codec, service
 
 CONTRACT = 2
-TOOL = "aamio_addon_sound_"
+TOOL = "aamio_addon_earshot_"
 EXIT_CODES = {"card": 0, "played": 0, "written": 0, "heard": 0, "nothing_heard": 3, "not_understood": 3, "expired": 3, "invalid": 2, "unreachable": 5}
 REPEAT_MAX = 3
 SECONDS_DEFAULT = 30
@@ -169,7 +169,7 @@ def card_text(arguments, now):
     except card.Refused as error:
         return refused(error.reason, error.fix)
     return {"status": "card", "card": text, "bytes": len(text.encode("utf-8")), "expires_at": expires,
-            "note": "This is the text the sound carries, and it fits a QR code as well. aamio addon sound broadcast plays it."}
+            "note": "This is the text the sound carries, and it fits a QR code as well. aamio addon earshot broadcast plays it."}
 
 
 def broadcast(arguments, kind, encode, play, pause, now):
@@ -207,7 +207,7 @@ def broadcast(arguments, kind, encode, play, pause, now):
             return refused("out_not_written", "%s could not be written: %s." % (out, error.strerror or error))
         return dict(said, status="written", file=out, bytes=len(sound),
                     note="Nothing was played. Play the whole file, at its own speed, near the agents that listen: a speed change or a lossy conversion damages it.")
-    with tempfile.TemporaryDirectory(prefix="aamio-sound-", ignore_cleanup_errors=True) as folder:
+    with tempfile.TemporaryDirectory(prefix="aamio-earshot-", ignore_cleanup_errors=True) as folder:
         path = os.path.join(folder, "card.wav")
         with open(path, "wb") as handle:
             handle.write(sound)
@@ -270,7 +270,7 @@ def listen(arguments, kind, decode, record, now):
         engine = _engine(arguments.get("engine"))
     except card.Refused as error:
         return refused(error.reason, error.fix)
-    with tempfile.TemporaryDirectory(prefix="aamio-sound-", ignore_cleanup_errors=True) as folder:
+    with tempfile.TemporaryDirectory(prefix="aamio-earshot-", ignore_cleanup_errors=True) as folder:
         path = os.path.join(folder, "heard.wav")
         try:
             recorder = record(seconds, path)
@@ -320,7 +320,7 @@ def handle(request, encode=None, decode=None, play=None, record=None, pause=None
     pause = pause or time.sleep
     now = (clock or time.time)()
     if not isinstance(request, dict) or request.get("aamio_addon") != CONTRACT:
-        return answer(refused("not_contract_2", "This add-on speaks contract %d of aamio's add-ons, and the request is not on it. Upgrade aamio, or install the version of aamio-sound made for yours." % CONTRACT))
+        return answer(refused("not_contract_2", "This add-on speaks contract %d of aamio's add-ons, and the request is not on it. Upgrade aamio, or install the version of aamio-earshot made for yours." % CONTRACT))
     kind = request.get("kind")
     name = request.get("name")
     arguments = request.get("arguments") if isinstance(request.get("arguments"), dict) else {}

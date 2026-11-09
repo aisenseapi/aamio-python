@@ -158,7 +158,7 @@ def frames(seconds, camera=None, which=shutil.which, platform=sys.platform, envi
     """Grey frames from the camera, four a second, for this many seconds, as (width, height, bytes). Closing the generator stops ffmpeg."""
     ffmpeg = find_ffmpeg(which, platform, environ)
     if ffmpeg is None:
-        raise Unavailable("no_ffmpeg", "ffmpeg, which reads the camera, is not on this machine. %s Or take a picture another way and read it with aamio addon qr read FILE (aamio_addon_qr_read)." % install_hint(platform))
+        raise Unavailable("no_ffmpeg", "ffmpeg, which reads the camera, is not on this machine. %s Or take a picture another way and read it with aamio addon qrcast read FILE (aamio_addon_qrcast_read)." % install_hint(platform))
     if camera is None:
         camera = default_camera(ffmpeg, platform, run)
     command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"] + input_for(platform, camera) + [

@@ -33,7 +33,7 @@ MAX_IMAGE_BYTES = 10485760
 MAX_PIXELS = 25000000
 MAX_JSON_BYTES = 1024 * 1024
 TIMEOUT = 30
-AGENT = "aamio-qr/" + __version__
+AGENT = "aamio-qrcast/" + __version__
 NOTHING = "No QR code or barcode was found"
 TYPES = {"png": "image/png", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
 
@@ -131,7 +131,7 @@ def encode(card, opener=None):
 
 def decode(picture, kind, opener=None):
     """Every code aisense read in a picture, one text each. NothingSeen when it found none."""
-    edge = "aamio-qr-" + secrets.token_hex(12)
+    edge = "aamio-qrcast-" + secrets.token_hex(12)
     head = ('--%s\r\nContent-Disposition: form-data; name="qrcode_image"; filename="picture.%s"\r\nContent-Type: %s\r\n\r\n'
             % (edge, kind, TYPES[kind])).encode("ascii")
     body = head + picture + ("\r\n--%s--\r\n" % edge).encode("ascii")

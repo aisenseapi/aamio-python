@@ -26,7 +26,7 @@ MAX_RECORDING_BYTES = 8 * 1024 * 1024
 MAX_SOUND_BYTES = 4 * 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024
 TIMEOUT = 30
-AGENT = "aamio-sound/" + __version__
+AGENT = "aamio-earshot/" + __version__
 
 
 class Unreachable(Exception):

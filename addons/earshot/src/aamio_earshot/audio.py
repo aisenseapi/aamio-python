@@ -2,7 +2,7 @@
 
 Playing uses what the system has: winsound on Windows, afplay on macOS, and on
 Linux paplay, pw-play, aplay or ffplay, with sounddevice as the last resort.
-Recording uses sounddevice, which aamio-sound depends on and whose wheels for
+Recording uses sounddevice, which aamio-earshot depends on and whose wheels for
 Windows and macOS carry PortAudio, then arecord, then sox. A recording is mono
 16-bit PCM at 48 kHz, or 44.1 kHz where the microphone takes nothing else: the
 two rates aisenseapi.com reads.
@@ -147,4 +147,4 @@ def record(seconds, path, which=shutil.which, run=subprocess.run, platform=sys.p
     if failed:
         raise Unavailable("recorder_failed", "Nothing was recorded: %s. Check that a microphone is connected and that this app may use it: macOS asks once for the app the agent runs in, Windows has it under the privacy settings for desktop apps." % "; ".join(failed))
     install = "On Windows, SoX comes with winget install ChrisBagwell.SoX, and is found once the terminal is started again" if platform == "win32" else "Install libportaudio2, alsa-utils or sox"
-    raise Unavailable("no_recorder", "Nothing on this machine records from the microphone: sounddevice found no PortAudio, and neither arecord nor sox is installed. %s, or record the sound another way and read the file with aamio addon sound decode FILE (aamio_addon_sound_decode)." % install)
+    raise Unavailable("no_recorder", "Nothing on this machine records from the microphone: sounddevice found no PortAudio, and neither arecord nor sox is installed. %s, or record the sound another way and read the file with aamio addon earshot decode FILE (aamio_addon_earshot_decode)." % install)

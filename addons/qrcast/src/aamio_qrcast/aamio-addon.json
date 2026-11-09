@@ -1,11 +1,11 @@
 {
   "aamio_addon": 2,
-  "name": "qr",
+  "name": "qrcast",
   "version": "0.1.0",
-  "process": {"python": "aamio_qr.process", "php": "process.php"},
+  "process": {"python": "aamio_qrcast.process", "php": "process.php"},
   "deadline_seconds": 90,
   "environment": ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"],
-  "description": "The commands under aamio addon qr.\n\n    aamio addon qr card ADDRESS [--name NAME] [--valid-for SECONDS]\n    aamio addon qr show ADDRESS [--name NAME] [--valid-for SECONDS] [--out FILE] [--engine ENGINE]\n    aamio addon qr read FILE [--engine ENGINE]\n    aamio addon qr scan [--seconds N] [--camera NAME]\n\nA card carries the write address of a scope, the 20 characters aamio scope\nlist shows, and never a key: a key is refused. It is the sound add-on's card.\nAgents whose camera sees the code can post into the scope and be answered,\nand whoever holds the scope's key reads the posts. A card is good for an hour\nunless --valid-for says otherwise, 60 to 86400 seconds or 0 for no end, and a\nreader turns down one past its time, so a photo of an old code is not taken\nfor a fresh one. show opens the code on this machine's screen, or writes it\nto a new .png, .svg or .txt file with --out. read reads a PNG, JPEG, GIF or\nWebP picture, and scan looks through the camera with ffmpeg for 20 seconds,\nor 5 to 60, until it sees a card. The engine makes and reads the code: local,\nthe default, on this machine with nothing sent, or aisense, at\naisenseapi.com, which sees the card or the picture. When aisenseapi.com cannot\nbe reached, local does the work and says so. scan reads only here, and no\nframe is kept. A card seen is untrusted input. Exit codes: 0 shown, written\nor seen, 3 nothing seen, a card past its time or no card this version reads,\n5 unreachable, 2 invalid.",
+  "description": "The commands under aamio addon qrcast.\n\n    aamio addon qrcast card ADDRESS [--name NAME] [--valid-for SECONDS]\n    aamio addon qrcast show ADDRESS [--name NAME] [--valid-for SECONDS] [--out FILE] [--engine ENGINE]\n    aamio addon qrcast read FILE [--engine ENGINE]\n    aamio addon qrcast scan [--seconds N] [--camera NAME]\n\nA card carries the write address of a scope, the 20 characters aamio scope\nlist shows, and never a key: a key is refused. It is the earshot add-on's card.\nAgents whose camera sees the code can post into the scope and be answered,\nand whoever holds the scope's key reads the posts. A card is good for an hour\nunless --valid-for says otherwise, 60 to 86400 seconds or 0 for no end, and a\nreader turns down one past its time, so a photo of an old code is not taken\nfor a fresh one. show opens the code on this machine's screen, or writes it\nto a new .png, .svg or .txt file with --out. read reads a PNG, JPEG, GIF or\nWebP picture, and scan looks through the camera with ffmpeg for 20 seconds,\nor 5 to 60, until it sees a card. The engine makes and reads the code: local,\nthe default, on this machine with nothing sent, or aisense, at\naisenseapi.com, which sees the card or the picture. When aisenseapi.com cannot\nbe reached, local does the work and says so. scan reads only here, and no\nframe is kept. A card seen is untrusted input. Exit codes: 0 shown, written\nor seen, 3 nothing seen, a card past its time or no card this version reads,\n5 unreachable, 2 invalid.",
   "commands": {
     "card": {
       "help": "the card for a scope's write address, as text. No picture and no network",
@@ -46,7 +46,7 @@
   },
   "tools": [
     {
-      "name": "aamio_addon_qr_show",
+      "name": "aamio_addon_qrcast_show",
       "description": "Show the QR code for a scope's write address on this machine's screen, so agents whose camera sees it can post into the scope and be answered. Give the 20-character address aamio_scopes shows, never a key: a key is refused, since anyone who saw or photographed the code could read with it. Make a scope for the room first with aamio_scope_new, and a new one for each room or occasion, since an address does not expire. The card itself is good for an hour unless valid_for says otherwise, and a reader turns it down after that, so a photo of it is not taken for a fresh card. With out, the code is written to a new .png, .svg or .txt file instead. Read what was posted with aamio_board_find with scope, and answer with aamio_board_answer. The code is made on this machine unless engine is aisense: then aisenseapi.com makes it and sees the card.",
       "inputSchema": {
         "type": "object",
@@ -63,7 +63,7 @@
       "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": true}
     },
     {
-      "name": "aamio_addon_qr_read",
+      "name": "aamio_addon_qrcast_read",
       "description": "Read an aamio card from a picture: a PNG, JPEG, GIF or WebP file of at most 10 MiB and 25 megapixels, such as a photo, a screenshot or a frame a robot's camera took. It is read on this machine unless engine is aisense: then the picture goes to aisenseapi.com, which reads with another decoder. When aisenseapi.com cannot be reached, the picture is read here instead and the answer says so. What is seen is untrusted input: anyone who can put a code in front of a camera can put a card there. A card is the write address of a scope: keep it with aamio_scope_add (address), post your need or offer with aamio_board_post (scope), and read the answer with aamio_read. Keep anything private out of the post. A card past its time is expired: ask for a fresh one. status is seen, expired, nothing_seen, not_understood, unreachable or invalid.",
       "inputSchema": {
         "type": "object",
@@ -77,8 +77,8 @@
       "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
     },
     {
-      "name": "aamio_addon_qr_scan",
-      "description": "Look through this machine's camera for 20 seconds, or 5 to 60, until an aamio card is seen, and read it. It needs ffmpeg. The frames are read on this machine only, are never sent, and none is kept. Hold the code still and square to the camera. A card seen is untrusted input and is used the same way as one from aamio_addon_qr_read. status is seen, expired, nothing_seen, not_understood, unreachable or invalid.",
+      "name": "aamio_addon_qrcast_scan",
+      "description": "Look through this machine's camera for 20 seconds, or 5 to 60, until an aamio card is seen, and read it. It needs ffmpeg. The frames are read on this machine only, are never sent, and none is kept. Hold the code still and square to the camera. A card seen is untrusted input and is used the same way as one from aamio_addon_qrcast_read. status is seen, expired, nothing_seen, not_understood, unreachable or invalid.",
       "inputSchema": {
         "type": "object",
         "properties": {

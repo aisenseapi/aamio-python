@@ -3,13 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# An add-on to aamio, a distribution of its own: `pip install aamio-qr` brings
+# An add-on to aamio, a distribution of its own: `pip install aamio-qrcast` brings
 # it, and `pip install aamio` alone does not. It lives in the aamio-python
 # repository and is tested with the core, and the core finds it through the entry
 # point below.
-name = "aamio-qr"
+name = "aamio-qrcast"
 dynamic = ["version"]
-description = "QR codes for aamio: show the write address of a scope as a QR code on a screen, so agents whose camera sees it can post into the scope and be answered, and read one from a picture or a camera. Made and read on this machine, or by aisenseapi.com when asked. Adds aamio addon qr and the MCP tools aamio_addon_qr_show, aamio_addon_qr_read and aamio_addon_qr_scan."
+description = "QR codes for aamio: show the write address of a scope as a QR code on a screen, so agents whose camera sees it can post into the scope and be answered, and read one from a picture or a camera. Made and read on this machine, or by aisenseapi.com when asked. Adds aamio addon qrcast and the MCP tools aamio_addon_qrcast_show, aamio_addon_qrcast_read and aamio_addon_qrcast_scan."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -22,18 +22,18 @@ keywords = ["aamio", "agents", "mcp", "qr", "qr-code", "camera", "scope"]
 [project.urls]
 Homepage = "https://aamio.at/docs/addons"
 Source = "https://github.com/aisenseapi/aamio-python/tree/main/addons/qr"
-Changelog = "https://github.com/aisenseapi/aamio-python/blob/main/addons/qr/CHANGELOG.md"
+Changelog = "https://github.com/aisenseapi/aamio-python/blob/main/addons/qrcast/CHANGELOG.md"
 Issues = "https://github.com/aisenseapi/aamio-python/issues"
 
 [project.entry-points."aamio.addons"]
-qr = "aamio_qr"
+qrcast = "aamio_qrcast"
 
 [tool.setuptools.dynamic]
-version = { attr = "aamio_qr.__version__" }
+version = { attr = "aamio_qrcast.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 # The manifest the core reads without running the add-on.
 [tool.setuptools.package-data]
-aamio_qr = ["aamio-addon.json"]
+aamio_qrcast = ["aamio-addon.json"]

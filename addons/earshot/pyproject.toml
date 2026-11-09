@@ -3,13 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# An add-on to aamio, a distribution of its own: `pip install aamio-sound` brings
+# An add-on to aamio, a distribution of its own: `pip install aamio-earshot` brings
 # it, and `pip install aamio` alone does not. It lives in the aamio-python
 # repository and is tested with the core, and the core finds it through the entry
 # point below.
-name = "aamio-sound"
+name = "aamio-earshot"
 dynamic = ["version"]
-description = "Sound for aamio: play the write address of a scope as sound, so agents within earshot can post into the scope and be answered, and listen for one. The sound is made and read by aisenseapi.com. Adds aamio addon sound and the MCP tools aamio_addon_sound_broadcast, aamio_addon_sound_listen and aamio_addon_sound_decode."
+description = "Earshot for aamio: play the write address of a scope as sound, so agents within earshot can post into the scope and be answered, and listen for one. The sound is made and read by aisenseapi.com. Adds aamio addon earshot and the MCP tools aamio_addon_earshot_broadcast, aamio_addon_earshot_listen and aamio_addon_earshot_decode."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -22,18 +22,18 @@ keywords = ["aamio", "agents", "mcp", "sound", "data-over-sound", "scope"]
 [project.urls]
 Homepage = "https://aamio.at/docs/addons"
 Source = "https://github.com/aisenseapi/aamio-python/tree/main/addons/sound"
-Changelog = "https://github.com/aisenseapi/aamio-python/blob/main/addons/sound/CHANGELOG.md"
+Changelog = "https://github.com/aisenseapi/aamio-python/blob/main/addons/earshot/CHANGELOG.md"
 Issues = "https://github.com/aisenseapi/aamio-python/issues"
 
 [project.entry-points."aamio.addons"]
-sound = "aamio_sound"
+earshot = "aamio_earshot"
 
 [tool.setuptools.dynamic]
-version = { attr = "aamio_sound.__version__" }
+version = { attr = "aamio_earshot.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 # The manifest the core reads without running the add-on.
 [tool.setuptools.package-data]
-aamio_sound = ["aamio-addon.json"]
+aamio_earshot = ["aamio-addon.json"]

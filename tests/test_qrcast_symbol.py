@@ -17,9 +17,9 @@ import zlib
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "qr", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "qrcast", "src"))
 
-from aamio_qr import process, symbol
+from aamio_qrcast import process, symbol
 
 LONGEST = "aamio:scope/k7rq2m4xw5tbz3yd6ena?n=stue-tv-" + "a" * 24 + "&t=1794150000"
 # The fingerprint of each code, sha256 of symbol.fingerprint(): version, mask and every module.

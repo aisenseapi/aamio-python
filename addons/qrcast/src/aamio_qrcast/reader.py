@@ -55,7 +55,7 @@ def _zxing():
     try:
         import zxingcpp
     except ImportError:
-        raise Unreadable("no_reader", "zxing-cpp, which reads the codes on this machine, is not installed: pip install aamio-qr brings it. Or read with engine aisense, which sends the picture to aisenseapi.com.") from None
+        raise Unreadable("no_reader", "zxing-cpp, which reads the codes on this machine, is not installed: pip install aamio-qrcast brings it. Or read with engine aisense, which sends the picture to aisenseapi.com.") from None
     return zxingcpp
 
 
@@ -70,7 +70,7 @@ def read(data):
     try:
         from PIL import Image
     except ImportError:
-        raise Unreadable("no_reader", "Pillow, which opens the picture on this machine, is not installed: pip install aamio-qr brings it. Or read with engine aisense, which sends the picture to aisenseapi.com.") from None
+        raise Unreadable("no_reader", "Pillow, which opens the picture on this machine, is not installed: pip install aamio-qrcast brings it. Or read with engine aisense, which sends the picture to aisenseapi.com.") from None
     if kind_of(data[:16]) is None:
         raise Unreadable("not_a_picture", "This is not a PNG, JPEG, GIF or WebP picture.")
     try:

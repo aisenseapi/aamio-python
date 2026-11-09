@@ -1,6 +1,6 @@
 """The process the core runs for each call of this add-on: one request on standard input, one answer on standard output.
 
-    python -m aamio_qr.process < request.json
+    python -m aamio_qrcast.process < request.json
 
 The request and the answer are contract 2 of aamio's add-ons, written up at
 https://aamio.at/docs/addons. Nothing here needs the home: a card carries a
@@ -9,7 +9,7 @@ data, untrusted, for the core's own scope add and board post.
 
     kind    command | tool | probe
     name    card | show | read | scan
-            aamio_addon_qr_show | aamio_addon_qr_read | aamio_addon_qr_scan
+            aamio_addon_qrcast_show | aamio_addon_qrcast_read | aamio_addon_qrcast_scan
 
 An answer is {"result": …, "exit_code": n, "is_error": bool}. A picture never
 goes into an answer, and a frame from the camera never touches the disk.
@@ -33,7 +33,7 @@ import time
 from . import NAME, __version__, camera, card, reader, screen, service, symbol
 
 CONTRACT = 2
-TOOL = "aamio_addon_qr_"
+TOOL = "aamio_addon_qrcast_"
 EXIT_CODES = {"card": 0, "shown": 0, "written": 0, "seen": 0, "nothing_seen": 3, "not_understood": 3, "expired": 3, "invalid": 2, "unreachable": 5}
 SECONDS_DEFAULT = 20
 SECONDS_MIN = 5
@@ -179,7 +179,7 @@ def card_text(arguments, now):
     except card.Refused as error:
         return refused(error.reason, error.fix)
     return {"status": "card", "card": text, "bytes": len(text.encode("utf-8")), "expires_at": expires,
-            "note": "This is the text the code carries, and the sound add-on carries the same card. aamio addon qr show shows it."}
+            "note": "This is the text the code carries, and the earshot add-on carries the same card. aamio addon qrcast show shows it."}
 
 
 def _good(expires):
@@ -217,7 +217,7 @@ def show(arguments, kind, encode, display, now):
         how = ("Drawn as text, it reads on a terminal with a dark background; on a light one, use .png or .svg. " if fmt == "text" else "")
         return dict(said, status="written", file=out, format=fmt, bytes=len(picture),
                     note="Nothing was shown. %sShow the whole code with its white margin where the agents with a camera can see it: a cropped or squeezed code may not be read." % how)
-    folder = tempfile.mkdtemp(prefix="aamio-qr-")
+    folder = tempfile.mkdtemp(prefix="aamio-qrcast-")
     path = os.path.join(folder, "card.png")
     with open(path, "wb") as handle:
         handle.write(picture)
@@ -358,7 +358,7 @@ def handle(request, encode=None, decode=None, read_local=None, display=None, fra
     read_frame = read_frame or reader.read_frame
     now = (clock or time.time)()
     if not isinstance(request, dict) or request.get("aamio_addon") != CONTRACT:
-        return answer(refused("not_contract_2", "This add-on speaks contract %d of aamio's add-ons, and the request is not on it. Upgrade aamio, or install the version of aamio-qr made for yours." % CONTRACT))
+        return answer(refused("not_contract_2", "This add-on speaks contract %d of aamio's add-ons, and the request is not on it. Upgrade aamio, or install the version of aamio-qrcast made for yours." % CONTRACT))
     kind = request.get("kind")
     name = request.get("name")
     arguments = request.get("arguments") if isinstance(request.get("arguments"), dict) else {}

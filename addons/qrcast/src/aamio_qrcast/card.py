@@ -3,7 +3,7 @@
     aamio:scope/k7rq2m4xw5tbz3yd6ena
     aamio:scope/k7rq2m4xw5tbz3yd6ena?n=stue-tv&t=1794200000
 
-The same card as the sound add-on's, read by the same rules, so a card seen
+The same card as the earshot add-on's, read by the same rules, so a card seen
 and a card heard are one thing. The address is the write capability of a
 scope: whoever holds it can post into the scope, and only whoever holds the
 key can read what was posted. It is no secret in aamio, which is why it may be

@@ -1,9 +1,9 @@
-"""QR on contract 2: the card, the two engines, the screen, the camera, and the real package through the core.
+"""QRcast on contract 2: the card, the two engines, the screen, the camera, and the real package through the core.
 
 Offline throughout, with a fake aisense, a fake screen and a fake camera,
 except the live test under AAMIO_LIVE=1: a card is made into a code at
 aisenseapi.com and read back here and there. Nothing here opens a window or a
-camera. The reader tests use zxing-cpp and Pillow, which aamio-qr depends on.
+camera. The reader tests use zxing-cpp and Pillow, which aamio-qrcast depends on.
 """
 
 import io
@@ -16,16 +16,16 @@ import time
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "qr", "src"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "sound", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "qrcast", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "earshot", "src"))
 
 from aamio import addon_process, addons, cli, mcp_server
 from aamio.runtime import Runtime
-from aamio_qr import __version__ as ADDON_VERSION, camera, card, process, reader, screen, service, symbol
-from aamio_sound import card as sound_card
+from aamio_qrcast import __version__ as ADDON_VERSION, camera, card, process, reader, screen, service, symbol
+from aamio_earshot import card as sound_card
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SOURCE = os.pathsep.join([os.path.join(HERE, "..", "src"), os.path.join(HERE, "..", "addons", "qr", "src")])
+SOURCE = os.pathsep.join([os.path.join(HERE, "..", "src"), os.path.join(HERE, "..", "addons", "qrcast", "src")])
 ADDRESS = "k7rq2m4xw5tbz3yd6ena"
 OTHER = "m2n3p4q5r6s7t2u3v4w5"
 SCOPE_KEY = "abcdefghijklmnopqrstuvwxyz"
@@ -133,7 +133,7 @@ def picture(tmp_path, data=None, name="card.png"):
 
 def test_the_probe_names_the_add_on():
     said = process.handle(request("probe", "probe"))
-    assert said == {"result": {"ok": True, "name": "qr", "version": ADDON_VERSION, "aamio_addon": 2}, "exit_code": 0, "is_error": False}
+    assert said == {"result": {"ok": True, "name": "qrcast", "version": ADDON_VERSION, "aamio_addon": 2}, "exit_code": 0, "is_error": False}
 
 
 def test_a_request_off_contract_2_is_refused():
@@ -173,7 +173,7 @@ def test_a_key_is_never_shown():
     for key in (SCOPE_KEY, READ_KEY, "a1" * 32):
         screen_ = Screen()
         aisense = Aisense()
-        said = run(request("tool", "aamio_addon_qr_show", address=key), aisense, display=screen_)
+        said = run(request("tool", "aamio_addon_qrcast_show", address=key), aisense, display=screen_)
         assert said["exit_code"] == 2 and said["result"]["reason"] == "a_key_not_an_address" and "never shown" in said["result"]["fix"]
         assert screen_.shown == [] and aisense.encoded == [], "a key is refused before anything is drawn or sent"
 
@@ -192,7 +192,7 @@ def test_show_draws_the_code_here_and_opens_it_on_the_screen():
     path, data = screen_.shown[0]
     assert path == result["file"] and os.path.basename(path) == "card.png" and data == symbol.png(symbol.encode(CARD), scale=24)
     assert "aamio board find --scope NAME --wait 25" in result["note"] and "stays there for the viewer" in result["note"]
-    said = run(request("tool", "aamio_addon_qr_show", address=ADDRESS), aisense, display=Screen())
+    said = run(request("tool", "aamio_addon_qrcast_show", address=ADDRESS), aisense, display=Screen())
     assert "aamio_board_find with scope and wait" in said["result"]["note"] and "aamio board" not in said["result"]["note"]
 
 
@@ -270,14 +270,14 @@ def test_read_is_done_here_by_default_and_sends_nothing(tmp_path):
 def test_read_with_aisense_sends_the_picture_and_falls_back_here_when_it_cannot_be_reached(tmp_path):
     aisense = Aisense()
     local = Local()
-    said = run(request("tool", "aamio_addon_qr_read", file=picture(tmp_path), engine="aisense"), aisense, local=local)
+    said = run(request("tool", "aamio_addon_qrcast_read", file=picture(tmp_path), engine="aisense"), aisense, local=local)
     assert said["result"]["engine"] == "aisense" and aisense.decoded and aisense.decoded[0][1] == "png" and local.read == []
     assert said["result"]["next"].startswith("aamio_scope_add with name stue-tv")
     aisense = Aisense(error=service.Unreachable("service_unreachable", "aisenseapi.com could not be reached."))
-    said = run(request("tool", "aamio_addon_qr_read", file=picture(tmp_path, name="two.png"), engine="aisense"), aisense, local=local)
+    said = run(request("tool", "aamio_addon_qrcast_read", file=picture(tmp_path, name="two.png"), engine="aisense"), aisense, local=local)
     result = said["result"]
     assert result["status"] == "seen" and result["engine"] == "local" and result["fallback"] == {"from": "aisense", "reason": "service_unreachable"} and local.read
-    said = run(request("tool", "aamio_addon_qr_read", file=picture(tmp_path, name="three.png"), engine="aisense"), Aisense(error=service.NothingSeen("aisense found no code in the picture.")), local=Local())
+    said = run(request("tool", "aamio_addon_qrcast_read", file=picture(tmp_path, name="three.png"), engine="aisense"), Aisense(error=service.NothingSeen("aisense found no code in the picture.")), local=Local())
     assert said["exit_code"] == 3 and said["result"]["status"] == "nothing_seen" and said["result"]["engine"] == "aisense" and "fallback" not in said["result"]
 
 
@@ -335,11 +335,11 @@ def test_scan_stops_at_the_first_card_and_lets_the_camera_go():
 
 def test_scan_reports_what_it_saw_or_that_it_saw_nothing():
     frames = Camera([(4, 2, "ad"), (4, 2, "ad"), (4, 2, "other")], seen={"ad": ["https://example.org"], "other": ["WIFI:S:home;;"]})
-    said = run(request("tool", "aamio_addon_qr_scan", seconds=5, camera="Logi C270 HD WebCam"), frames=frames)
+    said = run(request("tool", "aamio_addon_qrcast_scan", seconds=5, camera="Logi C270 HD WebCam"), frames=frames)
     result = said["result"]
     assert said["exit_code"] == 3 and result["status"] == "not_understood" and [item["text"] for item in result["seen"]] == ["https://example.org", "WIFI:S:home;;"]
     assert frames.asked == [(5, "Logi C270 HD WebCam")] and frames.closed
-    said = run(request("tool", "aamio_addon_qr_scan"), frames=Camera([(4, 2, "x")] * 3))
+    said = run(request("tool", "aamio_addon_qrcast_scan"), frames=Camera([(4, 2, "x")] * 3))
     assert said["exit_code"] == 3 and said["result"]["status"] == "nothing_seen" and said["result"]["frames"] == 3 and "20 seconds" in said["result"]["fix"]
 
 
@@ -458,7 +458,7 @@ def test_a_camera_that_gives_no_frame_says_why():
     assert failed.value.reason == "camera_failed" and "I/O error" in failed.value.fix and "Settings, Privacy, Camera" in failed.value.fix
     with pytest.raises(camera.Unavailable) as failed:
         list(camera.frames(5, None, which=lambda name: None, platform="win32", environ={}))
-    assert failed.value.reason == "no_ffmpeg" and "winget install Gyan.FFmpeg" in failed.value.fix and "aamio addon qr read FILE" in failed.value.fix
+    assert failed.value.reason == "no_ffmpeg" and "winget install Gyan.FFmpeg" in failed.value.fix and "aamio addon qrcast read FILE" in failed.value.fix
 
 
 # ----------------------------------------------------------------- the screen
@@ -536,7 +536,7 @@ def test_aisense_is_asked_with_json_for_a_code_and_multipart_for_a_picture():
     texts = service.decode(b"\xff\xd8\xffjpeg", "jpeg", opener=opener(200, json.dumps({"qrcode_content": CARD + "\n4006381333931\r\n"}).encode(), seen=seen))
     assert texts == [CARD, "4006381333931"]
     sent = seen[0]
-    assert sent.full_url.endswith("/qrcode_decode") and sent.headers["Content-type"].startswith("multipart/form-data; boundary=aamio-qr-")
+    assert sent.full_url.endswith("/qrcode_decode") and sent.headers["Content-type"].startswith("multipart/form-data; boundary=aamio-qrcast-")
     assert b'name="qrcode_image"; filename="picture.jpeg"\r\nContent-Type: image/jpeg\r\n\r\n\xff\xd8\xffjpeg\r\n--' in sent.data
 
 
@@ -624,7 +624,7 @@ def test_a_camera_frame_is_read_from_its_grey_bytes():
 @pytest.fixture
 def real_addon(monkeypatch):
     """QR as this tree has it, named by AAMIO_ADDONS, on the path of the processes the core starts."""
-    monkeypatch.setenv("AAMIO_ADDONS", "aamio_qr")
+    monkeypatch.setenv("AAMIO_ADDONS", "aamio_qrcast")
     monkeypatch.setenv("PYTHONPATH", SOURCE + os.pathsep + os.environ.get("PYTHONPATH", ""))
     monkeypatch.setattr(addons, "_cache", {})
     monkeypatch.setattr(addons, "_home", None)
@@ -640,15 +640,15 @@ def command(capsys, home, *words):
     return code, captured.out, captured.err
 
 
-def test_the_core_lists_qr_from_its_manifest_without_running_it(real_addon, tmp_path, capsys):
+def test_the_core_lists_qrcast_from_its_manifest_without_running_it(real_addon, tmp_path, capsys):
     code, out, _ = command(capsys, str(tmp_path / "home"), "addon", "list")
     row = json.loads(out)["addons"][0]
-    assert code == 0 and row["name"] == "qr" and row["contract"] == 2 and row["version"] == ADDON_VERSION and row["named_in"] == "AAMIO_ADDONS"
-    assert row["commands"] == ["card", "read", "scan", "show"] and row["mcp_tools"] == ["aamio_addon_qr_show", "aamio_addon_qr_read", "aamio_addon_qr_scan"]
+    assert code == 0 and row["name"] == "qrcast" and row["contract"] == 2 and row["version"] == ADDON_VERSION and row["named_in"] == "AAMIO_ADDONS"
+    assert row["commands"] == ["card", "read", "scan", "show"] and row["mcp_tools"] == ["aamio_addon_qrcast_show", "aamio_addon_qrcast_read", "aamio_addon_qrcast_scan"]
     assert row["environment"] == ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"]
     tools = {tool["name"]: tool for tool in mcp_server.tools()}
-    assert tools["aamio_addon_qr_show"]["inputSchema"]["properties"]["address"]["pattern"] == "^[a-z2-7]{20}$" and "never a key" in tools["aamio_addon_qr_show"]["description"]
-    assert tools["aamio_addon_qr_scan"]["annotations"]["readOnlyHint"] is True and "never sent" in tools["aamio_addon_qr_scan"]["description"]
+    assert tools["aamio_addon_qrcast_show"]["inputSchema"]["properties"]["address"]["pattern"] == "^[a-z2-7]{20}$" and "never a key" in tools["aamio_addon_qrcast_show"]["description"]
+    assert tools["aamio_addon_qrcast_scan"]["annotations"]["readOnlyHint"] is True and "never sent" in tools["aamio_addon_qrcast_scan"]["description"]
 
 
 def test_a_code_written_and_read_back_through_the_core_sends_nothing(real_addon, tmp_path, capsys):
@@ -656,29 +656,29 @@ def test_a_code_written_and_read_back_through_the_core_sends_nothing(real_addon,
     pytest.importorskip("PIL")
     home = str(tmp_path / "home")
     out = tmp_path / "card.png"
-    code, said, _ = command(capsys, home, "addon", "qr", "show", ADDRESS, "--name", "stue-tv", "--out", str(out))
+    code, said, _ = command(capsys, home, "addon", "qrcast", "show", ADDRESS, "--name", "stue-tv", "--out", str(out))
     made = json.loads(said)
     assert code == 0 and made["status"] == "written" and made["engine"] == "local" and out.exists()
-    code, said, _ = command(capsys, home, "addon", "qr", "read", str(out))
+    code, said, _ = command(capsys, home, "addon", "qrcast", "read", str(out))
     seen = json.loads(said)
     assert code == 0 and seen["status"] == "seen" and seen["engine"] == "local" and seen["card"]["name"] == "stue-tv" and seen["card"]["expires_at"] == made["expires_at"]
-    code, said, _ = command(capsys, home, "addon", "qr", "card", ADDRESS)
+    code, said, _ = command(capsys, home, "addon", "qrcast", "card", ADDRESS)
     assert code == 0 and json.loads(said)["card"].startswith("aamio:scope/%s?t=" % ADDRESS) and 3500 < json.loads(said)["expires_at"] - time.time() <= 3600
-    code, said, _ = command(capsys, home, "addon", "qr", "show", SCOPE_KEY)
+    code, said, _ = command(capsys, home, "addon", "qrcast", "show", SCOPE_KEY)
     assert code == 2 and json.loads(said)["reason"] == "a_key_not_an_address"
-    code, said, _ = command(capsys, home, "addon", "qr", "scan", "--seconds", "99")
+    code, said, _ = command(capsys, home, "addon", "qrcast", "scan", "--seconds", "99")
     assert code == 2 and json.loads(said)["reason"] == "invalid_seconds", "a length out of bounds opens no camera"
-    assert not os.path.exists(os.path.join(home, "addons", "qr")), "no command needs the home, so none made a directory in it"
+    assert not os.path.exists(os.path.join(home, "addons", "qrcast")), "no command needs the home, so none made a directory in it"
 
 
 def test_over_mcp_a_key_is_refused_and_an_argument_the_schema_lacks_too(real_addon, tmp_path):
     runtime = Runtime(home=str(tmp_path / "home"), host="https://fake.test", archive=False)
     try:
-        reply = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "aamio_addon_qr_show", "arguments": {"address": READ_KEY}}})
+        reply = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "aamio_addon_qrcast_show", "arguments": {"address": READ_KEY}}})
         assert reply["result"]["isError"] is True and reply["result"]["structuredContent"]["reason"] == "a_key_not_an_address"
-        reply = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "aamio_addon_qr_read", "arguments": {"file": str(tmp_path / "missing.png")}}})
+        reply = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "aamio_addon_qrcast_read", "arguments": {"file": str(tmp_path / "missing.png")}}})
         assert reply["result"]["isError"] is True and reply["result"]["structuredContent"]["reason"] == "no_such_file"
-        reply = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "aamio_addon_qr_scan", "arguments": {"seconds": 5, "engine": "aisense"}}})
+        reply = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "aamio_addon_qrcast_scan", "arguments": {"seconds": 5, "engine": "aisense"}}})
         assert reply["result"]["isError"] is True and reply["result"]["structuredContent"].get("given") == ["engine"], "scan has no engine: the camera is read here only"
     finally:
         runtime.close()
@@ -692,13 +692,13 @@ def test_live_a_code_made_at_aisense_reads_back_here_and_there(tmp_path):
     made = said["result"]
     assert said["exit_code"] == 0 and made["status"] == "written" and made["engine"] == "aisense" and len(made["card"]) == 80, made
     for engine in ("local", "aisense"):
-        said = process.handle(request("tool", "aamio_addon_qr_read", file=str(out), engine=engine))
+        said = process.handle(request("tool", "aamio_addon_qrcast_read", file=str(out), engine=engine))
         assert said["exit_code"] == 0 and said["result"]["engine"] == engine and said["result"]["card"]["name"] == longest, (engine, said)
     ours = tmp_path / "ours.png"
     process.handle(request("command", "show", address=ADDRESS, out=str(ours)))
-    said = process.handle(request("tool", "aamio_addon_qr_read", file=str(ours), engine="aisense"))
+    said = process.handle(request("tool", "aamio_addon_qrcast_read", file=str(ours), engine="aisense"))
     assert said["exit_code"] == 0 and said["result"]["engine"] == "aisense", "aisense reads the local code too"
     blank = tmp_path / "blank.png"
     blank.write_bytes(symbol.png(symbol.Symbol(1, 0, [[False] * 21 for _ in range(21)]), scale=8))
-    said = process.handle(request("tool", "aamio_addon_qr_read", file=str(blank), engine="aisense"))
+    said = process.handle(request("tool", "aamio_addon_qrcast_read", file=str(blank), engine="aisense"))
     assert said["exit_code"] == 3 and said["result"]["status"] == "nothing_seen" and said["result"]["engine"] == "aisense"
