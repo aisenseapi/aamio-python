@@ -4,6 +4,15 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.29 - 2026-11-10
+
+- A lookup that fails says which names are nobody's, as one that succeeds does.
+  With one known and one unknown name and the service answering 503, the answer
+  put the known one under `offline` and left the unknown one out, although the
+  client had settled it before it asked.
+- The README names the MCP server, `at.aamio/aamio`, so the MCP Registry lists
+  this package beside the hosted endpoint, as the way to run `aamio serve`.
+
 ## 0.6.28 - 2026-11-10
 
 - A partner is never a guess between names that differ only in upper and

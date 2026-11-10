@@ -86,3 +86,20 @@ def test_a_single_partner_is_still_found_whatever_the_case():
 
     assert runtime.partner_by_name("ADA") == {"name": "Ada", "key": ADA}
     assert runtime._recipient("ada") == (INBOX[ADA], ADA, "Ada")
+
+
+class Down:
+    """A service that cannot answer a lookup just now."""
+
+    def presence_lookup(self, prefixes, wait=0):
+        return 503, {"error": "the store could not be read just now"}
+
+
+def test_a_lookup_that_fails_still_says_which_names_are_nobodys():
+    runtime = build([{"name": "Ada", "key": ADA}])
+    runtime.client = Down()
+
+    found = runtime.lookup(["Ada", "nobody"])
+
+    assert found["online"] == [] and found["offline"] == ["Ada"] and "503" in found["error"]
+    assert found["unknown"] == ["nobody"], "settled here before the service was asked, and said"

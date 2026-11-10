@@ -2261,7 +2261,10 @@ class Runtime:
         prefixes = [key_hash(p["key"])[:8] for p in partners]
         status, data = self.client.presence_lookup(prefixes, wait)
         if status != 200:
-            return {"online": [], "offline": [p["name"] for p in partners], "error": "lookup failed: %s %s" % (status, data)}
+            # What was settled here before the service was asked stays said: a
+            # name that is nobody's went missing from the answer when the lookup
+            # failed (a review of 10 November 2026).
+            return dict({"online": [], "offline": [p["name"] for p in partners], "error": "lookup failed: %s %s" % (status, data)}, **({"unknown": unknown} if unknown else {}))
         online = []
         found = set()
         asked = {p["key"] for p in partners}
