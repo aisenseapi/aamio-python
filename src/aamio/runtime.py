@@ -615,9 +615,15 @@ def receipt_fault(data, w):
         return "its root is not a sha256 in hex"
     if data.get("commitment") != "sha256:" + data["root"]:
         return "its commitment is not sha256: and its root"
+    # The signers are the lines' own: the service lists each key that signed a
+    # line, once. One that left a signer out was signed as if nobody had signed,
+    # and one without keys ended in TypeError (a review of 10 November 2026).
     keys = data.get("keys")
-    if keys is not None and (not isinstance(keys, list) or any(not isinstance(key, str) for key in keys)):
+    if not isinstance(keys, list) or any(not isinstance(key, str) for key in keys) or len(set(keys)) != len(keys):
         return "its keys are not a list of keys"
+    signers = {m.get("from") for m in messages if isinstance(m.get("from"), str)}
+    if set(keys) != signers:
+        return "its keys are not the signers of its lines"
     return None
 
 
@@ -656,9 +662,26 @@ class Channel:
         self.received = []
         self.observed = {}
         # The thread the observations were read on: the one opened at this time
-        # at this address. A thread opened at the same address after the service
-        # restarted is another one, and its receipt is never compared with them.
+        # at this address, and expiring at that. A thread opened at the same
+        # address after the service restarted is another one, and its receipt is
+        # never compared with them.
         self.observed_created_at = None
+        self.observed_expire_at = None
+        # The hash of the row at the cursor, as the service gave it. A thread
+        # opened again at the same address in the same second, with the same
+        # lifetime and list, looks the same in every field the service gives,
+        # and a cursor taken from the old one passed over its first messages (a
+        # review of 10 November 2026). Before a stored cursor is used again, the
+        # row at it is asked for and its hash compared with this one.
+        self.after_sha256 = None
+        # Whether that was done for this cursor: a channel opened in this
+        # process has nothing to doubt, one read from state.json has, and a
+        # read on request checks once in a read. A listener checks after a poll
+        # that failed, which a restart of the service is.
+        self.cursor_checked = True
+        # Whether the last poll stopped at its byte budget, as messages are
+        # handed over, and left the rest at the service.
+        self.stopped_at_budget = False
         self.lock = threading.Lock()
         self.poller = None
         self.closed = False
@@ -677,14 +700,16 @@ class Channel:
         # Under the channel's lock like every other touch of observed. Cleared
         # without it, a reader walking the dictionary would meet a change of
         # size halfway, and a receipt or a domain check runs on another thread.
+        self.after_sha256 = None
         with self.lock:
             self.observed.clear()
             self.observed_created_at = None
+            self.observed_expire_at = None
 
     def to_state(self):
         # seen travels with the channel: without it a restart cannot tell a
         # redelivered message from a new one, and the model may act twice.
-        return {"label": self.label, "read_key": self.read_key, "w": self.w, "expire_at": self.expire_at, "allow": self.allow, "after": self.after, "created_at": self.created_at, "gone": self.gone, "muted": self.muted, "seen": sorted(value for value in self.seen if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value))}
+        return {"label": self.label, "read_key": self.read_key, "w": self.w, "expire_at": self.expire_at, "allow": self.allow, "after": self.after, "after_sha256": self.after_sha256, "created_at": self.created_at, "gone": self.gone, "muted": self.muted, "seen": sorted(value for value in self.seen if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value))}
 
     @classmethod
     def from_state(cls, item):
@@ -692,6 +717,11 @@ class Channel:
         channel.seen = {value for value in item.get("seen") or [] if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)}
         channel.gone = item.get("gone") is True
         channel.muted = item.get("muted") is True
+        sha = item.get("after_sha256")
+        channel.after_sha256 = sha if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha) else None
+        # Read from a file: whatever happened to the service since it was
+        # written, the cursor is checked before it is used again.
+        channel.cursor_checked = False
 
         return channel
 
@@ -3112,7 +3142,56 @@ class Runtime:
             why = "the message could not be checked here: " + error.__class__.__name__
             return {"channel": channel.label, "w": channel.w, "seq": seq, "at": at, "verified": False, "from_key": None, "known_contact": False, "sender": "unsigned", "sha256": None, "replay": False, "body": {"text": message.get("body")}, "signed": False, "encrypted": False, "format": "unreadable", "error": error.__class__.__name__, "unverified_because": why}
 
-    def _save_cursor(self, channel, to_seq):
+    def _cursor_still_holds(self, channel):
+        """Whether the row at this channel's cursor is still the one read there.
+
+        It is asked for on its own and its hash compared with the one kept. True
+        when it is, False when the thread at the address is another one, and
+        None when the service did not say, which the read that follows reports.
+        """
+        try:
+            status, data = self.client.read(channel.w, channel.read_key, channel.after - 1, 0, limit=1)
+        except Exception:
+            return None
+        if status != 200 or not isinstance(data, dict) or data.get("exists") is False or not isinstance(data.get("messages"), list):
+            return None
+        row = data["messages"][0] if data["messages"] else None
+        return isinstance(row, dict) and row.get("seq") == channel.after and row.get("sha256") == channel.after_sha256
+
+    def _binding_conflict(self, field, address, sender_key):
+        """The conflict a verified claim of this address would be, or None: nothing is bound here."""
+        if not isinstance(address, str) or not re.fullmatch(r"[a-z2-7]{20}", address):
+            return None
+        with self.lock:
+            bound = self.peers.get(address)
+        if bound is None or bound == sender_key:
+            return None
+        return {"field": field, "address": address, "claimed_by": sender_key, "bound_to": bound}
+
+    def _weight_as_handed_over(self, channel, raw):
+        """The bytes of a row as this read would hand it over, or None when the channel's list keeps it out.
+
+        Worked out on a copy, keeping nothing: the scope share in it as shown
+        when it is not taken, the binding conflicts it would carry, and the
+        archive's mark. The listener's measure: compact JSON in UTF-8.
+        """
+        entry = self._read_entry(channel, copy.deepcopy(raw))
+        sender_key = entry["from_key"]
+        if channel.allow and not (entry["verified"] and ("*" in channel.allow or sender_key in channel.allow)):
+            return None
+        self._take_scope_share(entry, apply=False)
+        if isinstance(entry["body"], dict) and entry["verified"] and sender_key:
+            conflicts = [c for c in (self._binding_conflict(field, entry["body"].get(field), sender_key) for field in ("reply_to", "channel")) if c is not None]
+            if conflicts:
+                entry["binding_conflicts"] = conflicts
+        if getattr(self, "archive_enabled", False) and getattr(self, "home_released", False) is not True:
+            entry["archived"] = True
+        else:
+            entry["archived"] = False
+            entry["archive_off"] = True
+        return len(json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+    def _save_cursor(self, channel, to_seq, sha=None):
         """Move the cursor and write it down, and say so if the writing fails.
 
         The cursor and the replay hashes go in one write, before the caller sees a
@@ -3128,22 +3207,31 @@ class Runtime:
         direction: a message twice is a nuisance, a message never is a loss.
         """
         was = channel.after
+        was_sha = channel.after_sha256
         channel.after = max(channel.after, to_seq)
+        # The hash of the row at the cursor goes with it.
+        if channel.after != was:
+            channel.after_sha256 = sha
 
         if not self._save_quietly(channel, was):
             channel.after = was
+            channel.after_sha256 = was_sha
 
             return False
 
         return True
 
-    def _set_cursor(self, channel, to_seq):
-        """The cursor moves to exactly this, forwards or backwards, and is written."""
+    def _set_cursor(self, channel, to_seq, sha=None):
+        """The cursor moves to exactly this, forwards or backwards, and is written, with the hash of the row at it."""
         was = channel.after
+        was_sha = channel.after_sha256
         channel.after = to_seq
+        if to_seq != was:
+            channel.after_sha256 = sha
 
         if not self._save_quietly(channel, was):
             channel.after = was
+            channel.after_sha256 = was_sha
 
     def _save_quietly(self, channel, was=None):
         """Write the state; a failure is said in attention and never raised.
@@ -3178,11 +3266,20 @@ class Runtime:
         channel.left_waiting = 0
         channel.more_at_service = False
         channel.more_at_limit = False
+        channel.stopped_at_budget = False
         # A muted channel is read no more, whoever calls: the read path and the
         # listener skip it, and a library caller that asks straight out gets
         # the same answer instead of the removed partner's messages.
         if channel.muted:
             return "muted", []
+        # The cursor is used again only on the thread it belongs to: the row at it
+        # is asked for on its own, and its hash compared with the one kept there.
+        if channel.after > 0 and channel.after_sha256 and not channel.cursor_checked:
+            channel.cursor_checked = True
+            if self._cursor_still_holds(channel) is False:
+                self._note(channel, "restarted", "the message at this channel's cursor, seq %d, is not the one read there, so the thread at this address is a new one and it is read again from the start" % channel.after)
+                channel.forget_thread()
+                self._save_quietly(channel)
         # Passed only when there is one, so a client given a plain read function, as
         # every test and every older integration hands over, is called as before.
         #
@@ -3203,6 +3300,9 @@ class Runtime:
             return "expired", []
         if status != 200:
             self._note(channel, "unread", "the service answered %s, so this channel was not read and there may be messages waiting" % status)
+            # A service that did not answer may have restarted: the cursor is
+            # checked again before it is used.
+            channel.cursor_checked = False
             return "error", []
         if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
             self._note(channel, "unread", "the service returned a malformed read answer; this channel was not read")
@@ -3224,15 +3324,24 @@ class Runtime:
             return "gone", []
         channel.gone = False
         created = data.get("created_at")
+        expires = data.get("expire_at") if _whole(data.get("expire_at")) else None
         reset = data.get("reset")
-        if channel.created_at is not None and created is not None and created != channel.created_at and not reset:
-            self._note(channel, "restarted", "the thread at this address is a new one, opened at %s where this channel knew one opened at %s, so it is read again from the start" % (created, channel.created_at))
+        # A thread is known by when it was opened and when it expires. One that a
+        # write opened after the service restarted has the service's own
+        # lifetime, so it is told apart even when it was opened in the same second.
+        another = channel.created_at is not None and ((created is not None and created != channel.created_at) or (expires is not None and expires != channel.expire_at))
+        if another and not reset:
+            self._note(channel, "restarted", "the thread at this address is a new one, opened at %s and expiring at %s, where this channel knew one opened at %s and expiring at %s, so it is read again from the start" % (created, expires, channel.created_at, channel.expire_at))
             channel.forget_thread()
             return self.poll(channel, 0, limit, max_bytes)
         if reset:
             self._note(channel, "restarted", (reset.get("what") if isinstance(reset, dict) else None) or "the service read this thread from the start")
             with channel.lock:
                 channel.observed.clear()
+        # The channel follows the thread that is there: one taken up after its
+        # cursor was forgotten may expire at another time than the one opened.
+        if channel.created_at is None and expires is not None:
+            channel.expire_at = expires
         channel.created_at = created
 
         # What the budget kept out. The service answers a byte budget honestly:
@@ -3269,14 +3378,35 @@ class Runtime:
         entries = []
         kept_out = []
         last_seq = None
+        # The service's hash of each row this poll dealt with, for the cursor.
+        hashes = {}
+        # The budget is kept here as well, for what is handed over, measured as
+        # it is handed over: the service counts its own form of each message, and
+        # a read of 512 bytes handed over 660 (a review of 10 November 2026). A
+        # row that does not fit is not taken: it is not observed, not remembered,
+        # binds and shares nothing, and the cursor stays before it.
+        used = 0
+        oversized = None
         fetched = data.get("messages", [])
         for index, raw in enumerate(fetched):
             if limit is not None and len(entries) >= limit:
                 channel.left_waiting = len(fetched) - index
                 break
+            if max_bytes is not None:
+                weight = self._weight_as_handed_over(channel, raw)
+                if weight is not None:
+                    if entries and used + weight > max_bytes:
+                        channel.stopped_at_budget = True
+                        break
+                    # Alone and still over the budget: it has come, so it is
+                    # handed over on its own rather than kept back for ever.
+                    if not entries and weight > max_bytes:
+                        oversized = (raw.get("seq") if isinstance(raw, dict) else None, weight)
+                    used += weight
             entry = self._read_entry(channel, raw)
             message = raw if isinstance(raw, dict) else {}
             last_seq = entry["seq"] if last_seq is None else max(last_seq, entry["seq"])
+            hashes[entry["seq"]] = message.get("sha256") if isinstance(message.get("sha256"), str) else None
             sender_key = entry["from_key"]
             excluded = bool(channel.allow and not (entry["verified"] and ("*" in channel.allow or sender_key in channel.allow)))
             with channel.lock:
@@ -3284,9 +3414,10 @@ class Runtime:
                 # service restarted, a receipt of the new thread at the same
                 # address was compared with rows of the old one (a review of 10
                 # November 2026).
-                if channel.observed_created_at != channel.created_at:
+                if channel.observed_created_at != channel.created_at or channel.observed_expire_at != channel.expire_at:
                     channel.observed.clear()
                     channel.observed_created_at = channel.created_at
+                    channel.observed_expire_at = channel.expire_at
                 channel.observed[entry["seq"]] = {"seq": entry["seq"], "at": entry["at"], "sha256": entry["sha256"], "from": message.get("service_from", message.get("from")), "verified": entry["verified"], "from_key": sender_key}
             why_not = entry.get("unverified_because")
             if why_not and message.get("service_verified", message.get("verified")):
@@ -3358,12 +3489,12 @@ class Runtime:
             # is a record of what was delivered, not the delivery itself:
             # holding the cursor back would re-read that message forever while
             # the disk stayed full, and redeliver everything after it.
-            self._save_cursor(channel, entries[-1]["seq"])
+            self._save_cursor(channel, entries[-1]["seq"], hashes.get(entries[-1]["seq"]))
         if kept_out:
             # Past them as well, or the same messages are read and kept out on
             # every call. And said, since a message that does not arrive has to
             # be told from one that was never sent.
-            self._save_cursor(channel, last_seq)
+            self._save_cursor(channel, last_seq, hashes.get(last_seq))
             opened_for = "any key, signed only" if "*" in channel.allow else "%d named key(s)" % len(channel.allow)
             self._note(channel, "kept_out", "This channel was opened for %s, and these messages did not satisfy that list as checked here. They are not handed over and not archived." % opened_for, seqs=kept_out)
         # After a reset the service's next is the cursor, and it is lower than
@@ -3374,14 +3505,16 @@ class Runtime:
         # A poll that stopped at its limit is the exception: the service's next
         # covers messages this call never looked at, so the cursor is the last
         # one it did look at, handed over or kept out.
-        if channel.left_waiting:
+        if oversized is not None:
+            self._note(channel, "over_budget", "message %s on this channel is %d bytes as handed over here, larger than the whole byte budget of %d this read asked for. It had already come, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose." % (oversized[0], oversized[1], max_bytes))
+        if channel.left_waiting or channel.stopped_at_budget:
             if last_seq is not None:
                 # Backwards as well as forwards here, so _save_cursor's max is not
                 # the rule: the service's next covers messages this call never
                 # looked at. Same care about the write, though.
-                self._set_cursor(channel, last_seq)
+                self._set_cursor(channel, last_seq, hashes.get(last_seq))
         elif type(data.get("next")) is int:
-            self._set_cursor(channel, data["next"])
+            self._set_cursor(channel, data["next"], hashes.get(data["next"]))
         # Muted since the read went out: what came back is on the record and
         # is handed to nobody.
         with self.lock:
@@ -3692,6 +3825,9 @@ class Runtime:
                 if state in ("error", "gone"):
                     time.sleep(2)
             except Exception as error:
+                # A poll that failed may have met a restart of the service: the
+                # cursor is checked before it is used again.
+                channel.cursor_checked = False
                 # Whatever went wrong, anything poll had already decoded is on this
                 # machine and is handed over below. Losing it here is how a full disk
                 # turned two messages into an empty inbox with nothing said.
@@ -3767,8 +3903,11 @@ class Runtime:
             collected = []
             left_waiting = 0
             held_back = []
+            held_here = []
             at_limit = []
             not_asked = []
+            for channel in list(self.channels.values()):
+                channel.cursor_checked = False
             not_asked_after = []
             budget = {} if max_bytes is None else {"max_bytes": max_bytes}
 
@@ -3792,7 +3931,9 @@ class Runtime:
                 collected.extend(entries)
                 left_waiting += channel.left_waiting
 
-                if channel.more_at_service:
+                if channel.stopped_at_budget:
+                    held_here.append(channel.label)
+                elif channel.more_at_service:
                     (at_limit if channel.more_at_limit else held_back).append(channel.label)
 
                 return state
@@ -3848,10 +3989,13 @@ class Runtime:
                     ) if part),
                 )
 
-            if budget_said and limit_said:
-                self._note_trouble("read", "more", limit_said + " " + budget_said[0].upper() + budget_said[1:])
-            elif budget_said or limit_said:
-                self._note_trouble("read", "more", budget_said or limit_said)
+            here_said = None
+            if held_here:
+                here_said = "this read stopped at the byte budget it asked for on %s, %d bytes of messages as they are handed over here, and left the rest at the service. Nothing was passed over: the cursor stands at the last message handed over, so read again for the rest." % (", ".join(dict.fromkeys(held_here)), max_bytes)
+
+            said = [part for part in (limit_said, budget_said, here_said) if part]
+            if said:
+                self._note_trouble("read", "more", " ".join([said[0]] + [part[0].upper() + part[1:] for part in said[1:]]))
             return collected
         # With a listener running, the messages are already here: it fetched them
         # on its own polls, which belong to every caller and cannot take one
@@ -3965,15 +4109,26 @@ class Runtime:
         # with what was read of the old one, and its signer named as checked
         # here (a review of 10 November 2026).
         with channel.lock:
-            same_thread = channel.observed_created_at is not None and channel.observed_created_at == data["created_at"]
-            earlier = channel.observed_created_at if channel.observed and not same_thread else None
+            same_thread = (channel.observed_created_at is not None and channel.observed_created_at == data["created_at"]
+                           and (not _whole(channel.observed_expire_at) or channel.observed_expire_at == data["expire_at"]))
+            earlier = (channel.observed_created_at, channel.observed_expire_at) if channel.observed and not same_thread else None
             entries = sorted(channel.observed.values(), key=lambda e: e["seq"]) if same_thread else []
         held = len(entries)
         line = "%d\t%d\t%s\t%s\n"
         listed = "".join(line % (m["seq"], m["at"], m["sha256"], m.get("from") or "-") for m in (data.get("messages") or []))
         ours = "".join(line % (e["seq"], e["at"], e["sha256"], e.get("from") or "-") for e in entries)
         comparable = held == data["count"]
-        verified_keys = {e.get("from_key") for e in entries if e.get("verified") and isinstance(e.get("from_key"), str)}
+        # A signer is named only for a row this process checked and the receipt
+        # lists as it was read: the same seq, time, hash and signer. A row read on
+        # a thread the fields cannot tell from this one is not taken for it (a
+        # review of 10 November 2026).
+        listed_by_seq = {m["seq"]: m for m in data["messages"]}
+
+        def as_listed(e):
+            m = listed_by_seq.get(e["seq"])
+            return m is not None and m["at"] == e["at"] and m["sha256"] == e["sha256"] and (m.get("from") or None) == (e.get("from") or None)
+
+        verified_keys = {e.get("from_key") for e in entries if e.get("verified") and isinstance(e.get("from_key"), str) and as_listed(e)}
         claimed_keys = data.get("keys", [])
         unverified_keys = [key for key in claimed_keys if not isinstance(key, str) or key not in verified_keys]
         # Sign what we took, so partners can exchange receipts and compare
@@ -3997,13 +4152,17 @@ class Runtime:
         elif not comparable:
             result["local_check"] = (
                 "Not compared: this process holds %d of the %d messages the receipt counts, so a local root would differ for a reason that is not the receipt's." % (held, data["count"])
-                + (" What this process read at this address was on an earlier thread, opened at %s; this receipt is for the one opened at %s, so none of that counts here." % (earlier, data["created_at"]) if earlier is not None else "")
+                + (" What this process read at this address was on another thread, opened at %s and expiring at %s; this receipt is for the one opened at %s and expiring at %s, so none of that counts here." % (earlier[0], earlier[1], data["created_at"], data["expire_at"]) if earlier is not None else "")
                 + " root_adds_up checks only the receipt's arithmetic; our signature records what was fetched, not that its claims are true. For the independent check, take the receipt in the process that read the messages."
             )
         if anchor:
             idem = sha256hex("aamio-listen:%s:%s" % (self.keys.hash, data["root"]))[:32]
             status, proof = self.client.anchor(data["root"], idem)
-            result["anchor"] = proof if status == 200 else {"error": status, "detail": proof}
+            # A proof is a 200 with a proof_id from a tool that did not answer with an error.
+            if status == 200 and isinstance(proof, dict) and isinstance(proof.get("proof_id"), str) and not proof.get("tool_error"):
+                result["anchor"] = proof
+            else:
+                result["anchor"] = {"error": status, "detail": proof.get("detail") if isinstance(proof, dict) and proof.get("tool_error") else proof}
         self.archive(label, {"kind": "receipt", "at": time.time(), "result": result})
         return result
 

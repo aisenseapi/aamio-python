@@ -36,7 +36,7 @@ def test_anchor_and_proof_go_to_the_verifyum_the_client_was_given(monkeypatch):
     client = AamioClient(verifyum="https://verifyum.example/mcp")
     urls = []
 
-    def http(method, url, body=None, headers=None, timeout=None):
+    def http(method, url, body=None, headers=None, timeout=None, **options):
         urls.append(url)
         return 200, {}
 

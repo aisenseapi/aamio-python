@@ -19,6 +19,26 @@ not what moved in the source.
   waiting, instead of blaming a byte budget nobody set. A read that met both its
   limit and a byte budget says both in one note: the second used to replace the
   first.
+- A thread is known by when it was opened and when it expires, and before a
+  cursor kept from an earlier read is used again, the message at it is asked for
+  and its hash compared with the one kept, once in a read. A thread opened again
+  at the same address in the same second, after the service restarted, passed
+  its first messages by unread. `state.json` keeps that hash beside each
+  channel's cursor, as `after_sha256`; a client that does not know the field
+  leaves the check out until the next message it reads.
+- A receipt names a signer only for a line it lists as this process read it,
+  and its keys must be the signers of its lines, each once: one that left a
+  signer out was signed as if nobody had signed.
+- A byte budget holds for messages as they are handed over, on every read that
+  names one: a message that does not fit stays at the service and moves no
+  cursor, and one that alone is larger than the budget is handed over on its own,
+  said as `over_budget`. A read of 512 bytes handed over 660.
+- An anchoring tool that answered with an error made no proof, also when its text
+  named a `proof_id`, and an anchoring whose answer broke off after its status
+  keeps the status.
+- A listener checks a cursor read from `state.json` before its first poll and
+  after a poll that failed, which a restart of the service is. A 503 whose body
+  broke off ended in `IncompleteRead` and lost the receipt it came with.
 
 ## 0.6.29 - 2026-11-10
 

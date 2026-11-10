@@ -382,9 +382,12 @@ def test_with_nothing_waiting_the_first_channel_waits_and_the_others_are_asked_w
     assert b.attention_taken() == []
 
     asked.clear()
-    b.client.read = lambda w, read_key, after, wait, **limits: (asked.append((w, wait)), real(w, read_key, after, wait, **limits))[1]
+    b.client.read = lambda w, read_key, after, wait, **limits: (asked.append((w, wait, after, limits.get("limit"))), real(w, read_key, after, wait, **limits))[1]
 
-    assert b.read(wait=0) == [] and asked == [(inbox, 0), (private["w"], 0)], "a read without a wait asks each channel once"
+    # Each channel once, and before that the row at a cursor this read takes up
+    # again: the private thread's, at 1, asked for on its own from 0 (a review of
+    # 10 November 2026). The inbox has no cursor yet, and nothing to check.
+    assert b.read(wait=0) == [] and asked == [(inbox, 0, 0, 50), (private["w"], 0, 0, 1), (private["w"], 0, 1, 50)], asked
 
 
 def test_the_command_line_stops_beside_a_runtime_that_holds_the_home():

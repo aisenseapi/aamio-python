@@ -96,7 +96,7 @@ class AamioClient:
         self.board = (board or os.environ.get("AAMIO_BOARD") or DEFAULT_BOARD).rstrip("/")
         self.verifyum = (verifyum or os.environ.get("AAMIO_VERIFYUM") or VERIFYUM_MCP).rstrip("/")
 
-    def http(self, method: str, url: str, body=None, headers=None, timeout=None, with_headers=False):
+    def http(self, method: str, url: str, body=None, headers=None, timeout=None, with_headers=False, keep_status=False):
         """(status, body), or (status, body, headers) with with_headers."""
         data = None
         if body is not None:
@@ -116,11 +116,29 @@ class AamioClient:
         got = {}
         try:
             with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
-                status, text = response.status, response.read().decode("utf-8")
+                status = response.status
                 got = {name.lower(): value for name, value in response.headers.items()}
+                try:
+                    text = response.read().decode("utf-8")
+                except Exception as error:
+                    if not keep_status:
+                        raise
+                    # The status came before the body broke off, and with
+                    # keep_status it is the answer's (a review of 10 November 2026).
+                    answer = (status, {"error": "the answer broke off", "detail": error.__class__.__name__})
+                    return answer + (got,) if with_headers else answer
         except urllib.error.HTTPError as error:
-            status, text = error.code, error.read().decode("utf-8", "replace")
+            status = error.code
             got = {name.lower(): value for name, value in (error.headers.items() if error.headers else [])}
+            try:
+                text = error.read().decode("utf-8", "replace")
+            except Exception as broken:
+                # An error status whose body broke off is still that status. The
+                # read used to throw out of here, past every caller's handling:
+                # a receipt with --anchor ended in IncompleteRead (a review of 10
+                # November 2026).
+                answer = (status, {"error": "the answer broke off", "detail": broken.__class__.__name__})
+                return answer + (got,) if with_headers else answer
         except Exception as error:
             # No reply at all: connection refused, timeout, DNS, a dropped
             # socket after the bytes went out. Whether the service saw the
@@ -278,9 +296,20 @@ class AamioClient:
 
     def anchor(self, root_hex: str, idempotency_key: str):
         message = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "verifyum_anchor_commitment", "arguments": {"commitment": "sha256:" + root_hex, "idempotency_key": idempotency_key}}}
-        status, reply = self.http("POST", self.verifyum, message, {"MCP-Protocol-Version": "2025-11-25"})
+        status, reply = self.http("POST", self.verifyum, message, {"MCP-Protocol-Version": "2025-11-25"}, keep_status=True)
+        result = reply.get("result") if isinstance(reply, dict) else None
+        text = None
         try:
-            return status, json.loads(reply["result"]["content"][0]["text"])
+            text = result["content"][0]["text"]
+        except Exception:
+            text = None
+        # A tool that answered with an error made no proof, whatever its text
+        # names: one that named a proof_id was shown as a proof (a review of 10
+        # November 2026).
+        if isinstance(result, dict) and result.get("isError"):
+            return status, {"tool_error": True, "detail": text if isinstance(text, str) else reply}
+        try:
+            return status, json.loads(text)
         except Exception:
             return status, reply
 

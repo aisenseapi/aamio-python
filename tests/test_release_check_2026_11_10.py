@@ -6,11 +6,20 @@ restarted, was compared with what had been read of the old one, and its signer
 named as checked here. An answer that was not a receipt for the channel was
 signed. A byte budget of nine digits went out as it was and was answered 400,
 and a read that stopped at its count limit blamed a byte budget nobody had set.
+
+The post-check of the same day: a thread opened again at the same address in
+the same second is told by when it expires, or by the hash of the row at the
+cursor; a receipt's keys are the signers of its lines; a byte budget holds for
+messages as they are handed over; and an anchoring that answered with an error,
+or broke off after its status, made no proof.
 """
 
+import http.server
+import json
 import os
 import re
 import sys
+import threading
 import time
 
 import pytest
@@ -26,12 +35,12 @@ from test_reader_checks import ALICE, W, answer, build
 from test_receipt import root_of
 
 
-def receipt_of(messages, created_at, w=W):
-    """The receipt the service gives for a thread opened at created_at that holds these messages."""
+def receipt_of(messages, created_at, expire_at, w=W):
+    """The receipt the service gives for a thread opened at created_at, expiring at expire_at, that holds these messages."""
     lines = [{key: m[key] for key in ("seq", "at", "sha256", "from")} for m in messages]
     root = root_of(lines)
     return {
-        "schema": "aamio-receipt-v1", "w": w, "created_at": created_at, "expire_at": created_at + 3600, "count": len(lines), "bytes": 0, "allow": [],
+        "schema": "aamio-receipt-v1", "w": w, "created_at": created_at, "expire_at": expire_at, "count": len(lines), "bytes": 0, "allow": [],
         "messages": lines, "keys": sorted({m["from"] for m in lines if m["from"]}), "root": root, "commitment": "sha256:" + root, "issued_at": created_at + 10,
     }
 
@@ -43,15 +52,15 @@ def test_a_receipt_of_a_thread_opened_again_compares_nothing_read_on_the_old_one
     runtime, channel = build([answer(first), answer(created_at=1005), answer(second, created_at=1005)], allow=[ALICE.public])
     runtime.keys = Keys.generate()
     assert len(runtime.poll(channel)[1]) == 1
-    runtime.client.receipt = lambda *args: (200, receipt_of([first], 1000))
+    runtime.client.receipt = lambda *args: (200, receipt_of([first], 1000, channel.expire_at))
     assert runtime.receipt()["local_root_matches"] is True
 
-    runtime.client.receipt = lambda *args: (200, receipt_of([second], 1005))
+    runtime.client.receipt = lambda *args: (200, receipt_of([second], 1005, channel.expire_at))
     before = runtime.receipt()
     assert before["root_adds_up"] is True
     assert before["held_locally"] == 0 and before["local_root_matches"] is None
     assert before["keys"] == [ALICE.public] and before["keys_unverified_count"] == 1, "the service's word, not a partner checked here"
-    assert "on an earlier thread, opened at 1000; this receipt is for the one opened at 1005" in before["local_check"]
+    assert "on another thread, opened at 1000 and expiring at %d; this receipt is for the one opened at 1005 and expiring at %d" % (channel.expire_at, channel.expire_at) in before["local_check"]
 
     assert len(runtime.poll(channel)[1]) == 1
     after = runtime.receipt()
@@ -69,6 +78,10 @@ def test_a_receipt_of_a_thread_opened_again_compares_nothing_read_on_the_old_one
     (lambda r: dict(r, root="ROOT", commitment="sha256:ROOT"), "its root is not a sha256 in hex"),
     (lambda r: dict(r, root=r["root"] + "\n", commitment="sha256:" + r["root"] + "\n"), "its root is not a sha256 in hex"),
     (lambda r: dict(r, keys=[7]), "its keys are not a list of keys"),
+    (lambda r: dict(r, keys=None), "its keys are not a list of keys"),
+    (lambda r: dict(r, keys=r["keys"] + r["keys"]), "its keys are not a list of keys"),
+    (lambda r: dict(r, keys=[]), "its keys are not the signers of its lines"),
+    (lambda r: dict(r, keys=r["keys"] + [Keys.generate().public]), "its keys are not the signers of its lines"),
 ])
 def test_an_answer_that_is_not_a_receipt_for_this_channel_is_refused_before_it_is_signed(tamper, why):
     first = stored(W, 1, "one", ALICE)
@@ -76,7 +89,7 @@ def test_an_answer_that_is_not_a_receipt_for_this_channel_is_refused_before_it_i
     runtime.keys = Keys.generate()
     runtime.poll(channel)
     anchored = []
-    runtime.client.receipt = lambda *args: (200, tamper(receipt_of([first], 1000)))
+    runtime.client.receipt = lambda *args: (200, tamper(receipt_of([first], 1000, channel.expire_at)))
     runtime.client.anchor = lambda *args: anchored.append(args) or (200, {"proof_id": "p"})
     with pytest.raises(RuntimeError, match=re.escape(why) + r".*Nothing was compared, signed or anchored\.$"):
         runtime.receipt(anchor=True)
@@ -88,7 +101,7 @@ def test_a_receipt_in_good_shape_that_adds_up_to_another_root_is_what_root_adds_
     runtime, channel = build([answer(first)], allow=[ALICE.public])
     runtime.keys = Keys.generate()
     runtime.poll(channel)
-    runtime.client.receipt = lambda *args: (200, dict(receipt_of([first], 1000), root="0" * 64, commitment="sha256:" + "0" * 64))
+    runtime.client.receipt = lambda *args: (200, dict(receipt_of([first], 1000, channel.expire_at), root="0" * 64, commitment="sha256:" + "0" * 64))
     out = runtime.receipt()
     assert out["root_adds_up"] is False and out["local_root_matches"] is False
 
@@ -129,3 +142,183 @@ def test_a_read_that_met_its_limit_on_one_channel_and_a_budget_on_another_says_b
     assert len(said) == 1, "one key, one note: the second used to replace the first"
     assert said[0]["what"].startswith("this read stopped at its limit of 2 message(s). The service has more waiting on other.")
     assert "The service had more waiting on inbox than the byte budget this read asked for" in said[0]["what"]
+
+
+# -------------------------------------------------------------- the post-check
+
+def size(entry):
+    return len(json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def test_an_inbox_a_write_opened_again_in_the_same_second_is_told_by_when_it_expires():
+    first = stored(W, 1, "on the first thread", ALICE)
+    second = stored(W, 1, "on the new thread", ALICE)
+    runtime = reading([answer(first, created_at=1000)])
+    channel = runtime.channels["inbox"]
+    assert len(runtime.read()) == 1 and channel.after == 1 and channel.after_sha256 == first["sha256"]
+    # A state written by a client that kept no hash at the cursor: the lifetime alone tells the threads apart.
+    channel.after_sha256 = None
+    runtime.client.read = (lambda answers: lambda *args, **kw: next(answers))(iter([answer(created_at=1000, expire_at=1600), answer(second, created_at=1000, expire_at=1600)]))
+    got = runtime.read()
+    assert [e["body"]["text"] for e in got] == ["on the new thread"], "read without a receipt first"
+    said = [note for note in runtime.attention_taken() if note["state"] == "restarted"]
+    assert len(said) == 1 and "expiring at 1600, where this channel knew one opened at 1000" in said[0]["what"]
+    assert channel.expire_at == 1600, "and the channel follows the thread that is there"
+
+
+@pytest.mark.parametrize("allow", [None, [ALICE.public]], ids=["an open thread with the service's own lifetime", "its owner opening it again with the same lifetime and list"])
+def test_a_thread_opened_again_in_the_same_second_that_looks_the_same_is_told_by_the_hash_at_the_cursor(allow):
+    first = stored(W, 1, "on the first thread", ALICE)
+    second = stored(W, 1, "on the new thread", ALICE)
+    runtime = reading([answer(first, created_at=1000)])
+    channel = runtime.channels["inbox"]
+    channel.allow = list(allow or [])
+    runtime.keys = Keys.generate()
+    assert len(runtime.read()) == 1
+    same = {"created_at": 1000}
+    asked = []
+
+    def read(w, read_key, after, wait, **limits):
+        asked.append((after, limits.get("limit")))
+        return (answer(second, **same), answer(second, **same))[len(asked) - 1]
+
+    # A receipt first, of a thread the fields cannot tell from the one read: compared, and nobody named for it.
+    runtime.client.receipt = lambda *args: (200, receipt_of([second], 1000, channel.expire_at))
+    out = runtime.receipt()
+    assert out["local_root_matches"] is False and out["local_differences"] == [{"seq": 1, "fields": ["sha256"]}]
+    assert out["keys"] == [ALICE.public] and out["keys_unverified_count"] == 1
+    runtime.client.read = read
+    got = runtime.read()
+    assert asked == [(0, 1), (0, 50)], "the row at cursor 1 asked for on its own, then the thread from the start"
+    assert [e["body"]["text"] for e in got] == ["on the new thread"]
+    assert any(note["state"] == "restarted" and "seq 1, is not the one read there" in note["what"] for note in runtime.attention_taken())
+    assert channel.after == 1 and channel.after_sha256 == second["sha256"]
+
+
+def test_an_unchanged_thread_is_asked_for_the_row_at_the_cursor_once_in_a_read_and_says_nothing():
+    first = stored(W, 1, "one", ALICE)
+    runtime = reading([answer(first, created_at=1000)])
+    assert len(runtime.read()) == 1
+    asked = []
+
+    def read(w, read_key, after, wait, **limits):
+        asked.append((after, wait, limits.get("limit")))
+        return answer(first, created_at=1000) if limits.get("limit") == 1 else answer(created_at=1000, next=1)
+
+    runtime.client.read = read
+    assert runtime.read(wait=1) == []
+    assert asked[0] == (0, 0, 1) and [a for a in asked if a[2] == 1] == [(0, 0, 1)], asked
+    assert [note for note in runtime.attention_taken() if note["state"] == "restarted"] == []
+
+
+def test_a_listener_checks_the_cursor_of_a_channel_read_from_state_and_after_a_poll_that_failed():
+    first = stored(W, 1, "one", ALICE)
+    runtime, channel = build([answer(first, created_at=1000)])
+    runtime.poll(channel)
+    assert channel.cursor_checked is True and channel.after_sha256 == first["sha256"]
+    loaded = Channel.from_state(channel.to_state())
+    assert loaded.after_sha256 == first["sha256"] and loaded.cursor_checked is False, "read from the file, checked before use"
+    runtime.channels["inbox"] = loaded
+    asked = []
+
+    def read(w, read_key, after, wait, **limits):
+        asked.append((after, limits.get("limit")))
+        if len(asked) == 3:
+            return 503, {"error": "restarting", "fix": "ask again"}
+        return answer(first, created_at=1000) if limits.get("limit") == 1 else answer(created_at=1000, next=1)
+
+    runtime.client.read = read
+    runtime.poll(loaded)
+    runtime.poll(loaded)
+    assert asked == [(0, 1), (1, None), (1, None)], "checked once, then read from the cursor"
+    runtime.poll(loaded)
+    assert asked[-2:] == [(0, 1), (1, None)], "and checked again after a poll that failed"
+
+
+def test_a_byte_budget_holds_for_messages_as_they_are_handed_over_and_a_row_not_taken_is_not_kept():
+    rows = [stored(W, n, "h%d" % n, ALICE) for n in (1, 2, 3)]
+    runtime = reading([answer(*rows, created_at=1000)])
+    runtime.archive_enabled = True
+    channel = runtime.channels["inbox"]
+    weight = runtime._weight_as_handed_over(channel, rows[0])
+    budget = weight * 2 - 1
+    got = runtime.read(0, 50, max_bytes=budget)
+    assert [e["body"]["text"] for e in got] == ["h1"], "the service sent three, one fits as handed over"
+    assert size(got[0]) == weight, "weighed as it was handed over, the archive's mark included"
+    said = [note for note in runtime.attention_taken() if note["state"] == "more"]
+    assert len(said) == 1 and said[0]["what"].startswith("this read stopped at the byte budget it asked for on inbox, %d bytes of messages as they are handed over here" % budget)
+    assert channel.after == 1 and channel.after_sha256 == rows[0]["sha256"]
+    assert sorted(channel.observed) == [1] and channel.seen == {rows[0]["sha256"]}, "the rows not taken are not observed or remembered"
+
+
+def test_a_message_alone_larger_than_the_budget_is_handed_over_on_its_own_and_said():
+    rows = [stored(W, 1, "x" * 800, ALICE), stored(W, 2, "short", ALICE)]
+    runtime = reading([answer(*rows, created_at=1000)])
+    got = runtime.read(0, 50, max_bytes=600)
+    assert [len(e["body"]["text"]) for e in got] == [800]
+    notes = runtime.attention_taken()
+    assert any(note["state"] == "over_budget" and note["what"].startswith("message 1 on this channel is ") for note in notes)
+    assert any(note["state"] == "more" for note in notes)
+    assert runtime.channels["inbox"].after == 1
+
+
+def test_an_anchoring_tool_that_answered_with_an_error_made_no_proof_whatever_its_text_names():
+    client = AamioClient(verifyum="https://verifyum.example/mcp")
+    text = json.dumps({"proof_id": "proof-diagnostic"})
+    client.http = lambda *args, **kw: (200, {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": text}], "isError": True}})
+    assert client.anchor("00" * 32, "idempotency") == (200, {"tool_error": True, "detail": text})
+    first = stored(W, 1, "one", ALICE)
+    runtime, channel = build([answer(first)], allow=[ALICE.public])
+    runtime.keys = Keys.generate()
+    runtime.poll(channel)
+    runtime.client.receipt = lambda *args: (200, receipt_of([first], 1000, channel.expire_at))
+    runtime.client.anchor = client.anchor
+    assert runtime.receipt(anchor=True)["anchor"] == {"error": 200, "detail": text}
+
+
+class BrokenOff(http.server.BaseHTTPRequestHandler):
+    """A Verifyum that answers 503 and breaks the connection off in the middle of the body."""
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.send_response(503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "100")
+        self.end_headers()
+        self.wfile.write(b'{"error":')
+        self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, *args):
+        pass
+
+
+def test_an_anchoring_whose_answer_broke_off_after_its_status_keeps_the_status_and_the_receipt_stands():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), BrokenOff)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = AamioClient(verifyum="http://127.0.0.1:%d/mcp" % server.server_address[1])
+        status, said = client.anchor("00" * 32, "idempotency")
+        assert status == 503 and said["error"] == "the answer broke off", said
+        first = stored(W, 1, "one", ALICE)
+        runtime, channel = build([answer(first)], allow=[ALICE.public])
+        runtime.keys = Keys.generate()
+        runtime.poll(channel)
+        runtime.client.receipt = lambda *args: (200, receipt_of([first], 1000, channel.expire_at))
+        runtime.client.anchor = client.anchor
+        out = runtime.receipt(anchor=True)
+        assert out["root_adds_up"] is True and out["anchor"]["error"] == 503
+    finally:
+        server.shutdown()
+
+
+def test_a_receipt_whose_keys_are_the_signers_of_its_lines_is_taken():
+    unsigned = stored(W, 1, "nobody's", None)
+    signed = [stored(W, n, "from alice %d" % n, ALICE) for n in (2, 3)]
+    runtime, channel = build([answer(unsigned, *signed)])
+    runtime.keys = Keys.generate()
+    runtime.poll(channel)
+    runtime.client.receipt = lambda *args: (200, receipt_of([unsigned] + signed, 1000, channel.expire_at))
+    out = runtime.receipt()
+    assert out["count"] == 3 and out["root_adds_up"] is True and out["local_root_matches"] is True
+    assert out["keys"] == ["alice"], "one key for two lines, none for the unsigned one"
