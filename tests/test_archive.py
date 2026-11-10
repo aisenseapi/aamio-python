@@ -144,8 +144,12 @@ def test_a_real_storage_failure_is_visible_and_costs_nobody_the_batch(home):
     # Not swallowed. Received and archived are two claims, and only one of them
     # is true here.
     assert [entry["archived"] for entry in entries] == [False, False]
-    assert "No space left" in entries[0]["archive_error"]
-    assert len(runtime.logged) == 2
+    # What went wrong is said in attention, with the messages it cost, and not on
+    # the messages: a message is handed over at the size it was weighed at.
+    failed = [note for note in runtime.attention_taken() if note["state"] == "archive_failed"]
+    assert len(failed) == 1 and failed[0]["count"] == 2 and "No space left" in failed[0]["what"]
+    assert "archive_error" not in entries[0]
+    assert len([line for line in runtime.logged if line.startswith("archive ")]) == 2
 
 
 def test_archiving_off_is_not_a_failure(home):

@@ -60,7 +60,7 @@ def test_a_receipt_of_a_thread_opened_again_compares_nothing_read_on_the_old_one
     assert before["root_adds_up"] is True
     assert before["held_locally"] == 0 and before["local_root_matches"] is None
     assert before["keys"] == [ALICE.public] and before["keys_unverified_count"] == 1, "the service's word, not a partner checked here"
-    assert "on another thread, opened at 1000 and expiring at %d; this receipt is for the one opened at 1005 and expiring at %d" % (channel.expire_at, channel.expire_at) in before["local_check"]
+    assert "on another thread, the one opened at 1000 and expiring at %d; this receipt is for the one opened at 1005 and expiring at %d" % (channel.expire_at, channel.expire_at) in before["local_check"]
 
     assert len(runtime.poll(channel)[1]) == 1
     after = runtime.receipt()
@@ -150,89 +150,91 @@ def size(entry):
     return len(json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
-def test_an_inbox_a_write_opened_again_in_the_same_second_is_told_by_when_it_expires():
+def test_an_inbox_a_write_opened_again_in_the_same_second_is_told_by_its_instance():
+    first = stored(W, 1, "on the first thread", ALICE)
+    second = stored(W, 1, "on the new thread", ALICE)
+    runtime = reading([answer(first, created_at=1000, instance="a" * 16)])
+    channel = runtime.channels["inbox"]
+    assert len(runtime.read()) == 1 and channel.instance == "a" * 16
+    # In the same second, with the service's own lifetime: another thread by its instance, read without a receipt first.
+    runtime.client.read = (lambda answers: lambda *args, **kw: next(answers))(iter([answer(created_at=1000, instance="b" * 16), answer(second, created_at=1000, instance="b" * 16)]))
+    got = runtime.read()
+    assert [e["body"]["text"] for e in got] == ["on the new thread"]
+    said = [note for note in runtime.attention_taken() if note["state"] == "restarted"]
+    assert len(said) == 1 and "instance %s where this channel knew instance %s" % ("b" * 16, "a" * 16) in said[0]["what"]
+    assert channel.instance == "b" * 16
+
+
+def test_from_a_service_that_names_no_instance_an_inbox_opened_again_is_told_by_when_it_expires():
     first = stored(W, 1, "on the first thread", ALICE)
     second = stored(W, 1, "on the new thread", ALICE)
     runtime = reading([answer(first, created_at=1000)])
     channel = runtime.channels["inbox"]
-    assert len(runtime.read()) == 1 and channel.after == 1 and channel.after_sha256 == first["sha256"]
-    # A state written by a client that kept no hash at the cursor: the lifetime alone tells the threads apart.
-    channel.after_sha256 = None
+    assert len(runtime.read()) == 1 and channel.instance is None
     runtime.client.read = (lambda answers: lambda *args, **kw: next(answers))(iter([answer(created_at=1000, expire_at=1600), answer(second, created_at=1000, expire_at=1600)]))
     got = runtime.read()
-    assert [e["body"]["text"] for e in got] == ["on the new thread"], "read without a receipt first"
+    assert [e["body"]["text"] for e in got] == ["on the new thread"]
     said = [note for note in runtime.attention_taken() if note["state"] == "restarted"]
     assert len(said) == 1 and "expiring at 1600, where this channel knew one opened at 1000" in said[0]["what"]
     assert channel.expire_at == 1600, "and the channel follows the thread that is there"
 
 
 @pytest.mark.parametrize("allow", [None, [ALICE.public]], ids=["an open thread with the service's own lifetime", "its owner opening it again with the same lifetime and list"])
-def test_a_thread_opened_again_in_the_same_second_that_looks_the_same_is_told_by_the_hash_at_the_cursor(allow):
+def test_a_thread_opened_again_in_the_same_second_that_looks_the_same_is_told_by_its_instance(allow):
     first = stored(W, 1, "on the first thread", ALICE)
     second = stored(W, 1, "on the new thread", ALICE)
-    runtime = reading([answer(first, created_at=1000)])
+    runtime = reading([answer(first, created_at=1000, instance="a" * 16)])
     channel = runtime.channels["inbox"]
     channel.allow = list(allow or [])
     runtime.keys = Keys.generate()
     assert len(runtime.read()) == 1
-    same = {"created_at": 1000}
+    # A receipt first, of the thread that is there now: another by its instance, so nothing read here counts for it.
+    runtime.client.receipt = lambda *args: (200, dict(receipt_of([second], 1000, channel.expire_at), instance="b" * 16))
+    out = runtime.receipt()
+    assert out["held_locally"] == 0 and out["local_root_matches"] is None
+    assert out["keys"] == [ALICE.public] and out["keys_unverified_count"] == 1
+    assert "on another thread, instance %s, opened at 1000" % ("a" * 16) in out["local_check"] and "this receipt is for instance %s" % ("b" * 16) in out["local_check"]
     asked = []
 
     def read(w, read_key, after, wait, **limits):
-        asked.append((after, limits.get("limit")))
-        return (answer(second, **same), answer(second, **same))[len(asked) - 1]
+        asked.append(after)
+        return (answer(created_at=1000, instance="b" * 16), answer(second, created_at=1000, instance="b" * 16))[len(asked) - 1]
 
-    # A receipt first, of a thread the fields cannot tell from the one read: compared, and nobody named for it.
-    runtime.client.receipt = lambda *args: (200, receipt_of([second], 1000, channel.expire_at))
-    out = runtime.receipt()
-    assert out["local_root_matches"] is False and out["local_differences"] == [{"seq": 1, "fields": ["sha256"]}]
-    assert out["keys"] == [ALICE.public] and out["keys_unverified_count"] == 1
     runtime.client.read = read
     got = runtime.read()
-    assert asked == [(0, 1), (0, 50)], "the row at cursor 1 asked for on its own, then the thread from the start"
+    assert asked == [1, 0], "read from the cursor, found another thread, read from the start: no request to check the cursor"
     assert [e["body"]["text"] for e in got] == ["on the new thread"]
-    assert any(note["state"] == "restarted" and "seq 1, is not the one read there" in note["what"] for note in runtime.attention_taken())
-    assert channel.after == 1 and channel.after_sha256 == second["sha256"]
+    assert channel.instance == "b" * 16
 
 
-def test_an_unchanged_thread_is_asked_for_the_row_at_the_cursor_once_in_a_read_and_says_nothing():
+def test_an_unchanged_thread_is_read_from_its_cursor_with_nothing_more_and_says_nothing():
     first = stored(W, 1, "one", ALICE)
-    runtime = reading([answer(first, created_at=1000)])
+    runtime = reading([answer(first, created_at=1000, instance="a" * 16)])
     assert len(runtime.read()) == 1
     asked = []
 
     def read(w, read_key, after, wait, **limits):
         asked.append((after, wait, limits.get("limit")))
-        return answer(first, created_at=1000) if limits.get("limit") == 1 else answer(created_at=1000, next=1)
+        return answer(created_at=1000, instance="a" * 16, next=1)
 
     runtime.client.read = read
     assert runtime.read(wait=1) == []
-    assert asked[0] == (0, 0, 1) and [a for a in asked if a[2] == 1] == [(0, 0, 1)], asked
+    assert asked == [(1, 0, 50), (1, 1, 50)], asked
     assert [note for note in runtime.attention_taken() if note["state"] == "restarted"] == []
 
 
-def test_a_listener_checks_the_cursor_of_a_channel_read_from_state_and_after_a_poll_that_failed():
+def test_a_channel_read_from_state_json_knows_its_thread_by_the_instance_kept_there():
     first = stored(W, 1, "one", ALICE)
-    runtime, channel = build([answer(first, created_at=1000)])
+    runtime, channel = build([answer(first, created_at=1000, instance="a" * 16)])
     runtime.poll(channel)
-    assert channel.cursor_checked is True and channel.after_sha256 == first["sha256"]
-    loaded = Channel.from_state(channel.to_state())
-    assert loaded.after_sha256 == first["sha256"] and loaded.cursor_checked is False, "read from the file, checked before use"
+    kept = channel.to_state()
+    assert kept["instance"] == "a" * 16
+    loaded = Channel.from_state(kept)
+    assert loaded.instance == "a" * 16 and loaded.after == 1
     runtime.channels["inbox"] = loaded
-    asked = []
-
-    def read(w, read_key, after, wait, **limits):
-        asked.append((after, limits.get("limit")))
-        if len(asked) == 3:
-            return 503, {"error": "restarting", "fix": "ask again"}
-        return answer(first, created_at=1000) if limits.get("limit") == 1 else answer(created_at=1000, next=1)
-
-    runtime.client.read = read
-    runtime.poll(loaded)
-    runtime.poll(loaded)
-    assert asked == [(0, 1), (1, None), (1, None)], "checked once, then read from the cursor"
-    runtime.poll(loaded)
-    assert asked[-2:] == [(0, 1), (1, None)], "and checked again after a poll that failed"
+    second = stored(W, 1, "on the new thread", ALICE)
+    runtime.client.read = (lambda answers: lambda *args, **kw: next(answers))(iter([answer(created_at=1000, instance="b" * 16), answer(second, created_at=1000, instance="b" * 16)]))
+    assert [e["body"]["text"] for e in runtime.poll(loaded)[1]] == ["on the new thread"]
 
 
 def test_a_byte_budget_holds_for_messages_as_they_are_handed_over_and_a_row_not_taken_is_not_kept():
@@ -244,11 +246,33 @@ def test_a_byte_budget_holds_for_messages_as_they_are_handed_over_and_a_row_not_
     budget = weight * 2 - 1
     got = runtime.read(0, 50, max_bytes=budget)
     assert [e["body"]["text"] for e in got] == ["h1"], "the service sent three, one fits as handed over"
-    assert size(got[0]) == weight, "weighed as it was handed over, the archive's mark included"
+    assert size(dict(got[0], archived=False)) == weight, "weighed as handed over, the archive's mark at its longer value"
     said = [note for note in runtime.attention_taken() if note["state"] == "more"]
     assert len(said) == 1 and said[0]["what"].startswith("this read stopped at the byte budget it asked for on inbox, %d bytes of messages as they are handed over here" % budget)
-    assert channel.after == 1 and channel.after_sha256 == rows[0]["sha256"]
+    assert channel.after == 1
     assert sorted(channel.observed) == [1] and channel.seen == {rows[0]["sha256"]}, "the rows not taken are not observed or remembered"
+
+
+def test_a_failed_archive_write_does_not_take_a_read_over_its_budget():
+    rows = [stored(W, n, "h%d" % n, ALICE) for n in (1, 2)]
+
+    def refuse(label, record):
+        raise OSError(28, "No space left on device, and a long explanation of it that would have gone on every message")
+
+    sizes = []
+    for budget in (None, "one under"):
+        runtime = reading([answer(*rows, created_at=1000)])
+        runtime.archive_enabled = True
+        runtime.archive = refuse
+        if budget is None:
+            got = runtime.read(0, 50)
+            sizes = [size(e) for e in got]
+            assert all(e["archived"] is False and "archive_error" not in e for e in got)
+        else:
+            got = runtime.read(0, 50, max_bytes=sum(sizes) - 1)
+            assert len(got) == 1, "one byte under the two as handed over: the second waits"
+            assert sum(size(e) for e in got) <= sum(sizes) - 1
+        assert any(note["state"] == "archive_failed" for note in runtime.attention_taken())
 
 
 def test_a_message_alone_larger_than_the_budget_is_handed_over_on_its_own_and_said():
@@ -322,3 +346,58 @@ def test_a_receipt_whose_keys_are_the_signers_of_its_lines_is_taken():
     out = runtime.receipt()
     assert out["count"] == 3 and out["root_adds_up"] is True and out["local_root_matches"] is True
     assert out["keys"] == ["alice"], "one key for two lines, none for the unsigned one"
+
+
+
+def test_a_scope_share_is_weighed_as_it_will_be_shown_and_nothing_is_kept_by_the_weighing(tmp_path):
+    from test_scopes import build as scoped, incoming
+
+    runtime = scoped(str(tmp_path))
+    weighed = incoming()
+    runtime._take_scope_share(weighed, weigh=True)
+    assert runtime.scopes == [], "the weighing keeps nothing"
+    taken = incoming()
+    runtime._take_scope_share(taken)
+    assert weighed == taken, "shown as it is kept"
+    assert size(weighed) == size(taken)
+
+
+def test_a_proof_id_of_blanks_names_no_proof():
+    first = stored(W, 1, "one", ALICE)
+    runtime, channel = build([answer(first)], allow=[ALICE.public])
+    runtime.keys = Keys.generate()
+    runtime.poll(channel)
+    runtime.client.receipt = lambda *args: (200, receipt_of([first], 1000, channel.expire_at))
+    runtime.client.anchor = lambda *args: (200, {"proof_id": " ", "status": "pending"})
+    assert runtime.receipt(anchor=True)["anchor"]["error"] == 200
+
+
+def test_the_listener_keeps_the_budget_per_channel_as_the_tool_says():
+    import queue as queues
+    import threading as threads
+
+    from aamio.runtime import Runtime
+
+    def entry(w, label, seq, size):
+        return {"channel": label, "w": w, "seq": seq, "from": None, "from_key": None, "verified": False, "body": {"text": "x" * size}, "at": seq, "sha256": None, "encrypted": False, "format": "text", "replay": False}
+
+    runtime = object.__new__(Runtime)
+    runtime.channels = {"inbox": Channel("inbox", "k1", "i" * 20, time.time() + 600), "side": Channel("side", "k2", "j" * 20, time.time() + 600)}
+    runtime.lock = threads.RLock()
+    runtime.attention = {}
+    runtime.log = lambda line: None
+    runtime.listener = object()
+    runtime.inbound = queues.Queue()
+    runtime.held_back = []
+    runtime.stop = threads.Event()
+    runtime.ensure_inbox = lambda: runtime.channels["inbox"]
+    runtime.publish_presence = lambda force=False: None
+    for item in (entry("i" * 20, "inbox", 1, 250), entry("j" * 20, "side", 1, 250), entry("i" * 20, "inbox", 2, 250), entry("j" * 20, "side", 2, 250)):
+        runtime.inbound.put(item)
+    one = size(entry("i" * 20, "inbox", 1, 250))
+    got = runtime.read(0, 50, max_bytes=one + 10)
+    assert [(e["channel"], e["seq"]) for e in got] == [("inbox", 1), ("side", 1)], "one from each channel, each within its own budget"
+    said = [note for note in runtime.attention_taken() if note["state"] == "more"]
+    assert len(said) == 1 and "on inbox, side" in said[0]["what"]
+    again = runtime.read(0, 50, max_bytes=one + 10)
+    assert [(e["channel"], e["seq"]) for e in again] == [("inbox", 2), ("side", 2)], "and the rest next, in the order it came"

@@ -85,6 +85,6 @@ def test_a_write_that_failed_is_told_apart_from_one_that_was_off(home):
 
         assert entries[0]["archived"] is False
         assert entries[0].get("archive_off") is None, "a failure is not the same as a folder that keeps nothing"
-        assert "disk is full" in entries[0]["archive_error"]
+        assert any(note["state"] == "archive_failed" and "disk is full" in note["what"] for note in runtime.attention_taken()), "and what went wrong is said"
     finally:
         runtime.close()
