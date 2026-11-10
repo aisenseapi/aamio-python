@@ -4,6 +4,22 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## Unreleased
+
+- A receipt is compared only with what was read on its own thread. After the
+  service restarted, a thread opened again at the same address was compared with
+  what had been read of the old one, and its signer named as checked here. The
+  receipt now says this process read nothing of it, and why.
+- An answer that is not a receipt for the channel, for another address, with a
+  count that is not its lines or a commitment that is not its root, is refused
+  before anything is compared, signed or anchored.
+- A byte budget above what the service takes, eight digits, is sent as the
+  largest it takes. A larger one was answered 400, and the read came back empty.
+- A read that stops at its count limit says so and names the channels with more
+  waiting, instead of blaming a byte budget nobody set. A read that met both its
+  limit and a byte budget says both in one note: the second used to replace the
+  first.
+
 ## 0.6.29 - 2026-11-10
 
 - A lookup that fails says which names are nobody's, as one that succeeds does.

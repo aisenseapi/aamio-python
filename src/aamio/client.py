@@ -27,6 +27,8 @@ from .crypto import b64url, check_message, sha256hex
 DEFAULT_HOST = "https://aamio.at"
 DEFAULT_BOARD = "https://board.aamio.at"
 VERIFYUM_MCP = "https://api.verifyum.com/mcp"
+# The largest X-Max-Bytes the service takes: one to eight digits.
+MAX_BYTES_HEADER = 99_999_999
 
 
 def make_read_key(length: int = 26) -> str:
@@ -194,7 +196,11 @@ class AamioClient:
             headers["X-Limit"] = str(int(limit))
 
         if max_bytes is not None:
-            headers["X-Max-Bytes"] = str(int(max_bytes))
+            # The service takes the header as one to eight digits and holds any
+            # budget to the thread's maximum, a megabyte, so a larger one is sent
+            # as the largest it takes: nine digits were answered 400 and the read
+            # came back empty (a review of 10 November 2026).
+            headers["X-Max-Bytes"] = str(min(int(max_bytes), MAX_BYTES_HEADER))
 
         status, data = self.call("GET", path, None, headers, timeout=max(self.timeout, wait + 15))
         if status == 200 and isinstance(data, dict) and isinstance(data.get("messages"), list):

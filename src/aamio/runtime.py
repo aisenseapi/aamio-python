@@ -575,6 +575,52 @@ class AmbiguousPartner(ValueError):
     """
 
 
+def _whole(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _hex64(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def receipt_fault(data, w):
+    """Why a service's answer is not a receipt for the thread at w, or None when it is one.
+
+    The v1 schema, the address that was asked for, its times, one line in order
+    for every message it counts, and a root its commitment names. The same check
+    as aamio-js's and aamio-php's, with the same words.
+    """
+    if not isinstance(data, dict):
+        return "it is not an object"
+    if data.get("schema") != "aamio-receipt-v1":
+        return "its schema is %s, not aamio-receipt-v1" % json.dumps(data.get("schema"))
+    if data.get("w") != w:
+        return "it is for %s, not for %s, the address asked for" % (json.dumps(data.get("w")), w)
+    for field in ("created_at", "expire_at", "issued_at"):
+        if not _whole(data.get(field)) or data[field] < 0:
+            return "its %s is not a time" % field
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return "it has no list of messages"
+    if not _whole(data.get("count")) or data["count"] != len(messages):
+        return "it counts %s messages and has %d lines" % (json.dumps(data.get("count")), len(messages))
+    previous = 0
+    for index, m in enumerate(messages):
+        fine = (isinstance(m, dict) and _whole(m.get("seq")) and m["seq"] > previous and _whole(m.get("at")) and m["at"] >= 0
+                and _hex64(m.get("sha256")) and (m.get("from") is None or isinstance(m.get("from"), str)))
+        if not fine:
+            return "line %d is not a message line in order" % (index + 1)
+        previous = m["seq"]
+    if not _hex64(data.get("root")):
+        return "its root is not a sha256 in hex"
+    if data.get("commitment") != "sha256:" + data["root"]:
+        return "its commitment is not sha256: and its root"
+    keys = data.get("keys")
+    if keys is not None and (not isinstance(keys, list) or any(not isinstance(key, str) for key in keys)):
+        return "its keys are not a list of keys"
+    return None
+
+
 class Channel:
     def __init__(self, label, read_key, w, expire_at, allow=None, after=0, created_at=None):
         self.label = label
@@ -603,9 +649,16 @@ class Channel:
         # one above -- nothing was fetched and left here -- and a count this
         # side never learns, so it is a flag and not a made-up number.
         self.more_at_service = False
+        # Whether that was the count this read asked for, reached, rather than
+        # its byte budget: the service says more for both.
+        self.more_at_limit = False
         self.seen = set()
         self.received = []
         self.observed = {}
+        # The thread the observations were read on: the one opened at this time
+        # at this address. A thread opened at the same address after the service
+        # restarted is another one, and its receipt is never compared with them.
+        self.observed_created_at = None
         self.lock = threading.Lock()
         self.poller = None
         self.closed = False
@@ -626,6 +679,7 @@ class Channel:
         # size halfway, and a receipt or a domain check runs on another thread.
         with self.lock:
             self.observed.clear()
+            self.observed_created_at = None
 
     def to_state(self):
         # seen travels with the channel: without it a restart cannot tell a
@@ -3123,6 +3177,7 @@ class Runtime:
         """
         channel.left_waiting = 0
         channel.more_at_service = False
+        channel.more_at_limit = False
         # A muted channel is read no more, whoever calls: the read path and the
         # listener skip it, and a library caller that asks straight out gets
         # the same answer instead of the removed partner's messages.
@@ -3202,9 +3257,14 @@ class Runtime:
                 seqs=[seq] if seq is not None else None,
             )
 
-        # And what it held back that does fit: more messages after the ones sent.
+        # And what it held back that does fit: more messages after the ones
+        # sent. The service says more both when the count this read asked for
+        # was reached and when the byte budget was, and the note says which: a
+        # read for one message blamed a budget nobody had set (a review of 10
+        # November 2026).
         if data.get("more") is True:
             channel.more_at_service = True
+            channel.more_at_limit = limit is not None and len(data.get("messages") or []) >= limit
 
         entries = []
         kept_out = []
@@ -3220,6 +3280,13 @@ class Runtime:
             sender_key = entry["from_key"]
             excluded = bool(channel.allow and not (entry["verified"] and ("*" in channel.allow or sender_key in channel.allow)))
             with channel.lock:
+                # The rows belong to the thread they were read on. After the
+                # service restarted, a receipt of the new thread at the same
+                # address was compared with rows of the old one (a review of 10
+                # November 2026).
+                if channel.observed_created_at != channel.created_at:
+                    channel.observed.clear()
+                    channel.observed_created_at = channel.created_at
                 channel.observed[entry["seq"]] = {"seq": entry["seq"], "at": entry["at"], "sha256": entry["sha256"], "from": message.get("service_from", message.get("from")), "verified": entry["verified"], "from_key": sender_key}
             why_not = entry.get("unverified_because")
             if why_not and message.get("service_verified", message.get("verified")):
@@ -3700,6 +3767,7 @@ class Runtime:
             collected = []
             left_waiting = 0
             held_back = []
+            at_limit = []
             not_asked = []
             not_asked_after = []
             budget = {} if max_bytes is None else {"max_bytes": max_bytes}
@@ -3725,7 +3793,7 @@ class Runtime:
                 left_waiting += channel.left_waiting
 
                 if channel.more_at_service:
-                    held_back.append(channel.label)
+                    (at_limit if channel.more_at_limit else held_back).append(channel.label)
 
                 return state
 
@@ -3756,20 +3824,34 @@ class Runtime:
                 for channel in answered[1:]:
                     ask(channel, 0, not_asked_after)
 
+            # One note for the read, under one key: a second note under the
+            # same key used to replace the first, so a read that met both its
+            # limit and a byte budget said only one of them.
+            budget_said = None
             if held_back:
-                self._note_trouble("read", "more", "the service had more waiting on %s than the byte budget this read asked for, so it sent what fits and kept the rest. Read again for it: the cursor stands at the last message handed over." % ", ".join(dict.fromkeys(held_back)))
+                held = ", ".join(dict.fromkeys(held_back))
+                budget_said = ("the service had more waiting on %s than the byte budget this read asked for, so it sent what fits and kept the rest. Read again for it: the cursor stands at the last message handed over." % held
+                               if max_bytes is not None else
+                               "the service says it has more waiting on %s than it sent. Nothing was passed over: the cursor stands at the last message handed over, so read again for the rest." % held)
 
-            if left_waiting or not_asked or not_asked_after:
+            limit_said = None
+            if left_waiting or not_asked or not_asked_after or at_limit:
                 # Nothing is lost, and the caller still has to hear it: a read
                 # that stopped at its limit is not a read of everything.
-                self._note_trouble("read", "more", "this read stopped at its limit of %d message(s). %s Nothing was passed over: every cursor stands at the last message this read dealt with, so read again for the rest." % (
+                limit_said = "this read stopped at its limit of %d message(s). %s Nothing was passed over: every cursor stands at the last message this read dealt with, so read again for the rest." % (
                     limit,
                     " ".join(part for part in (
+                        "The service has more waiting on %s." % ", ".join(dict.fromkeys(at_limit)) if at_limit else "",
                         "%d more that the service had already returned were left where they are." % left_waiting if left_waiting else "",
                         "%d channel(s) were not asked this time: %s." % (len(not_asked), ", ".join(not_asked)) if not_asked else "",
                         "%d channel(s) were asked before the wait and not after it: %s." % (len(not_asked_after), ", ".join(not_asked_after)) if not_asked_after else "",
                     ) if part),
-                ))
+                )
+
+            if budget_said and limit_said:
+                self._note_trouble("read", "more", limit_said + " " + budget_said[0].upper() + budget_said[1:])
+            elif budget_said or limit_said:
+                self._note_trouble("read", "more", budget_said or limit_said)
             return collected
         # With a listener running, the messages are already here: it fetched them
         # on its own polls, which belong to every caller and cannot take one
@@ -3857,6 +3939,13 @@ class Runtime:
         status, data = self.client.receipt(channel.w, channel.read_key)
         if status != 200:
             raise RuntimeError("receipt failed: %s %s" % (status, data))
+        # Checked as a receipt for this channel before anything is compared,
+        # signed or anchored: one for another address, and one that counted
+        # seven messages and listed one, were signed with root_adds_up true (a
+        # review of 10 November 2026).
+        fault = receipt_fault(data, channel.w)
+        if fault is not None:
+            raise RuntimeError("receipt failed: the service's answer is not a receipt for this channel: %s. Nothing was compared, signed or anchored." % fault)
         # Two different checks, and they used to be reported as one.
         #
         # The receipt's own arithmetic can always be checked: hash the lines it
@@ -3871,8 +3960,14 @@ class Runtime:
         # receipt reported as a mismatch, which is the one thing a proof must
         # never do. It says None now, with the count, so "not compared" cannot
         # be read as "did not match".
+        # What this process read counts only for the thread it was read on. After
+        # the service restarted, a new thread at the same address was compared
+        # with what was read of the old one, and its signer named as checked
+        # here (a review of 10 November 2026).
         with channel.lock:
-            entries = sorted(channel.observed.values(), key=lambda e: e["seq"])
+            same_thread = channel.observed_created_at is not None and channel.observed_created_at == data["created_at"]
+            earlier = channel.observed_created_at if channel.observed and not same_thread else None
+            entries = sorted(channel.observed.values(), key=lambda e: e["seq"]) if same_thread else []
         held = len(entries)
         line = "%d\t%d\t%s\t%s\n"
         listed = "".join(line % (m["seq"], m["at"], m["sha256"], m.get("from") or "-") for m in (data.get("messages") or []))
@@ -3900,8 +3995,11 @@ class Runtime:
         if held > data["count"]:
             result["local_check"] = "Mismatch: the receipt counts fewer messages than this process read. The thread was replaced or the service lost messages."
         elif not comparable:
-            result["local_check"] = ("Not compared: this process holds %d of the %d messages the receipt counts, so a local root would differ for a reason that is not the receipt's. "
-                "root_adds_up checks only the receipt's arithmetic; our signature records what was fetched, not that its claims are true. For the independent check, take the receipt in the process that read the messages." % (held, data["count"]))
+            result["local_check"] = (
+                "Not compared: this process holds %d of the %d messages the receipt counts, so a local root would differ for a reason that is not the receipt's." % (held, data["count"])
+                + (" What this process read at this address was on an earlier thread, opened at %s; this receipt is for the one opened at %s, so none of that counts here." % (earlier, data["created_at"]) if earlier is not None else "")
+                + " root_adds_up checks only the receipt's arithmetic; our signature records what was fetched, not that its claims are true. For the independent check, take the receipt in the process that read the messages."
+            )
         if anchor:
             idem = sha256hex("aamio-listen:%s:%s" % (self.keys.hash, data["root"]))[:32]
             status, proof = self.client.anchor(data["root"], idem)

@@ -28,6 +28,8 @@ sys.path.insert(0, "src")
 from aamio.crypto import Keys, sha256hex
 from aamio.runtime import Channel, Runtime
 
+CREATED = 1700000000
+
 MESSAGES = [
     {"seq": 1, "at": 1700000001, "sha256": "a" * 64, "from": "sender-key"},
     {"seq": 2, "at": 1700000002, "sha256": "b" * 64, "from": None},
@@ -57,15 +59,20 @@ def build(messages, held, root=None):
         for m in messages[:held]
     ]
     channel.observed = {m["seq"]: dict(m, verified=False, from_key=None) for m in messages[:held]}
+    # Read on the thread the receipt is for: the one opened at CREATED at this address.
+    channel.observed_created_at = CREATED
     receipt = {
         "schema": "aamio-receipt-v1",
         "w": channel.w,
+        "created_at": CREATED,
+        "expire_at": 2000000000,
         "count": len(messages),
         "messages": messages,
         "keys": [m["from"] for m in messages if m.get("from")],
         "root": root or root_of(messages),
         "issued_at": 1700000009,
     }
+    receipt["commitment"] = "sha256:" + receipt["root"]
     runtime.client = SimpleNamespace(receipt=lambda w, key: (200, receipt))
 
     return runtime

@@ -141,17 +141,18 @@ def test_receipt_tracks_kept_out_without_naming_unverified_claims():
     assert runtime.poll(channel)[1] == []
     runtime.keys = Keys.generate()
     messages = [{k: m[k] for k in ("seq", "at", "sha256", "from")} for m in [good, forged]]
-    receipt = {"count": 2, "messages": messages, "keys": [ALICE.public, MALLORY.public], "root": root_of(messages)}
+    receipt = {"schema": "aamio-receipt-v1", "w": W, "created_at": 1000, "expire_at": 2000000000, "issued_at": 1001, "count": 2, "messages": messages,
+               "keys": [ALICE.public, MALLORY.public], "root": root_of(messages), "commitment": "sha256:" + root_of(messages)}
     runtime.client.receipt = lambda *args: (200, receipt)
     out = runtime.receipt()
     assert out["held_locally"] == 2 and out["local_root_matches"] is True
     assert out["keys"][0] == ALICE.public and out["keys_unverified_count"] == 1
     assert out["signers_not_verified_locally"] == [2]
     changed = [dict(messages[0], at=999), messages[1]]
-    receipt.update(messages=changed, root=root_of(changed))
+    receipt.update(messages=changed, root=root_of(changed), commitment="sha256:" + root_of(changed))
     out = runtime.receipt()
     assert out["local_root_matches"] is False and out["local_differences"] == [{"seq": 1, "fields": ["at"]}]
-    receipt.update(count=1, messages=messages[:1], root=root_of(messages[:1]))
+    receipt.update(count=1, messages=messages[:1], root=root_of(messages[:1]), commitment="sha256:" + root_of(messages[:1]))
     assert runtime.receipt()["local_root_matches"] is False
     channel.forget_thread()
     assert runtime.receipt()["local_root_matches"] is None
