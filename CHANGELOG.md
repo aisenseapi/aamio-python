@@ -23,9 +23,25 @@ not what moved in the source.
   answer and receipt, and by when it was opened and expires where the service
   names none. A thread opened again at the same address in the same second,
   after the service restarted, passed its first messages by unread. Each
-  channel in `state.json` keeps its thread's `instance`, and a client that does
-  not know the field keeps it as it is, so a home read in turn by an older
-  client is not read again from the start.
+  channel in `state.json` keeps its thread's `instance`.
+- A cursor kept without the thread's instance, by an earlier version, which
+  leaves the field out when it saves a channel, or by another client that did
+  not know it, has the thread read again from the start once, said as
+  `reread`: what was handed over before comes again marked `replay`. Under such
+  a cursor, a thread opened again at the address in the same second, with the
+  same lifetime and list, passed its first messages by unread. Nothing is passed
+  over by its hash, which is the hash of the text alone, and another sender's
+  message with the same text has it too.
+- A thread the service reads from the start after a restart is followed in its
+  expiry as well as its instance. The channel took the new instance and kept
+  the old expiry: an inbox that had expired was still taken for live, and a
+  thread that expired later was given up early.
+- A trace that cannot be written for a message read is said in `attention` as
+  `untraced`, and no longer on the message as `trace_error`: an error added after
+  the weighing let 1310 bytes through a budget of 716. A send still carries `trace_error`.
+- A scope share that cannot be saved says `not kept: could not be saved`, and
+  `attention` says why as `scope_not_saved`. The message is weighed at the
+  longer of the two forms the share can take.
 - A receipt names a signer only for a line it lists as this process read it,
   and its keys must be the signers of its lines, each once: one that left a
   signer out was signed as if nobody had signed.

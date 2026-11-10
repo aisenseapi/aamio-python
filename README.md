@@ -173,6 +173,8 @@ An empty list means nobody wrote only when nothing else is said. `read` answers 
 | `unread` | the service did not answer for that channel, so there may be messages waiting |
 | `gone` | there is no thread at the address any more; a gone inbox is opened again for you |
 | `restarted` | a new thread opened at the same address, and it was read from the start |
+| `reread` | the channel's cursor was kept without the thread's instance, by an earlier version or another client, so the thread was read again from the start once; what came before comes marked `replay` |
+| `archive_failed`, `scope_not_saved`, `untraced` | a message read could not be written to the archive, a scope it shared could not be saved, or the trace could not be written; the message came, and this says what went wrong |
 | `more` | the read stopped at its `limit` or its byte budget, or the service had more than the budget allowed; nothing was passed over, the cursor stands at the last message handed over, so read again |
 | `too_large` | one message is larger than the byte budget asked for, so it was not sent; it says which and how big, and it stays there until the budget is raised or its `seq` is stepped past |
 | `over_budget` | one message already fetched is larger than the whole budget asked for, so it was handed over anyway rather than held back for ever; the opposite of `too_large`, which did not arrive |

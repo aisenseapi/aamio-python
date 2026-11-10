@@ -399,7 +399,10 @@ def test_a_share_that_cannot_be_saved_is_not_kept_and_the_rest_of_the_batch_arri
     state, entries = runtime.poll(channel)
 
     assert state == "ok" and [entry["seq"] for entry in entries] == [1, 2] and channel.after == 2
-    assert entries[0]["body"]["data"]["aamio_scope"]["kept"] is False and "No space left" in entries[0]["body"]["data"]["aamio_scope"]["note"]
+    # On the message in the form it was weighed at, and why in attention (a review of 10 November 2026).
+    assert entries[0]["body"]["data"]["aamio_scope"] == {"shared_as": "team", "can_read": True, "kept": False, "note": "not kept: could not be saved"}
+    said = [note for note in runtime.attention_taken() if note["state"] == "scope_not_saved"]
+    assert len(said) == 1 and said[0]["seqs"] == [1] and "No space left on device" in said[0]["what"]
     assert runtime.scope_list() == [] and VECTOR_KEY not in json.dumps(entries)
 
 

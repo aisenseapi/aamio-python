@@ -14,6 +14,7 @@ messages as they are handed over; and an anchoring that answered with an error,
 or broke off after its status, made no proof.
 """
 
+import copy
 import http.server
 import json
 import os
@@ -30,7 +31,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from aamio.client import AamioClient
 from aamio.crypto import Keys
 from aamio.runtime import Channel
-from signing import stored
+from signing import keypair, stored
 from test_reader_checks import ALICE, W, answer, build
 from test_receipt import root_of
 
@@ -401,3 +402,132 @@ def test_the_listener_keeps_the_budget_per_channel_as_the_tool_says():
     assert len(said) == 1 and "on inbox, side" in said[0]["what"]
     again = runtime.read(0, 50, max_bytes=one + 10)
     assert [(e["channel"], e["seq"]) for e in again] == [("inbox", 2), ("side", 2)], "and the rest next, in the order it came"
+
+
+# --------------------------------------------- the post-check of the evening
+# code/php/docs/aamio-trad-id-etterkontroll-2026-11-10.md
+
+
+def test_a_thread_the_service_read_from_the_start_is_followed_in_its_expiry():
+    now = int(time.time())
+    rows = [stored(W, n, "h%d" % n, ALICE) for n in (1, 2)]
+    runtime = reading([answer(*rows, created_at=now, expire_at=now + 3600, instance="a" * 16)])
+    channel = runtime.channels["inbox"]
+    assert len(runtime.read()) == 2 and channel.after == 2 and channel.expire_at == now + 3600
+    # The service restarted, and a write opened a thread with its own lifetime: the cursor at 2 is past its one
+    # message, so the service read it from the start and said reset.
+    after = stored(W, 1, "after the restart", ALICE)
+    reset = {"after": 2, "newest": 1, "what": "after 2 is past the last message this thread holds, 1"}
+    runtime.client.read = lambda *args, **kw: answer(after, created_at=now + 5, expire_at=now + 605, instance="b" * 16, reset=reset)
+    assert [e["body"]["text"] for e in runtime.read()] == ["after the restart"]
+    assert channel.instance == "b" * 16 and channel.created_at == now + 5
+    assert channel.expire_at == now + 605, "the expiry of the thread that is there, with its instance"
+    assert Channel.from_state(channel.to_state()).expire_at == now + 605, "and state.json keeps it"
+    # And one that expires later than the one opened is followed as well.
+    later = stored(W, 1, "later", ALICE)
+    runtime.client.read = lambda *args, **kw: answer(later, created_at=now + 9, expire_at=now + 7209, instance="c" * 16, reset=reset)
+    assert [e["body"]["text"] for e in runtime.read()] == ["later"]
+    assert channel.expire_at == now + 7209
+
+
+def kept_without_instance(after, seen, now):
+    """A home as a client that does not keep the thread's instance leaves it: the cursor and the hashes, and no instance."""
+    runtime = reading([])
+    channel = runtime.channels["inbox"]
+    channel.after, channel.created_at, channel.expire_at, channel.instance = after, now, now + 3600, None
+    channel.seen = set(seen)
+    return runtime, channel
+
+
+def test_a_cursor_kept_without_the_instance_is_read_again_from_the_start_once():
+    now = int(time.time())
+    rows = [stored(W, n, "h%d" % n, ALICE) for n in (1, 2, 3)]
+    runtime, channel = kept_without_instance(2, [rows[0]["sha256"], rows[1]["sha256"]], now)
+    asked = []
+
+    def read(w, read_key, after, wait, **limits):
+        asked.append(after)
+        return answer(*[r for r in rows if r["seq"] > after], created_at=now, expire_at=now + 3600, instance="a" * 16)
+
+    runtime.client.read = read
+    got = runtime.read()
+    assert asked == [2, 0]
+    assert [(e["body"]["text"], e["replay"]) for e in got] == [("h1", True), ("h2", True), ("h3", False)], "all of it, and nothing passed over"
+    said = [note for note in runtime.attention_taken() if note["state"] == "reread"]
+    assert len(said) == 1 and "cursor, 2, was kept by a client that did not keep the thread's instance" in said[0]["what"]
+    assert channel.instance == "a" * 16 and channel.after == 3
+    asked.clear()
+    assert runtime.read() == []
+    assert asked == [3], "once"
+    assert [note for note in runtime.attention_taken() if note["state"] == "reread"] == []
+
+
+def test_another_senders_message_with_the_same_text_reaches_the_agent_when_a_cursor_kept_without_the_instance_is_read_again():
+    now = int(time.time())
+    bob = keypair(2)
+    first, second = stored(W, 1, "OK", ALICE), stored(W, 2, "OK", bob)
+    assert first["sha256"] == second["sha256"], "the hash is of the text alone"
+    runtime, channel = kept_without_instance(1, [first["sha256"]], now)
+    channel.allow = [ALICE.public, bob.public]
+    runtime.client.read = lambda w, read_key, after, wait, **limits: answer(*[r for r in (first, second) if r["seq"] > after], created_at=now, expire_at=now + 3600, instance="a" * 16)
+    assert [(e["seq"], e["from_key"]) for e in runtime.read()] == [(1, ALICE.public), (2, bob.public)], "both, the other sender's too"
+    # A thread opened again in the same second, with the same lifetime and list, whose first message is the other
+    # sender's OK, under a cursor at 1 kept without the instance.
+    channel.after, channel.instance = 1, None
+    again = stored(W, 1, "OK", bob)
+    runtime.client.read = lambda w, read_key, after, wait, **limits: answer(*[r for r in (again,) if r["seq"] > after], created_at=now, expire_at=now + 3600, instance="b" * 16)
+    assert [(e["seq"], e["from_key"]) for e in runtime.read()] == [(1, bob.public)], "the new thread's first message comes"
+
+
+def test_a_trace_that_cannot_be_written_does_not_take_a_read_over_its_budget():
+    rows = [stored(W, n, "h%d" % n, ALICE) for n in (1, 2)]
+
+    def refuse(name, value, private=True):
+        if name == "trace.json":
+            raise OSError(28, "No space left on device, and a long explanation of it that would have gone on every message")
+
+    runtime = reading([answer(*rows, created_at=1000)])
+    runtime._save_json = refuse
+    whole = runtime.read(0, 50)
+    assert len(whole) == 2 and all("trace_error" not in e for e in whole), "said in attention, not on the message"
+    assert any(note["state"] == "untraced" and "No space left on device" in note["what"] for note in runtime.attention_taken())
+    budget = sum(size(e) for e in whole) - 1
+    runtime = reading([answer(*rows, created_at=1000)])
+    runtime._save_json = refuse
+    got = runtime.read(0, 50, max_bytes=budget)
+    assert len(got) == 1 and size(got[0]) <= budget, "one byte under the two as handed over: the second waits"
+
+
+def test_a_scope_share_that_cannot_be_saved_is_weighed_no_lighter_than_it_is_shown_and_said_in_attention(tmp_path):
+    from test_scopes import build as scoped, incoming
+
+    runtime = scoped(str(tmp_path))
+
+    def refuse(name, value, private=True):
+        raise OSError(28, "No space left on device, and a long explanation of it")
+
+    runtime._save_json = refuse
+    weighed = incoming(seq=4, channel="inbox", w=W)
+    runtime._take_scope_share(weighed, weigh=True)
+    taken = incoming(seq=4, channel="inbox", w=W)
+    runtime._take_scope_share(taken)
+    assert taken["body"]["data"]["aamio_scope"] == {"shared_as": "team", "can_read": True, "kept": False, "note": "not kept: could not be saved"}
+    assert size(taken) <= size(weighed)
+    assert runtime.scopes == []
+    said = [note for note in runtime.attention_taken() if note["state"] == "scope_not_saved"]
+    assert len(said) == 1 and said[0]["seqs"] == [4] and "No space left on device" in said[0]["what"]
+
+
+def test_two_shares_of_one_name_in_one_answer_are_weighed_as_they_are_taken(tmp_path):
+    from test_scopes import build as scoped, incoming
+
+    runtime = scoped(str(tmp_path))
+    first, second = incoming(), incoming(key="k" * 30)
+    # As a read does it, message by message: the second is weighed after the first was taken.
+    for entry in (first, second):
+        weighed = copy.deepcopy(entry)
+        runtime._take_scope_share(weighed, weigh=True)
+        runtime._take_scope_share(entry)
+        assert weighed == entry
+    assert first["body"]["data"]["aamio_scope"]["kept"] is True
+    assert second["body"]["data"]["aamio_scope"]["kept"] is False and "already" in second["body"]["data"]["aamio_scope"]["note"]

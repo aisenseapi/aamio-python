@@ -1328,6 +1328,10 @@ class Runtime:
     # sealed, so no model has to hold it. The address is the write capability
     # and is no secret. Unlisted is not private.
 
+    # What a scope share says when scopes.json could not be written, and attention
+    # says why. Shorter than the form a kept share takes, which a share is
+    # weighed at when that is the longer.
+    SCOPE_NOT_SAVED = "not kept: could not be saved"
     SCOPE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
     def _usable_scopes(self, entries):
@@ -1509,13 +1513,32 @@ class Runtime:
             try:
                 local = self._shared_scope_name(partner, share.get("name"))
                 address = None if key is not None else share.get("address")
-                # Weighed, it is shown as it will be kept, and nothing is kept.
-                kept = self._scope_view(self._scope_add_plan(local, key=key, address=address)[0]) if weigh else self.scope_add(local, key=key, address=address)
-                view.update(kept, kept=True)
+                held, keep = self._scope_add_plan(local, key=key, address=address)
             except Exception as error:
                 # This share alone, and nothing held that was not saved. The
                 # rest of the messages are delivered either way.
                 view["note"] = "not kept: %s" % error
+            else:
+                shown = dict(view, **self._scope_view(held), kept=True)
+                unsaved = dict(view, note=self.SCOPE_NOT_SAVED)
+                if weigh:
+                    # Weighed, nothing is kept, and it is shown in the longer of
+                    # the two forms it can take: kept, or not saved. An error of
+                    # its own length in place of the kept form let a message
+                    # through a byte budget it was weighed under (a review of 10
+                    # November 2026).
+                    view = max((shown, unsaved), key=lambda form: len(json.dumps(form, ensure_ascii=False, separators=(",", ":")).encode("utf-8")))
+                else:
+                    try:
+                        if keep is not None:
+                            self._save_scopes(keep)
+                        view = shown
+                    except Exception as error:
+                        # Said in attention, with what went wrong, and on the
+                        # message in the form it was weighed at.
+                        view = unsaved
+                        seq = entry.get("seq")
+                        self._note_trouble(entry.get("channel") or "scopes", "scope_not_saved", "message %s shared scope %s, and scopes.json could not be written: %s: %s. The scope is not kept." % (seq, share.get("name"), error.__class__.__name__, error), w=entry.get("w"), seqs=[seq] if type(seq) is int else None)
         data["aamio_scope"] = view
 
     # ------------------------------------------------------------ inbox --
@@ -3110,7 +3133,7 @@ class Runtime:
         with self.lock:
             if not hasattr(self, "attention"):
                 self.attention = {}
-            if state in ("kept_out", "unverified", "binding_conflict", "archive_failed") and seqs is not None:
+            if state in ("kept_out", "unverified", "binding_conflict", "archive_failed", "scope_not_saved") and seqs is not None:
                 previous = self.attention.get((where, state), {})
                 note["seqs"] = previous.get("seqs", []) + list(seqs)
                 note["count"] = len(note["seqs"])
@@ -3319,13 +3342,32 @@ class Runtime:
                 self._note(channel, "restarted", "the thread at this address is a new one, opened at %s and expiring at %s, where this channel knew one opened at %s and expiring at %s, so it is read again from the start" % (created, expires, channel.created_at, channel.expire_at))
             channel.forget_thread()
             return self.poll(channel, 0, limit, max_bytes)
+        # A cursor kept by a client that did not keep the thread's instance,
+        # this one before 10 November 2026 among them, cannot be checked against
+        # it: a thread opened again at this address in the same second, with the
+        # same lifetime and list, looks the same in every other field, and its
+        # first messages were passed over without a word (a review of 10
+        # November 2026). So the thread is read again from the start, once, and
+        # all of it is handed over: what this channel handed over before comes
+        # again marked replay, as after a restart. Nothing is passed over by its
+        # hash, which is the hash of the text alone: another sender's message
+        # with the same text has it too (the same review).
+        if not another and not reset and channel.after > 0 and channel.instance is None and instance is not None:
+            self._note(channel, "reread", "this channel's cursor, %s, was kept by a client that did not keep the thread's instance, so it cannot be told whether the thread here is the one that cursor was kept on. It is read again from the start this once: what this channel handed over before comes again, marked replay, and nothing is passed over." % channel.after)
+            channel.after = 0
+            return self.poll(channel, 0, limit, max_bytes)
         if reset:
             self._note(channel, "restarted", (reset.get("what") if isinstance(reset, dict) else None) or "the service read this thread from the start")
             with channel.lock:
                 channel.observed.clear()
-        # The channel follows the thread that is there: one taken up after its
-        # cursor was forgotten may expire at another time than the one opened.
-        if channel.created_at is None and expires is not None:
+        # The channel follows the thread that is there, all of it at once: one
+        # taken up after its cursor was forgotten, or read from the start by the
+        # service after a restart, may expire at another time than the one
+        # opened. A channel that took the new instance and kept the old expiry
+        # chose an inbox that had expired, and one that expired later was given
+        # up early (a review of 10 November 2026). The list this channel was
+        # opened with is its own, and stays.
+        if (channel.created_at is None or another or reset) and expires is not None:
             channel.expire_at = expires
         channel.created_at = created
         if instance is not None:
@@ -3439,9 +3481,13 @@ class Runtime:
                 # And the trace: what came from this key, and what it says it
                 # read of ours. Verified only, since an unsigned message can
                 # claim to be from anyone and to have read anything. Whatever
-                # goes wrong in the trace costs the trace, never this batch.
+                # goes wrong in the trace costs the trace, never this batch, and
+                # is said in attention, not on the message: a message has to be
+                # the size it was weighed at, and an error added after the
+                # weighing let 1310 bytes through a budget of 716 (a review of
+                # 10 November 2026).
                 if applying and entry["verified"] and sender_key:
-                    self._trace_safely("received", self._trace_received, channel, entry, on=entry)
+                    self._trace_safely("received", self._trace_received, channel, entry)
             entries.append(entry)
             with channel.lock:
                 channel.received.append(entry)
