@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## Unreleased
+## 0.6.31 - 2026-11-11
 
 - A message is a replay only when this channel handed the same bytes over before
   from the same signer, or the same unsigned bytes. It was the hash of the text
