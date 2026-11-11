@@ -12,6 +12,7 @@ The inbox is a thread with the maximum lifetime. Before it expires the runtime
 opens a new one and republishes presence, so partners keep finding it.
 """
 
+import collections
 import copy
 import errno
 import json
@@ -2244,15 +2245,20 @@ class Runtime:
         unread and the silence got blamed on the sender.
         """
         out = []
-        seen = set()
         skipped = []
 
-        # One delivery is one row: the address, the seq, the time and the hash
-        # of its bytes. The hash alone is of the text, and of two signers who
-        # sent the same answer to one post, the second was left out once the
-        # list came from the archive (a review of 11 November 2026).
-        def delivery(entry):
-            return (entry.get("w"), entry.get("seq"), entry.get("at"), entry.get("sha256"))
+        # One delivery is one row. The hash alone is of the text, and of two
+        # signers who sent the same answer to one post the second was left out
+        # once the list came from the archive; and a thread opened again at the
+        # same address in the same second gives a message the same seq and the
+        # same time as one of the old thread, so the address, the seq, the time
+        # and the hash together still made two deliveries one (two reviews of
+        # 11 November 2026). A row the archive keeps with its thread's instance
+        # is one delivery by its address, instance and seq. Any other row is
+        # told by all it shows, its verified signer too, and two rows that show
+        # the same are both kept: nothing says they are one.
+        def shown(entry):
+            return (entry.get("w"), entry.get("seq"), entry.get("at"), entry.get("sha256"), entry.get("from_key"))
 
         def wanted(entry):
             body = entry.get("body")
@@ -2273,14 +2279,23 @@ class Runtime:
         # Every channel, not only the ones named board: an answer can arrive on
         # a private channel opened for the conversation, and scoping this to
         # "board" once hid exactly those. That is a separate fix and it stays.
+        held = []
         for channel in list(self.channels.values()):
             with channel.lock:
-                for entry in channel.received:
-                    seen.add(delivery(entry))
-                    if wanted(entry):
-                        out.append(entry)
-                    else:
-                        skipped.append(entry)
+                held.extend(channel.received)
+
+        for entry in held:
+            if wanted(entry):
+                out.append(entry)
+            else:
+                skipped.append(entry)
+
+        # What this process handed over and wrote down has its row in the
+        # archive as well, and is shown once, as it was handed over. One that
+        # was not written down has no row there and stands for none: it would
+        # hide another delivery that shows the same.
+        on_disk = collections.Counter(shown(entry) for entry in held if entry.get("archived") is not False)
+        named = set()
 
         # A board inbox is renewed while the old one still holds answers, and
         # the old one keeps its own label and its own archive. Once that
@@ -2289,9 +2304,15 @@ class Runtime:
         # although they had arrived, been decrypted and been written down.
         for label in sorted(self._archive_labels() | set(self.channels) | {"board"}):
             for entry in self._archived(label, "received"):
-                if delivery(entry) in seen:
+                instance = entry.get("instance")
+                if isinstance(instance, str):
+                    one = (entry.get("w"), instance, entry.get("seq"))
+                    if one in named:
+                        continue
+                    named.add(one)
+                if on_disk[shown(entry)] > 0:
+                    on_disk[shown(entry)] -= 1
                     continue
-                seen.add(delivery(entry))
                 if wanted(entry):
                     out.append(dict(entry, from_archive=True))
                 else:
@@ -3566,7 +3587,14 @@ class Runtime:
             # do. Nor is it swallowed: it stays on the entry and in the log,
             # because a storage failure is worth knowing about.
             try:
-                wrote = self.archive(channel.label, dict(entry, kind="received"))
+                # With the thread's instance: a thread opened again at the same
+                # address in the same second gives a message the same seq and
+                # the same time as one of the old thread, and board replies had
+                # nothing else to tell the two by (a review of 11 November 2026).
+                row = dict(entry, kind="received")
+                if isinstance(channel.instance, str):
+                    row["instance"] = channel.instance
+                wrote = self.archive(channel.label, row)
                 entry["archived"] = wrote is not False
 
                 if wrote is False:

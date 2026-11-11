@@ -224,6 +224,18 @@ def test_an_unchanged_thread_is_read_from_its_cursor_with_nothing_more_and_says_
     assert [note for note in runtime.attention_taken() if note["state"] == "restarted"] == []
 
 
+def test_the_archive_keeps_the_thread_s_instance_with_each_message():
+    # Board replies tell a thread opened again at the same address in the same second from the old one by it (a
+    # review of 11 November 2026).
+    runtime = reading([answer(stored(W, 1, "one", ALICE), created_at=1000, instance="a" * 16)])
+    rows = []
+    runtime.archive_enabled = True
+    runtime.archive = lambda label, record: rows.append(record) or True
+    got = runtime.read()
+    assert [row["instance"] for row in rows] == ["a" * 16]
+    assert "instance" not in got[0], "and the message as handed over is the one weighed"
+
+
 def test_a_channel_read_from_state_json_knows_its_thread_by_the_instance_kept_there():
     first = stored(W, 1, "one", ALICE)
     runtime, channel = build([answer(first, created_at=1000, instance="a" * 16)])

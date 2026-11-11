@@ -177,7 +177,7 @@ def test_the_same_answer_is_not_counted_twice(home):
     archive_an_answer(home)
     runtime = build(home, board_expire=time.time() + 600)
     runtime.channels["board"].received = [
-        {"channel": "board", "seq": 1, "at": 1789470699, "sha256": "a" * 64,
+        {"channel": "board", "seq": 1, "at": 1789470699, "sha256": "a" * 64, "from_key": "their-key",
          "body": {"post": "p1", "text": "the answer nobody saw"}}
     ]
     replies = runtime.board_replies("p1")
@@ -326,3 +326,56 @@ def test_a_new_thread_at_the_address_that_starts_at_one_again_is_another_deliver
                                  "from_key": "a-key", "sender": "unknown key", "sha256": "d" * 64, "body": {"post": "p1", "text": "OK again"}}) + "\n")
     runtime = build(home, board_expire=time.time() + 600)
     assert [(r["seq"], r["at"]) for r in runtime.board_replies("p1")] == [(1, 1789470701), (2, 1789470702), (1, 1789470900)]
+
+
+def archive_rows(home, *rows):
+    os.makedirs(os.path.join(home, "archive"), exist_ok=True)
+    with open(os.path.join(home, "archive", "board.jsonl"), "a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(dict({"kind": "received", "channel": "board", "w": "b" * 20, "seq": 1, "at": 1789470700, "verified": True,
+                                          "sender": "unknown key", "sha256": "c" * 64, "body": {"post": "p1", "text": "OK"}}, **row)) + "\n")
+
+
+@pytest.mark.parametrize("second", ["b-key", "a-key"], ids=["another signer", "the same signer"])
+def test_a_thread_opened_again_at_the_address_in_the_same_second_is_another_delivery(home, second):
+    # A on the thread opened first, then the other thread at the same address, opened in the same second: seq 1 and
+    # the same time and text on both, and one of them was gone once the list came from the archive (a review of 11
+    # November 2026). Two processes, one after the other, each list both, once each.
+    archive_rows(home, {"instance": "x" * 16, "from_key": "a-key"}, {"instance": "y" * 16, "from_key": second})
+    for _ in range(2):
+        runtime = build(home, board_expire=time.time() + 600)
+        assert [r["from_key"] for r in runtime.board_replies("p1")] == ["a-key", second]
+
+
+def test_the_second_one_held_in_memory_leaves_the_first_on_disk_shown(home):
+    # The process that read B holds B in memory: B once, and A from the archive.
+    archive_rows(home, {"instance": "x" * 16, "from_key": "a-key"}, {"instance": "y" * 16, "from_key": "b-key"})
+    runtime = build(home, board_expire=time.time() + 600)
+    runtime.channels["board"].received = [
+        {"channel": "board", "w": "b" * 20, "seq": 1, "at": 1789470700, "sha256": "c" * 64, "from_key": "b-key", "archived": True, "body": {"post": "p1", "text": "OK"}}
+    ]
+    assert sorted((r["from_key"], "from_archive" in r) for r in runtime.board_replies("p1")) == [("a-key", True), ("b-key", False)]
+
+
+def test_two_rows_from_before_the_instance_that_show_the_same_are_both_kept(home):
+    # Written before the archive kept the instance: nothing says they are one delivery, so neither is left out.
+    archive_rows(home, {"from_key": "a-key"}, {"from_key": "a-key"})
+    runtime = build(home, board_expire=time.time() + 600)
+    assert len(runtime.board_replies("p1")) == 2
+
+
+def test_one_delivery_written_down_twice_is_one_row(home):
+    # The same address, instance and seq: one delivery, whatever the copies.
+    archive_rows(home, {"instance": "x" * 16, "from_key": "a-key"}, {"instance": "x" * 16, "from_key": "a-key"})
+    runtime = build(home, board_expire=time.time() + 600)
+    assert len(runtime.board_replies("p1")) == 1
+
+
+def test_one_not_written_down_does_not_hide_another_that_shows_the_same(home):
+    # This process holds A from the new thread, whose writing failed; the archive holds A from the old one.
+    archive_rows(home, {"instance": "x" * 16, "from_key": "a-key"})
+    runtime = build(home, board_expire=time.time() + 600)
+    runtime.channels["board"].received = [
+        {"channel": "board", "w": "b" * 20, "seq": 1, "at": 1789470700, "sha256": "c" * 64, "from_key": "a-key", "archived": False, "body": {"post": "p1", "text": "OK"}}
+    ]
+    assert sorted("from_archive" in r for r in runtime.board_replies("p1")) == [False, True]

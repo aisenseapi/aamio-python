@@ -16,10 +16,17 @@ not what moved in the source.
   signer with no record of its own comes with `replay: false` and
   `replay_unknown: true`, and `attention` says so as `replay_unknown`. Taken as a
   copy, another signer's first answer with the same text was passed over, and
-  taken as new, the same signer's copy was acted on twice.
-- `board replies` tells one delivery from another by its address, seq, time and
-  hash. Two signers who sent the same answer to one post were one answer once
-  the list came from the archive, after a restart, though both were on disk.
+  taken as new, the same signer's copy was acted on twice. Where `replay`
+  decides what is done, upgrade every client that reads one home together: an
+  earlier version that reads in between records no signer for what it hands
+  over, and a copy from that signer can then come with `replay: false`.
+- `board replies` lists every delivery once. Two signers who sent the same
+  answer to one post were one answer once the list came from the archive, after
+  a restart, though both were on disk, and so were two answers on a thread
+  opened again at the same address in the same second. The archive keeps the
+  thread's `instance` with each message it writes, and a row that has one is one
+  delivery by its address, instance and seq. A row written before is told by all
+  it shows, its signer too, and two such rows that show the same are both kept.
 
 ## 0.6.30 - 2026-11-11
 
