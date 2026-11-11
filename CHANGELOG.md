@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## Unreleased
+## 0.6.32 - 2026-11-11
 
 - A scope you removed stays removed when the invitation that brought it is read
   again. The invitation is recorded with the scope in `scopes.json`, and
