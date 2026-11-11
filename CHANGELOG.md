@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## Unreleased
+## 0.6.30 - 2026-11-11
 
 - A receipt is compared only with what was read on its own thread. After the
   service restarted, a thread opened again at the same address was compared with
