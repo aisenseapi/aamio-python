@@ -236,6 +236,77 @@ def test_the_archive_keeps_the_thread_s_instance_with_each_message():
     assert "instance" not in got[0], "and the message as handed over is the one weighed"
 
 
+def board_reading(answers, rows):
+    """A board channel at W whose archive is rows: what poll writes there, and what board replies read back."""
+    runtime, _ = build(answers)
+    runtime.archive_enabled = True
+    runtime.archive = lambda label, record: rows.append((label, json.loads(json.dumps(record)))) or True
+    runtime._archive_labels = lambda prefix="": {label for label, _ in rows}
+    runtime._archived = lambda label, kind: [dict(record) for at, record in rows if at == label and record.get("kind") == kind]
+    channel = Channel("board", "read-key", W, time.time() + 600)
+    runtime.channels = {"board": channel}
+    return runtime, channel
+
+
+def test_one_signer_s_answer_on_two_threads_at_one_address_in_one_second_is_two_replies_with_their_marks():
+    # The same answer from A on the thread, and on the one opened again at its address in the same second: seq 1 at
+    # the same time on both, the second a copy. The process that read the second held it in memory, and that copy hid
+    # the first one's row (a check of 11 November 2026). Each once, as handed over, there and in the next process.
+    rows = []
+    first = stored(W, 1, "OK", ALICE)
+    runtime, channel = board_reading([answer(first, created_at=1000, instance="x" * 16)], rows)
+    runtime.poll(channel)
+    kept = channel.to_state()
+    later, _ = board_reading([answer(created_at=1000, instance="y" * 16), answer(first, created_at=1000, instance="y" * 16)], rows)
+    later.channels["board"] = channel = Channel.from_state(kept)
+    assert [entry["replay"] for entry in later.poll(channel)[1]] == [True]
+    for reader in (later, board_reading([], rows)[0]):
+        assert sorted((reply["instance"], reply["replay"]) for reply in reader.board_replies()) == [("x" * 16, False), ("y" * 16, True)]
+
+
+def test_an_answer_handed_over_again_after_its_cursor_could_not_be_written_is_one_reply():
+    # One answer, its cursor not written down, and read again in the same process once the home could be written to:
+    # two copies of one delivery, listed twice (a check of 11 November 2026). Once, as first handed over, there and in
+    # the next process.
+    rows = []
+    reply = stored(W, 1, "OK", ALICE)
+    runtime, channel = board_reading([answer(reply, created_at=1000, instance="x" * 16), answer(reply, created_at=1000, instance="x" * 16)], rows)
+    saves = []
+
+    def failing_once():
+        saves.append(channel.after)
+        if len(saves) == 1:
+            raise OSError(28, "No space left on device")
+
+    runtime.save_state = failing_once
+    assert [entry["replay"] for entry in runtime.poll(channel)[1]] == [False] and channel.after == 0
+    assert [entry["replay"] for entry in runtime.poll(channel)[1]] == [True] and channel.after == 1
+    for reader in (runtime, board_reading([], rows)[0]):
+        assert [(reply["seq"], reply["replay"]) for reply in reader.board_replies()] == [(1, False)]
+
+
+def test_a_read_writes_its_cursor_once_and_says_where_it_stands_when_that_fails():
+    # Two writes in one read: the first failed, the second wrote 1, and attention said the cursor stayed at 0 (a
+    # check of 11 November 2026). One write now, and attention says where the cursor is.
+    rows = [stored(W, n, "m%d" % n, ALICE) for n in (1, 2)]
+    runtime, channel = build([answer(*rows, created_at=1000, instance="a" * 16), answer(created_at=1000, instance="a" * 16, next=2)])
+    saves = []
+
+    def failing_once():
+        saves.append(channel.after)
+        if len(saves) == 1:
+            raise OSError(28, "No space left on device")
+
+    runtime.save_state = failing_once
+    got = runtime.poll(channel)[1]
+    said = [note for note in runtime.attention_taken() if note["state"] == "unsaved"]
+    assert len(got) == 2 and saves == [2] and channel.after == 0
+    assert len(said) == 1 and "The cursor stays at 0" in said[0]["what"]
+    runtime.poll(channel)
+    assert saves == [2, 2] and channel.after == 2
+    assert [note for note in runtime.attention_taken() if note["state"] == "unsaved"] == []
+
+
 def test_a_channel_read_from_state_json_knows_its_thread_by_the_instance_kept_there():
     first = stored(W, 1, "one", ALICE)
     runtime, channel = build([answer(first, created_at=1000, instance="a" * 16)])

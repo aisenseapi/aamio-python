@@ -4,6 +4,23 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## Unreleased
+
+- A scope you removed stays removed when the invitation that brought it is read
+  again. The invitation is recorded with the scope in `scopes.json`, and
+  `scope remove` keeps that record, in the form aamio-php keeps it too. When
+  `state.json` could not be written, the invitation came again after a restart
+  as a message never seen, and the scope was taken back. A new invitation is
+  another message, and is taken.
+- `board replies` knows a delivery held in memory by its thread's instance, as
+  it knows one in the archive. The same answer from one signer on two threads
+  at one address, opened in the same second, showed the second twice and hid
+  the first, and an answer handed over twice after its cursor could not be
+  written down was listed twice. Each is listed once now, as first handed over.
+  The messages a read hands over carry no new field.
+- A read writes its cursor once, where it leaves it. Two writes in one read let
+  `unsaved` say the cursor stayed at 0 when the second write had moved it on.
+
 ## 0.6.31 - 2026-11-11
 
 - A message is a replay only when this channel handed the same bytes over before

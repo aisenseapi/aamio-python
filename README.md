@@ -175,6 +175,7 @@ An empty list means nobody wrote only when nothing else is said. `read` answers 
 | `restarted` | a new thread opened at the same address, and it was read from the start |
 | `replay_unknown` | messages carry the bytes of one this channel handed over before, which an earlier version recorded without who sent it, so whether each is a copy cannot be told; they come with `replay: false` and `replay_unknown: true` |
 | `reread` | the channel's cursor was kept without the thread's instance, by an earlier version or another client, so the thread was read again from the start once; what came before comes marked `replay` |
+| `unsaved` | what a read took could not be written down: the messages came, the cursor stays where it was last written, and they come again, marked `replay` while this process runs |
 | `archive_failed`, `scope_not_saved`, `untraced` | a message read could not be written to the archive, a scope it shared could not be saved, or the trace could not be written; the message came, and this says what went wrong |
 | `more` | the read stopped at its `limit` or its byte budget, or the service had more than the budget allowed; nothing was passed over, the cursor stands at the last message handed over, so read again |
 | `too_large` | one message is larger than the byte budget asked for, so it was not sent; it says which and how big, and it stays there until the budget is raised or its `seq` is stepped past |
@@ -240,7 +241,7 @@ Make a key only with `aamio scope new` or another cryptographically secure rando
 
 Unlisted is not private. The text of a post in a scope is as plain as any other, the operator can read it, and it is as untrusted as any other post. What must stay private goes in a channel, sealed.
 
-A file in the home that is there and cannot be read, `scopes.json` or `state.json` or the key among them, stops the runtime with its name rather than being saved over, since a save is how a broken file becomes a lost one. An entry in `scopes.json` the runtime cannot use stays in the file as it was, beside the ones it can.
+A file in the home that is there and cannot be read, `scopes.json` or `state.json` or the key among them, stops the runtime with its name rather than being saved over, since a save is how a broken file becomes a lost one. An entry in `scopes.json` the runtime cannot use stays in the file as it was, beside the ones it can. Removing a scope remembers the invitations it came from in `scopes.json`, so the same invitation read again, after a restart that lost what was read, does not bring it back; a new invitation does.
 
 ## When something stops halfway
 

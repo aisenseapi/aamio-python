@@ -352,7 +352,7 @@ def test_the_second_one_held_in_memory_leaves_the_first_on_disk_shown(home):
     archive_rows(home, {"instance": "x" * 16, "from_key": "a-key"}, {"instance": "y" * 16, "from_key": "b-key"})
     runtime = build(home, board_expire=time.time() + 600)
     runtime.channels["board"].received = [
-        {"channel": "board", "w": "b" * 20, "seq": 1, "at": 1789470700, "sha256": "c" * 64, "from_key": "b-key", "archived": True, "body": {"post": "p1", "text": "OK"}}
+        {"channel": "board", "w": "b" * 20, "seq": 1, "at": 1789470700, "sha256": "c" * 64, "from_key": "b-key", "archived": True, "instance": "y" * 16, "body": {"post": "p1", "text": "OK"}}
     ]
     assert sorted((r["from_key"], "from_archive" in r) for r in runtime.board_replies("p1")) == [("a-key", True), ("b-key", False)]
 

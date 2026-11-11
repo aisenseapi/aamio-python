@@ -1389,6 +1389,17 @@ class Runtime:
     # weighed at when that is the longer.
     SCOPE_NOT_SAVED = "not kept: could not be saved"
     SCOPE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+    # How many invitations whose scope was removed scopes.json remembers. One is
+    # only read again while its thread lives, and the oldest go first.
+    SCOPE_REMOVED_KEEP = 256
+
+    @staticmethod
+    def _is_removed_share(entry):
+        """An entry of scopes.json that remembers an invitation whose scope was removed, as aamio-php writes it too."""
+        return isinstance(entry, dict) and set(entry) == {"removed_share"} and isinstance(entry["removed_share"], str) and SEEN_FROM.fullmatch(entry["removed_share"]) is not None
+
+    def _removed_shares(self):
+        return {entry["removed_share"] for entry in getattr(self, "scopes_aside", []) if self._is_removed_share(entry)}
 
     def _usable_scopes(self, entries):
         """The entries of scopes.json this runtime can use, and the rest.
@@ -1412,15 +1423,20 @@ class Runtime:
                 names.add(entry["name"].lower())
             else:
                 aside.append(entry)
-        if aside:
-            self.log("scopes.json: %d entries are not scopes this runtime can use, and stay in the file as they are" % len(aside))
+        # An invitation whose scope was removed is remembered among the rest,
+        # where an earlier version keeps it too, and is no typo to report.
+        unusable = [entry for entry in aside if not self._is_removed_share(entry)]
+        if unusable:
+            self.log("scopes.json: %d entries are not scopes this runtime can use, and stay in the file as they are" % len(unusable))
         return usable, aside
 
-    def _save_scopes(self, scopes):
+    def _save_scopes(self, scopes, aside=None):
         """Writes the scopes, and only then holds them: a save that fails changes nothing."""
         with self.lock:
-            self._save_json("scopes.json", scopes + getattr(self, "scopes_aside", []), private=True)
+            aside = getattr(self, "scopes_aside", []) if aside is None else aside
+            self._save_json("scopes.json", scopes + aside, private=True)
             self.scopes = scopes
+            self.scopes_aside = aside
 
     def _scope(self, name):
         for entry in self.scopes:
@@ -1491,9 +1507,25 @@ class Runtime:
         return [self._scope_view(entry) for entry in self.scopes]
 
     def scope_remove(self, name):
+        """Removes a scope, and remembers the invitations it came from in the same write.
+
+        The cursor and the hashes of what was read live in state.json, and the
+        scope in scopes.json. When state.json could not be written, the
+        invitation came again after a restart as a message never seen, and a
+        scope removed since was taken back (a check of 11 November 2026). Now
+        the invitation is remembered here, and the same one read again keeps
+        nothing. A new invitation is another message, and is taken.
+        """
         with self.lock:
             entry = self._scope_named(name)
-            self._save_scopes([s for s in self.scopes if s is not entry])
+            aside = list(getattr(self, "scopes_aside", []))
+            removed = self._removed_shares()
+            aside += [{"removed_share": share} for share in entry.get("taken_from") or [] if isinstance(share, str) and SEEN_FROM.fullmatch(share) and share not in removed]
+            held = [item for item in aside if self._is_removed_share(item)]
+            if len(held) > self.SCOPE_REMOVED_KEEP:
+                dropped = held[: len(held) - self.SCOPE_REMOVED_KEEP]
+                aside = [item for item in aside if not any(item is old for old in dropped)]
+            self._save_scopes([s for s in self.scopes if s is not entry], aside)
         return {"removed": entry["name"]}
 
     def scope_key(self, name):
@@ -1536,6 +1568,12 @@ class Runtime:
         prefix = re.sub(r"[^A-Za-z0-9._-]+", "-", partner["name"]).strip("._-")[:24] or key_hash(partner["key"])[:8]
         return ("%s.%s" % (prefix, name))[:64]
 
+    @staticmethod
+    def _share_record(entry):
+        """What an invitation is known by: the hash of its bytes and its signer, as seen_from records it, or None."""
+        digest = entry.get("sha256")
+        return seen_record(digest, entry.get("from_key")) if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) else None
+
     def _take_scope_share(self, entry, apply=True, weigh=False):
         """A scope in an incoming message. Kept only when it came sealed and
         verified from a partner in the address book, and not seen before. The
@@ -1567,11 +1605,22 @@ class Runtime:
             view["note"] = "not kept again: this message arrived before, and a scope removed since stays removed"
         elif entry.get("replay_unknown"):
             view["note"] = "not kept: these bytes arrived here before, recorded by an earlier version without who sent them, so this may be that message again, and a scope removed since stays removed"
+        elif self._share_record(entry) in self._removed_shares():
+            view["note"] = "not kept again: this invitation was taken here before, and its scope was removed since. A scope removed stays removed: ask for it to be shared again"
         else:
             try:
                 local = self._shared_scope_name(partner, share.get("name"))
                 address = None if key is not None else share.get("address")
                 held, keep = self._scope_add_plan(local, key=key, address=address)
+                # Held already, nothing but the record of this invitation to write.
+                plain = keep is None
+                # The invitation goes with the scope, in the same write, so
+                # that removing the scope can remember it.
+                invitation = self._share_record(entry)
+                if invitation is not None and invitation not in (held.get("taken_from") or []):
+                    noted = dict(held, taken_from=list(held.get("taken_from") or []) + [invitation])
+                    keep = [noted if s is held else s for s in (keep if keep is not None else self.scopes)]
+                    held = noted
             except Exception as error:
                 # This share alone, and nothing held that was not saved. The
                 # rest of the messages are delivered either way.
@@ -1592,6 +1641,13 @@ class Runtime:
                             self._save_scopes(keep)
                         view = shown
                     except Exception as error:
+                        if plain:
+                            # Held from before, and shown as it is held: only
+                            # the record of this invitation was not written.
+                            view = shown
+                            self.log("scopes.json: the invitation in message %s was not recorded with scope %s: %s" % (entry.get("seq"), held["name"], error))
+                            data["aamio_scope"] = view
+                            return
                         # Said in attention, with what went wrong, and on the
                         # message in the form it was weighed at.
                         view = unsaved
@@ -2253,10 +2309,18 @@ class Runtime:
         # same address in the same second gives a message the same seq and the
         # same time as one of the old thread, so the address, the seq, the time
         # and the hash together still made two deliveries one (two reviews of
-        # 11 November 2026). A row the archive keeps with its thread's instance
-        # is one delivery by its address, instance and seq. Any other row is
-        # told by all it shows, its verified signer too, and two rows that show
-        # the same are both kept: nothing says they are one.
+        # 11 November 2026). A row with its thread's instance, as every copy in
+        # memory and every row the archive writes has it now, is one delivery by
+        # its address, instance and seq, and the first of its copies stands, as
+        # it was first handed over: a copy in memory that knew only what it
+        # showed hid an answer on the other thread, and a delivery read twice was
+        # listed twice (a check of the same day). Any other row is told by all
+        # it shows, its verified signer too, and two such rows that show the
+        # same are both kept: nothing says they are one.
+        def one(entry):
+            instance = entry.get("instance")
+            return (entry.get("w"), instance, entry.get("seq")) if isinstance(instance, str) else None
+
         def shown(entry):
             return (entry.get("w"), entry.get("seq"), entry.get("at"), entry.get("sha256"), entry.get("from_key"))
 
@@ -2284,18 +2348,24 @@ class Runtime:
             with channel.lock:
                 held.extend(channel.received)
 
+        named = set()
         for entry in held:
+            delivery = one(entry)
+            if delivery is not None:
+                if delivery in named:
+                    continue
+                named.add(delivery)
             if wanted(entry):
                 out.append(entry)
             else:
                 skipped.append(entry)
 
-        # What this process handed over and wrote down has its row in the
-        # archive as well, and is shown once, as it was handed over. One that
-        # was not written down has no row there and stands for none: it would
-        # hide another delivery that shows the same.
-        on_disk = collections.Counter(shown(entry) for entry in held if entry.get("archived") is not False)
-        named = set()
+        # A copy in memory without the instance, from a service that names
+        # none, has its row in the archive as well when it was written down,
+        # and stands for one row there that shows the same. One that was not
+        # written down has no row there and stands for none: it would hide
+        # another delivery that shows the same.
+        on_disk = collections.Counter(shown(entry) for entry in held if one(entry) is None and entry.get("archived") is not False)
 
         # A board inbox is renewed while the old one still holds answers, and
         # the old one keeps its own label and its own archive. Once that
@@ -2304,13 +2374,12 @@ class Runtime:
         # although they had arrived, been decrypted and been written down.
         for label in sorted(self._archive_labels() | set(self.channels) | {"board"}):
             for entry in self._archived(label, "received"):
-                instance = entry.get("instance")
-                if isinstance(instance, str):
-                    one = (entry.get("w"), instance, entry.get("seq"))
-                    if one in named:
+                delivery = one(entry)
+                if delivery is not None:
+                    if delivery in named:
                         continue
-                    named.add(one)
-                if on_disk[shown(entry)] > 0:
+                    named.add(delivery)
+                elif on_disk[shown(entry)] > 0:
                     on_disk[shown(entry)] -= 1
                     continue
                 if wanted(entry):
@@ -3297,33 +3366,18 @@ class Runtime:
             entry["archive_off"] = True
         return len(json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
-    def _save_cursor(self, channel, to_seq):
-        """Move the cursor and write it down, and say so if the writing fails.
-
-        The cursor and the replay hashes go in one write, before the caller sees a
-        message, so that a crash cannot redeliver. The write was allowed to throw
-        straight out of poll, and the loop that calls poll logs an exception and
-        sleeps -- so messages that had arrived, been checked and been appended to
-        the channel never reached the queue, and the reader saw an empty inbox with
-        nothing in attention.
-
-        When the write fails the cursor stays where it was last written down. The
-        same messages arrive again on the next read and the stored hashes mark them
-        as replays, which is exactly what a crash would have given, and is the safe
-        direction: a message twice is a nuisance, a message never is a loss.
-        """
-        was = channel.after
-        channel.after = max(channel.after, to_seq)
-
-        if not self._save_quietly(channel, was):
-            channel.after = was
-
-            return False
-
-        return True
-
     def _set_cursor(self, channel, to_seq):
-        """The cursor moves to exactly this, forwards or backwards, and is written."""
+        """The cursor moves to exactly this, forwards or backwards, and is written down with the hashes.
+
+        When the writing fails the cursor stays where it was last written
+        down, and attention says so. The same messages arrive again on the
+        next read, and the hashes kept in memory mark them as replays while
+        this process runs, which is what a crash would have given, and the
+        safe direction: a message twice is a nuisance, a message never is a
+        loss. It used to throw straight out of poll, and the loop that calls
+        poll logged it and slept, so messages that had arrived and been
+        checked never reached the queue.
+        """
         was = channel.after
         channel.after = to_seq
 
@@ -3577,8 +3631,6 @@ class Runtime:
                 if applying and entry["verified"] and sender_key:
                     self._trace_safely("received", self._trace_received, channel, entry)
             entries.append(entry)
-            with channel.lock:
-                channel.received.append(entry)
             # Received, readable, archived and handled are four different
             # things, and a failure at one must not be reported as the others.
             # The message above is delivered already; whether it also reached
@@ -3610,48 +3662,59 @@ class Runtime:
                 entry["archived"] = False
                 self._note(channel, "archive_failed", "message %s was handed over and could not be written to the archive: %s: %s. The archive does not have it." % (entry["seq"], error.__class__.__name__, error), seqs=[entry["seq"]])
                 self.log("archive %s seq %s: %s" % (channel.label, entry["seq"], error))
+            # The copy board replies keep, with the archive's mark and the
+            # thread's instance, which the message handed over does not carry:
+            # one delivery is known by its address, instance and seq in memory
+            # as it is in the archive (a check of 11 November 2026).
+            with channel.lock:
+                channel.received.append(dict(entry, instance=channel.instance) if isinstance(channel.instance, str) else dict(entry))
         # Messages whose bytes this channel handed over before, which an earlier
         # version recorded without who sent them: whether each is a copy cannot
         # be told, and it is said rather than guessed.
         unknown = [entry["seq"] for entry in entries if entry.get("replay_unknown")]
         if unknown:
             self._note(channel, "replay_unknown", "these carry the bytes of a message this channel handed over before, which an earlier version recorded without who sent it, so whether each is a copy cannot be told: each comes with replay false and replay_unknown true.", seqs=unknown)
-        if entries:
-            # The cursor moves and the hashes are stored in the same save, and
-            # that save happens before the caller sees a single message. A
-            # crash after this point redelivers nothing; a crash before it
-            # redelivers everything, and the stored hashes mark those replays.
-            #
-            # It moves past a message the archive refused as well. The archive
-            # is a record of what was delivered, not the delivery itself:
-            # holding the cursor back would re-read that message forever while
-            # the disk stayed full, and redeliver everything after it.
-            self._save_cursor(channel, entries[-1]["seq"])
-        if kept_out:
-            # Past them as well, or the same messages are read and kept out on
-            # every call. And said, since a message that does not arrive has to
-            # be told from one that was never sent.
-            self._save_cursor(channel, last_seq)
-            opened_for = "any key, signed only" if "*" in channel.allow else "%d named key(s)" % len(channel.allow)
-            self._note(channel, "kept_out", "This channel was opened for %s, and these messages did not satisfy that list as checked here. They are not handed over and not archived." % opened_for, seqs=kept_out)
-        # After a reset the service's next is the cursor, and it is lower than
-        # the one this channel held. Keeping the higher of the two would ask
-        # past the new thread on every call and hand the same messages over
-        # each time.
+        # The cursor moves once, to where this read leaves it, and is written
+        # down once, with the hashes, before the caller sees a single message.
+        # A crash after this point redelivers nothing; a crash before it
+        # redelivers everything, and the stored hashes mark those replays. Two
+        # writes in one read let attention say the cursor stayed at 0 when the
+        # second had written 1 (a check of 11 November 2026).
         #
-        # A poll that stopped at its limit is the exception: the service's next
-        # covers messages this call never looked at, so the cursor is the last
-        # one it did look at, handed over or kept out.
-        if oversized is not None:
-            self._note(channel, "over_budget", "message %s on this channel is %d bytes as handed over here, larger than the whole byte budget of %d this read asked for. It had already come, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose." % (oversized[0], oversized[1], max_bytes))
+        # It moves past a message the archive refused as well. The archive is a
+        # record of what was delivered, not the delivery itself: holding the
+        # cursor back would re-read that message forever while the disk stayed
+        # full, and redeliver everything after it. And past messages the list
+        # kept out, or the same messages are read and kept out on every call.
+        #
+        # After a reset the service's next is the cursor, and it is lower than
+        # the one this channel held. Keeping the higher of the two would ask past
+        # the new thread on every call and hand the same messages over each
+        # time. A poll that stopped at its limit is the exception: the service's
+        # next covers messages this call never looked at, so the cursor is the
+        # last one it did look at, handed over or kept out.
+        to = channel.after
+        moved = bool(entries or kept_out)
+        if entries:
+            to = max(to, entries[-1]["seq"])
+        if kept_out:
+            to = max(to, last_seq)
         if channel.left_waiting or channel.stopped_at_budget:
             if last_seq is not None:
-                # Backwards as well as forwards here, so _save_cursor's max is not
-                # the rule: the service's next covers messages this call never
-                # looked at. Same care about the write, though.
-                self._set_cursor(channel, last_seq)
+                to = last_seq
+                moved = True
         elif type(data.get("next")) is int:
-            self._set_cursor(channel, data["next"])
+            to = data["next"]
+            moved = True
+        if moved:
+            self._set_cursor(channel, to)
+        if kept_out:
+            # Said, since a message that does not arrive has to be told from
+            # one that was never sent.
+            opened_for = "any key, signed only" if "*" in channel.allow else "%d named key(s)" % len(channel.allow)
+            self._note(channel, "kept_out", "This channel was opened for %s, and these messages did not satisfy that list as checked here. They are not handed over and not archived." % opened_for, seqs=kept_out)
+        if oversized is not None:
+            self._note(channel, "over_budget", "message %s on this channel is %d bytes as handed over here, larger than the whole byte budget of %d this read asked for. It had already come, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose." % (oversized[0], oversized[1], max_bytes))
         # Muted since the read went out: what came back is on the record and
         # is handed to nobody.
         with self.lock:

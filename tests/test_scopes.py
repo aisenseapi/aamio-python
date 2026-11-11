@@ -15,6 +15,7 @@ name before it was made here, and a key survived in aamio_scope of any shape
 but one.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -501,3 +502,98 @@ def test_a_wrong_argument_or_a_failure_nobody_expected_leaves_the_server_running
 
     assert reply["id"] == 7 and reply["error"]["code"] == -32603
     assert safely(runtime, {"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "aamio_scopes"}}) is None
+
+
+# ------------------------------------------------------ an invitation read again ---
+
+
+def reading(runtime, *messages):
+    """A channel whose thread holds these messages, each an invitation to scope team from the partner."""
+    runtime.partners = [{"name": "alice", "key": PARTNER.public}]
+    runtime.client = SimpleNamespace(read=lambda w, read_key, after, wait, **limits: (200, {"messages": [m for m in messages if m["seq"] > after], "next": max(m["seq"] for m in messages)}))
+    runtime._open = lambda message: ({"from": "abcd1234", "text": "Scope team", "data": {"aamio_scope": {"name": "team", "key": VECTOR_KEY}}}, {"signed": True, "encrypted": True, "format": "json"})
+    return Channel("inbox", "read", "i" * 20, time.time() + 600)
+
+
+def restarted(home):
+    runtime = build(home)
+    runtime.scopes, runtime.scopes_aside = runtime._usable_scopes(json.load(open(os.path.join(home, "scopes.json"), encoding="utf-8")))
+    return runtime
+
+
+def test_an_invitation_read_again_after_its_scope_was_removed_does_not_bring_it_back(home):
+    # A check of 11 November 2026: scopes.json was written and state.json was not, so after a restart the invitation
+    # came again as a message never seen, and the scope removed since was taken back. The invitation is written with
+    # the scope and remembered when the scope is removed; a new invitation is another message, and is taken.
+    invitation = stored("i" * 20, 1, "sealed", PARTNER)
+    first = build(home)
+    channel = reading(first, invitation)
+
+    def full_disk():
+        raise OSError(28, "No space left on device")
+
+    first.save_state = full_disk
+    entries = first.poll(channel)[1]
+    assert entries[0]["body"]["data"]["aamio_scope"]["kept"] is True and channel.after == 0
+    first.scope_remove("alice.team")
+    assert first.scope_list() == []
+
+    # A restart: the scopes from the file, and the channel as state.json still has it, before the invitation.
+    again = restarted(home)
+    channel = reading(again, invitation)
+    entries = again.poll(channel)[1]
+    view = entries[0]["body"]["data"]["aamio_scope"]
+    assert entries[0]["replay"] is False and view["kept"] is False and "removed since" in view["note"]
+    assert again.scope_list() == [] and VECTOR_KEY not in json.dumps(entries)
+
+    # A new invitation is another message, and is taken.
+    channel = reading(again, invitation, stored("i" * 20, 2, "sealed again", PARTNER))
+    channel.after = 1
+    entries = again.poll(channel)[1]
+    assert [entry["body"]["data"]["aamio_scope"]["kept"] for entry in entries] == [True]
+    assert [scope["name"] for scope in again.scope_list()] == ["alice.team"]
+
+
+def test_a_removed_invitation_is_remembered_in_the_form_aamio_php_reads_and_writes(home):
+    # The record seen_from keeps: the hash of the bytes and the first 16 hex of the hash of the signer's key, here the
+    # shared vector of the replay round. aamio-php's suite reads and writes the same file.
+    key = "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
+    record = "565339bc4d33d72817b583024112eb7f5cdf3e5eef0252d6ec1b9c9a94e12bb3:b43cdfe1bf180ef4"
+    with open(os.path.join(home, "scopes.json"), "w", encoding="utf-8") as handle:
+        json.dump([{"removed_share": record}], handle)
+    runtime = restarted(home)
+    runtime.partners = [{"name": "alice", "key": key}]
+    entry = incoming(from_key=key, sha256=hashlib.sha256(b"OK").hexdigest())
+    runtime._take_scope_share(entry)
+    assert entry["body"]["data"]["aamio_scope"]["kept"] is False and "removed since" in entry["body"]["data"]["aamio_scope"]["note"]
+    assert runtime.logged == [], "and it is no entry this runtime cannot use"
+    other = incoming(from_key=key, sha256="ab" * 32)
+    runtime._take_scope_share(other)
+    assert json.load(open(os.path.join(home, "scopes.json"), encoding="utf-8")) == [
+        {"name": "alice.team", "key": VECTOR_KEY, "address": VECTOR_ADDRESS, "taken_from": ["ab" * 32 + ":b43cdfe1bf180ef4"]},
+        {"removed_share": record},
+    ]
+    runtime.scope_remove("alice.team")
+    assert json.load(open(os.path.join(home, "scopes.json"), encoding="utf-8")) == [{"removed_share": record}, {"removed_share": "ab" * 32 + ":b43cdfe1bf180ef4"}]
+
+
+def test_an_invitation_for_a_scope_held_already_is_recorded_with_it(home):
+    # Made here, then shared back by the partner: removing it remembers that invitation too.
+    runtime = build(home)
+    runtime.scopes = [{"name": "alice.team", "key": VECTOR_KEY, "address": VECTOR_ADDRESS}]
+    entry = incoming(sha256="cd" * 32)
+    runtime._take_scope_share(entry)
+    assert entry["body"]["data"]["aamio_scope"]["kept"] is True
+    runtime.scope_remove("alice.team")
+    again = incoming(sha256="cd" * 32)
+    runtime._take_scope_share(again)
+    assert again["body"]["data"]["aamio_scope"]["kept"] is False and runtime.scope_list() == []
+
+
+def test_scopes_json_remembers_the_newest_removed_invitations_and_no_more(home):
+    runtime = build(home)
+    records = ["%064x:%016x" % (n, n) for n in range(300)]
+    runtime.scopes = [{"name": "alice.team", "key": VECTOR_KEY, "address": VECTOR_ADDRESS, "taken_from": records}]
+    runtime.scope_remove("alice.team")
+    kept = json.load(open(os.path.join(home, "scopes.json"), encoding="utf-8"))
+    assert [entry["removed_share"] for entry in kept] == records[-256:]
