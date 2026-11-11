@@ -14,7 +14,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.dirname(__file__))
 
-from aamio.runtime import Channel, is_replay, seen_record
+from aamio.runtime import Channel, is_replay, replay_state, seen_record
 from signing import keypair, stored
 from test_reader_checks import ALICE, W, answer, build
 
@@ -46,14 +46,35 @@ def test_unsigned_bytes_are_a_replay_of_the_same_unsigned_bytes_and_not_of_a_sig
     assert [e["replay"] for e in entries] == [False, False, True]
 
 
-def test_a_hash_kept_without_its_signer_is_a_replay_as_before():
-    runtime, channel = build([answer(stored(W, 1, "OK", BOB))])
-    digest = stored(W, 1, "OK", BOB)["sha256"]
-    # As an earlier version left the channel: the hash, and nobody named for it.
+def test_a_hash_kept_without_its_signer_leaves_it_unknown_whose_it_was_and_says_so():
+    # A read "OK" in a version that kept only the hash. Then, one process each, B, A, B and A send "OK" again: the
+    # sequence of the review of 11 November 2026, where B's first was taken for a copy and A's next for a new one.
+    rows = [stored(W, n, "OK", signer) for n, signer in ((2, BOB), (3, ALICE), (4, BOB), (5, ALICE))]
+    runtime, channel = build([answer(row) for row in rows])
+    digest = rows[0]["sha256"]
     channel.seen = {digest}
-    state, entries = runtime.poll(channel)
-    assert state == "ok" and entries[0]["replay"] is True
-    assert seen_record(digest, BOB.public) in channel.seen_from, "and from now on the signer is kept with it"
+    channel.after = 1
+    marks = []
+    notes = []
+    for _ in rows:
+        channel = Channel.from_state(channel.to_state())
+        state, entries = runtime.poll(channel)
+        assert state == "ok" and len(entries) == 1
+        marks.append((entries[0]["replay"], entries[0].get("replay_unknown", False)))
+        notes += [note for note in runtime.attention_taken() if note["state"] == "replay_unknown"]
+    assert marks == [(False, True), (False, True), (True, False), (True, False)], "B and A not known, then each a copy of its own"
+    assert [note["seqs"] for note in notes] == [[2], [3]] and "cannot be told" in notes[0]["what"]
+    assert digest + ":?" in channel.seen_from, "who sent it before stays not known, beside the signers recorded since"
+
+
+def test_a_hash_with_no_record_is_not_known_and_one_with_a_record_of_another_signer_is_new():
+    channel = Channel("inbox", "read-key", W, 2000000000)
+    digest = "b" * 64
+    channel.seen = {digest}
+    assert replay_state(channel, digest, ALICE.public) is None and is_replay(channel, digest, ALICE.public) is False
+    channel.seen_from = {seen_record(digest, BOB.public)}
+    assert replay_state(channel, digest, ALICE.public) is False, "recorded by this version, from another signer: a message of its own"
+    assert replay_state(channel, digest, BOB.public) is True
 
 
 def test_who_sent_each_hash_travels_with_the_channel_through_state_json():

@@ -636,8 +636,10 @@ def receipt_fault(data, w):
 # One message a channel handed over, as the channel remembers it: the hash of its
 # bytes and who signed them, the first 16 hex of sha256 of the key, or - when
 # nobody did. The hash alone is of the text, and two signers who both sent "OK"
-# made the second a replay of the first (a review of 10 November 2026).
-SEEN_FROM = re.compile(r"[0-9a-f]{64}:(?:[0-9a-f]{16}|-)")
+# made the second a replay of the first (a review of 10 November 2026). ? stands
+# beside a hash an earlier version kept without its signer, once that hash is met
+# again: who sent it then is not known, and stays not known.
+SEEN_FROM = re.compile(r"[0-9a-f]{64}:(?:[0-9a-f]{16}|-|\?)")
 
 
 def seen_record(digest, from_key):
@@ -645,20 +647,42 @@ def seen_record(digest, from_key):
     return "%s:%s" % (digest, sha256hex(from_key)[:16] if isinstance(from_key, str) and from_key else "-")
 
 
-def is_replay(channel, digest, from_key):
+def replay_state(channel, digest, from_key):
     """Whether this channel handed these bytes over before from this signer, or unsigned when they are unsigned.
 
-    Bytes it handed over from another signer make this another message. A hash
-    kept without its signer, by a version from before the records, is taken as
-    it always was: a replay.
+    True when it did, and False when it did not: bytes it handed over from
+    another signer make this another message. None when it cannot be told: an
+    earlier version kept the hash without its signer, and this signer has no
+    record of its own. Taken as a copy, the first answer of another signer with
+    the same text was passed over, and taken as new, the same signer's copy was
+    acted on twice (a review of 11 November 2026), so it is said as it is.
     """
     if digest is None:
         return False
     if seen_record(digest, from_key) in channel.seen_from:
         return True
-    if any(record.startswith(digest + ":") for record in channel.seen_from):
-        return False
-    return digest in channel.seen
+    records = [record for record in channel.seen_from if record.startswith(digest + ":")]
+    if digest + ":?" in records or (not records and digest in channel.seen):
+        return None
+    return False
+
+
+def is_replay(channel, digest, from_key):
+    """Whether this is known to be a copy: replay_state, with not known taken as no."""
+    return replay_state(channel, digest, from_key) is True
+
+
+def remember(channel, digest, from_key):
+    """A message handed over: its hash, and who it came from.
+
+    A hash an earlier version kept without its signer keeps that, as ?, beside the
+    first signer recorded for it, so the next signer with the same bytes is not
+    taken for a new one with certainty.
+    """
+    if digest in channel.seen and not any(record.startswith(digest + ":") for record in channel.seen_from):
+        channel.seen_from.add(digest + ":?")
+    channel.seen.add(digest)
+    channel.seen_from.add(seen_record(digest, from_key))
 
 
 class Channel:
@@ -1540,6 +1564,8 @@ class Runtime:
             view["note"] = "not kept: a scope is only taken when it comes sealed from a partner in your address book"
         elif entry.get("replay"):
             view["note"] = "not kept again: this message arrived before, and a scope removed since stays removed"
+        elif entry.get("replay_unknown"):
+            view["note"] = "not kept: these bytes arrived here before, recorded by an earlier version without who sent them, so this may be that message again, and a scope removed since stays removed"
         else:
             try:
                 local = self._shared_scope_name(partner, share.get("name"))
@@ -2221,6 +2247,13 @@ class Runtime:
         seen = set()
         skipped = []
 
+        # One delivery is one row: the address, the seq, the time and the hash
+        # of its bytes. The hash alone is of the text, and of two signers who
+        # sent the same answer to one post, the second was left out once the
+        # list came from the archive (a review of 11 November 2026).
+        def delivery(entry):
+            return (entry.get("w"), entry.get("seq"), entry.get("at"), entry.get("sha256"))
+
         def wanted(entry):
             body = entry.get("body")
 
@@ -2243,7 +2276,7 @@ class Runtime:
         for channel in list(self.channels.values()):
             with channel.lock:
                 for entry in channel.received:
-                    seen.add(entry.get("sha256"))
+                    seen.add(delivery(entry))
                     if wanted(entry):
                         out.append(entry)
                     else:
@@ -2256,9 +2289,9 @@ class Runtime:
         # although they had arrived, been decrypted and been written down.
         for label in sorted(self._archive_labels() | set(self.channels) | {"board"}):
             for entry in self._archived(label, "received"):
-                if entry.get("sha256") in seen:
+                if delivery(entry) in seen:
                     continue
-                seen.add(entry.get("sha256"))
+                seen.add(delivery(entry))
                 if wanted(entry):
                     out.append(dict(entry, from_archive=True))
                 else:
@@ -3164,7 +3197,7 @@ class Runtime:
         with self.lock:
             if not hasattr(self, "attention"):
                 self.attention = {}
-            if state in ("kept_out", "unverified", "binding_conflict", "archive_failed", "scope_not_saved") and seqs is not None:
+            if state in ("kept_out", "unverified", "binding_conflict", "archive_failed", "scope_not_saved", "replay_unknown") and seqs is not None:
                 previous = self.attention.get((where, state), {})
                 note["seqs"] = previous.get("seqs", []) + list(seqs)
                 note["count"] = len(note["seqs"])
@@ -3197,8 +3230,11 @@ class Runtime:
             checked = dict(message, verified=verified, sha256=digest, **{"from": sender})
             body, meta = self._open(checked)
             known = self.name_for_key(sender)
-            entry = {"channel": channel.label, "w": channel.w, "seq": seq, "at": at, "verified": verified, "from_key": sender, "known_contact": known is not None, "sender": known or ("unknown key" if sender else "unsigned"), "sha256": digest, "replay": is_replay(channel, digest, sender), "body": body}
+            replay = replay_state(channel, digest, sender)
+            entry = {"channel": channel.label, "w": channel.w, "seq": seq, "at": at, "verified": verified, "from_key": sender, "known_contact": known is not None, "sender": known or ("unknown key" if sender else "unsigned"), "sha256": digest, "replay": replay is True, "body": body}
             entry.update(meta)
+            if replay is None:
+                entry["replay_unknown"] = True
             if why_not:
                 entry["unverified_because"] = why_not
             return entry
@@ -3384,7 +3420,7 @@ class Runtime:
         # hash, which is the hash of the text alone: another sender's message
         # with the same text has it too (the same review).
         if not another and not reset and channel.after > 0 and channel.instance is None and instance is not None:
-            self._note(channel, "reread", "this channel's cursor, %s, was kept by a client that did not keep the thread's instance, so it cannot be told whether the thread here is the one that cursor was kept on. It is read again from the start this once: what this channel handed over before comes again, marked replay, and nothing is passed over." % channel.after)
+            self._note(channel, "reread", "this channel's cursor, %s, was kept by a client that did not keep the thread's instance, so it cannot be told whether the thread here is the one that cursor was kept on. It is read again from the start this once: what this channel handed over before comes again, marked replay, or replay_unknown where an earlier version kept it without who sent it, and nothing is passed over." % channel.after)
             channel.after = 0
             return self.poll(channel, 0, limit, max_bytes)
         if reset:
@@ -3485,8 +3521,7 @@ class Runtime:
                 kept_out.append(entry["seq"])
                 continue
             if entry["sha256"] is not None:
-                channel.seen.add(entry["sha256"])
-                channel.seen_from.add(seen_record(entry["sha256"], entry["from_key"]))
+                remember(channel, entry["sha256"], entry["from_key"])
             # Before the message is kept, archived or shown: a scope key in it
             # goes to scopes.json or nowhere, never to the reader. And a
             # verified message that carries an address binds the sender's key
@@ -3547,6 +3582,12 @@ class Runtime:
                 entry["archived"] = False
                 self._note(channel, "archive_failed", "message %s was handed over and could not be written to the archive: %s: %s. The archive does not have it." % (entry["seq"], error.__class__.__name__, error), seqs=[entry["seq"]])
                 self.log("archive %s seq %s: %s" % (channel.label, entry["seq"], error))
+        # Messages whose bytes this channel handed over before, which an earlier
+        # version recorded without who sent them: whether each is a copy cannot
+        # be told, and it is said rather than guessed.
+        unknown = [entry["seq"] for entry in entries if entry.get("replay_unknown")]
+        if unknown:
+            self._note(channel, "replay_unknown", "these carry the bytes of a message this channel handed over before, which an earlier version recorded without who sent it, so whether each is a copy cannot be told: each comes with replay false and replay_unknown true.", seqs=unknown)
         if entries:
             # The cursor moves and the hashes are stored in the same save, and
             # that save happens before the caller sees a single message. A

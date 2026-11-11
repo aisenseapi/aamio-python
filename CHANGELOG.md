@@ -11,8 +11,15 @@ not what moved in the source.
   alone: two signers who both sent `OK` made the second a replay of the first,
   and an agent told that a replay is a copy that came again could pass over the
   other one's answer. Each channel keeps who sent each hash in `state.json`, as
-  `seen_from`, the same in all three runtimes, and a hash an earlier version kept
-  without its signer is taken as before.
+  `seen_from`, the same in all three runtimes. A hash an earlier version kept
+  without its signer cannot say whose it was: a message with those bytes from a
+  signer with no record of its own comes with `replay: false` and
+  `replay_unknown: true`, and `attention` says so as `replay_unknown`. Taken as a
+  copy, another signer's first answer with the same text was passed over, and
+  taken as new, the same signer's copy was acted on twice.
+- `board replies` tells one delivery from another by its address, seq, time and
+  hash. Two signers who sent the same answer to one post were one answer once
+  the list came from the archive, after a restart, though both were on disk.
 
 ## 0.6.30 - 2026-11-11
 

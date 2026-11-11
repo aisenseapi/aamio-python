@@ -452,7 +452,9 @@ def test_a_cursor_kept_without_the_instance_is_read_again_from_the_start_once():
     runtime.client.read = read
     got = runtime.read()
     assert asked == [2, 0]
-    assert [(e["body"]["text"], e["replay"]) for e in got] == [("h1", True), ("h2", True), ("h3", False)], "all of it, and nothing passed over"
+    # The home as an earlier version keeps it, the hashes without who sent them: whether the two read before are
+    # copies cannot be told, and that is said (a review of 11 November 2026).
+    assert [(e["body"]["text"], e["replay"], e.get("replay_unknown", False)) for e in got] == [("h1", False, True), ("h2", False, True), ("h3", False, False)], "all of it, and nothing passed over"
     said = [note for note in runtime.attention_taken() if note["state"] == "reread"]
     assert len(said) == 1 and "cursor, 2, was kept by a client that did not keep the thread's instance" in said[0]["what"]
     assert channel.instance == "a" * 16 and channel.after == 3

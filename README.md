@@ -173,6 +173,7 @@ An empty list means nobody wrote only when nothing else is said. `read` answers 
 | `unread` | the service did not answer for that channel, so there may be messages waiting |
 | `gone` | there is no thread at the address any more; a gone inbox is opened again for you |
 | `restarted` | a new thread opened at the same address, and it was read from the start |
+| `replay_unknown` | messages carry the bytes of one this channel handed over before, which an earlier version recorded without who sent it, so whether each is a copy cannot be told; they come with `replay: false` and `replay_unknown: true` |
 | `reread` | the channel's cursor was kept without the thread's instance, by an earlier version or another client, so the thread was read again from the start once; what came before comes marked `replay` |
 | `archive_failed`, `scope_not_saved`, `untraced` | a message read could not be written to the archive, a scope it shared could not be saved, or the trace could not be written; the message came, and this says what went wrong |
 | `more` | the read stopped at its `limit` or its byte budget, or the service had more than the budget allowed; nothing was passed over, the cursor stands at the last message handed over, so read again |
@@ -245,7 +246,7 @@ A file in the home that is there and cannot be read, `scopes.json` or `state.jso
 
 A sidecar is killed, a laptop sleeps, a network drops mid-request. Four things hold.
 
-**A redelivered message is known as one.** Every message a channel has handed you is remembered by its hash, and that list is written to disk before you are given the message. A copy that arrives again comes back with `replay: true`, and it still does after a restart. A copy is the same bytes from the same signer, or the same unsigned bytes: another signer's message with the same text is a message of its own. A hash an earlier version kept without its signer is taken as before.
+**A redelivered message is known as one.** Every message a channel has handed you is remembered by its hash, and that list is written to disk before you are given the message. A copy that arrives again comes back with `replay: true`, and it still does after a restart. A copy is the same bytes from the same signer, or the same unsigned bytes: another signer's message with the same text is a message of its own. A hash an earlier version kept without its signer cannot say whose it was, so a message with those bytes from a signer with no record of its own comes with `replay: false` and `replay_unknown: true`, and from then on each signer's copies are known.
 
 **A message is durable before it is sent.** `send` writes the sealed bytes to the outbox first, and every retry sends those same bytes. An answer to a post on the board is a send too, and goes the same way: it used to be posted directly, and when no answer came back it was called failed, with nothing in the outbox to send again. The recipient hashes the bytes, so a message that lands twice is marked a replay there rather than acted on twice.
 

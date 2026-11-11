@@ -288,3 +288,41 @@ def test_an_answer_on_a_board_inbox_that_has_been_renewed_is_still_found(home):
     assert [r["sha256"] for r in runtime.board_replies("p9")] == ["e" * 64]
     assert [r["sha256"] for r in runtime.board_replies()] == ["e" * 64]
 
+
+
+def archive_two_answers(home):
+    """Two signers who sent the same answer to one post: seq 1 from one, seq 2 from the other, one hash."""
+    os.makedirs(os.path.join(home, "archive"), exist_ok=True)
+    with open(os.path.join(home, "archive", "board.jsonl"), "a", encoding="utf-8") as handle:
+        for seq, key in ((1, "a-key"), (2, "b-key")):
+            handle.write(json.dumps({"kind": "received", "channel": "board", "w": "b" * 20, "seq": seq, "at": 1789470700 + seq, "verified": True,
+                                     "from_key": key, "sender": "unknown key", "sha256": "c" * 64, "body": {"post": "p1", "text": "OK"}}) + "\n")
+
+
+def test_two_signers_with_the_same_answer_are_both_found_in_every_process(home):
+    # The hash alone is of the text, and once the list came from the archive the second was left out (a review of
+    # 11 November 2026). Two processes, one after the other, each list both, once each.
+    archive_two_answers(home)
+    for _ in range(2):
+        runtime = build(home, board_expire=time.time() + 600)
+        replies = runtime.board_replies("p1")
+        assert [(r["seq"], r["from_key"]) for r in replies] == [(1, "a-key"), (2, "b-key")]
+
+
+def test_a_row_held_in_memory_and_in_the_archive_is_one_delivery(home):
+    archive_two_answers(home)
+    runtime = build(home, board_expire=time.time() + 600)
+    runtime.channels["board"].received = [
+        {"channel": "board", "w": "b" * 20, "seq": 1, "at": 1789470701, "sha256": "c" * 64, "from_key": "a-key", "body": {"post": "p1", "text": "OK"}}
+    ]
+    replies = runtime.board_replies("p1")
+    assert [(r["seq"], "from_archive" in r) for r in replies] == [(1, False), (2, True)]
+
+
+def test_a_new_thread_at_the_address_that_starts_at_one_again_is_another_delivery(home):
+    archive_two_answers(home)
+    with open(os.path.join(home, "archive", "board.jsonl"), "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"kind": "received", "channel": "board", "w": "b" * 20, "seq": 1, "at": 1789470900, "verified": True,
+                                 "from_key": "a-key", "sender": "unknown key", "sha256": "d" * 64, "body": {"post": "p1", "text": "OK again"}}) + "\n")
+    runtime = build(home, board_expire=time.time() + 600)
+    assert [(r["seq"], r["at"]) for r in runtime.board_replies("p1")] == [(1, 1789470701), (2, 1789470702), (1, 1789470900)]
