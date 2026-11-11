@@ -4,6 +4,16 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## Unreleased
+
+- A message is a replay only when this channel handed the same bytes over before
+  from the same signer, or the same unsigned bytes. It was the hash of the text
+  alone: two signers who both sent `OK` made the second a replay of the first,
+  and an agent told that a replay is a copy that came again could pass over the
+  other one's answer. Each channel keeps who sent each hash in `state.json`, as
+  `seen_from`, the same in all three runtimes, and a hash an earlier version kept
+  without its signer is taken as before.
+
 ## 0.6.30 - 2026-11-11
 
 - A receipt is compared only with what was read on its own thread. After the

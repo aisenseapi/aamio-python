@@ -633,6 +633,34 @@ def receipt_fault(data, w):
     return None
 
 
+# One message a channel handed over, as the channel remembers it: the hash of its
+# bytes and who signed them, the first 16 hex of sha256 of the key, or - when
+# nobody did. The hash alone is of the text, and two signers who both sent "OK"
+# made the second a replay of the first (a review of 10 November 2026).
+SEEN_FROM = re.compile(r"[0-9a-f]{64}:(?:[0-9a-f]{16}|-)")
+
+
+def seen_record(digest, from_key):
+    """The record of a message handed over: its hash, and the signer it was verified from, or -."""
+    return "%s:%s" % (digest, sha256hex(from_key)[:16] if isinstance(from_key, str) and from_key else "-")
+
+
+def is_replay(channel, digest, from_key):
+    """Whether this channel handed these bytes over before from this signer, or unsigned when they are unsigned.
+
+    Bytes it handed over from another signer make this another message. A hash
+    kept without its signer, by a version from before the records, is taken as
+    it always was: a replay.
+    """
+    if digest is None:
+        return False
+    if seen_record(digest, from_key) in channel.seen_from:
+        return True
+    if any(record.startswith(digest + ":") for record in channel.seen_from):
+        return False
+    return digest in channel.seen
+
+
 class Channel:
     def __init__(self, label, read_key, w, expire_at, allow=None, after=0, created_at=None):
         self.label = label
@@ -665,6 +693,8 @@ class Channel:
         # its byte budget: the service says more for both.
         self.more_at_limit = False
         self.seen = set()
+        # Who sent each hash in seen: a record per message handed over.
+        self.seen_from = set()
         self.received = []
         self.observed = {}
         # The thread the observations were read on: the one opened at this time
@@ -712,12 +742,13 @@ class Channel:
     def to_state(self):
         # seen travels with the channel: without it a restart cannot tell a
         # redelivered message from a new one, and the model may act twice.
-        return {"label": self.label, "read_key": self.read_key, "w": self.w, "expire_at": self.expire_at, "allow": self.allow, "after": self.after, "created_at": self.created_at, "instance": self.instance, "gone": self.gone, "muted": self.muted, "seen": sorted(value for value in self.seen if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value))}
+        return {"label": self.label, "read_key": self.read_key, "w": self.w, "expire_at": self.expire_at, "allow": self.allow, "after": self.after, "created_at": self.created_at, "instance": self.instance, "gone": self.gone, "muted": self.muted, "seen": sorted(value for value in self.seen if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)), "seen_from": sorted(value for value in self.seen_from if isinstance(value, str) and SEEN_FROM.fullmatch(value))}
 
     @classmethod
     def from_state(cls, item):
         channel = cls(item["label"], item["read_key"], item["w"], item["expire_at"], item.get("allow"), item.get("after", 0), item.get("created_at"))
         channel.seen = {value for value in item.get("seen") or [] if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)}
+        channel.seen_from = {value for value in item.get("seen_from") or [] if isinstance(value, str) and SEEN_FROM.fullmatch(value)}
         channel.gone = item.get("gone") is True
         channel.muted = item.get("muted") is True
         channel.instance = item.get("instance") if isinstance(item.get("instance"), str) else None
@@ -3166,7 +3197,7 @@ class Runtime:
             checked = dict(message, verified=verified, sha256=digest, **{"from": sender})
             body, meta = self._open(checked)
             known = self.name_for_key(sender)
-            entry = {"channel": channel.label, "w": channel.w, "seq": seq, "at": at, "verified": verified, "from_key": sender, "known_contact": known is not None, "sender": known or ("unknown key" if sender else "unsigned"), "sha256": digest, "replay": digest is not None and digest in channel.seen, "body": body}
+            entry = {"channel": channel.label, "w": channel.w, "seq": seq, "at": at, "verified": verified, "from_key": sender, "known_contact": known is not None, "sender": known or ("unknown key" if sender else "unsigned"), "sha256": digest, "replay": is_replay(channel, digest, sender), "body": body}
             entry.update(meta)
             if why_not:
                 entry["unverified_because"] = why_not
@@ -3455,6 +3486,7 @@ class Runtime:
                 continue
             if entry["sha256"] is not None:
                 channel.seen.add(entry["sha256"])
+                channel.seen_from.add(seen_record(entry["sha256"], entry["from_key"]))
             # Before the message is kept, archived or shown: a scope key in it
             # goes to scopes.json or nowhere, never to the reader. And a
             # verified message that carries an address binds the sender's key
