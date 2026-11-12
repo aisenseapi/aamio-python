@@ -197,11 +197,23 @@ def test_answers_to_other_posts_are_left_alone(home):
 
 
 def test_archiving_turned_off_is_not_an_error(home):
-    archive_an_answer(home)
+    # Nothing written down and the archive off: no answers, and no error.
     runtime = build(home, board_expire=time.time() + 600)
     runtime.archive_enabled = False
 
     assert runtime.board_replies("p1") == []
+
+
+def test_what_an_earlier_run_wrote_down_is_found_with_the_archive_off(home):
+    # Off is about what is written from now on. What was written before stays the record of what arrived until it is
+    # pruned: a process with the archive off did not look, and listed an answer written down before it with the mark
+    # of its own later reading (a check of 11 November 2026).
+    archive_an_answer(home)
+    runtime = build(home, board_expire=time.time() + 600)
+    runtime.archive_enabled = False
+    replies = runtime.board_replies("p1")
+
+    assert len(replies) == 1 and replies[0]["from_archive"] is True
 
 
 # --------------------------------------------------------------- address ---
@@ -379,3 +391,21 @@ def test_one_not_written_down_does_not_hide_another_that_shows_the_same(home):
         {"channel": "board", "w": "b" * 20, "seq": 1, "at": 1789470700, "sha256": "c" * 64, "from_key": "a-key", "archived": False, "body": {"post": "p1", "text": "OK"}}
     ]
     assert sorted("from_archive" in r for r in runtime.board_replies("p1")) == [False, True]
+
+
+def test_a_row_from_before_the_instance_and_a_later_reading_of_the_same_answer_are_both_listed(home):
+    # A row 0.6.30 wrote down carries no thread instance. Read again by a later version, the same answer has one, and
+    # nothing says the two are one delivery: a thread opened again in the same second gives another answer the same
+    # seq, time and hash. So both are listed, in every process, and the README says so. An earlier release wrote the
+    # first row in the run that showed this (12 November 2026); the test keeps it in sight.
+    archive_rows(home, {"from_key": "a-key"}, {"from_key": "a-key", "instance": "x" * 16})
+    for _ in range(2):
+        runtime = build(home, board_expire=time.time() + 600)
+        assert len(runtime.board_replies("p1")) == 2
+    held = build(home, board_expire=time.time() + 600)
+    held.channels["board"].received = [
+        {"channel": "board", "w": "b" * 20, "seq": 1, "at": 1789470700, "sha256": "c" * 64, "from_key": "a-key", "archived": True, "instance": "x" * 16, "body": {"post": "p1", "text": "OK"}}
+    ]
+    assert sorted("from_archive" in r for r in held.board_replies("p1")) == [False, True]
+    readme = " ".join(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "README.md"), encoding="utf-8").read().split())
+    assert "0.6.30 or earlier carries no thread instance" in readme

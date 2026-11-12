@@ -597,3 +597,67 @@ def test_scopes_json_remembers_the_newest_removed_invitations_and_no_more(home):
     runtime.scope_remove("alice.team")
     kept = json.load(open(os.path.join(home, "scopes.json"), encoding="utf-8"))
     assert [entry["removed_share"] for entry in kept] == records[-256:]
+
+
+# ------------------------------------------- where the promise of a removed scope ends ---
+
+
+def test_an_invitation_that_cannot_be_recorded_with_a_scope_held_already_is_said_in_attention(home):
+    # A check of 0.7.42 (11 November 2026): the scope was held already, the reader was told kept, and that the
+    # invitation was not recorded with it stood in the log alone. Now attention says it, and what follows from it.
+    runtime = build(home)
+    runtime.scopes = [{"name": "alice.team", "key": VECTOR_KEY, "address": VECTOR_ADDRESS}]
+
+    def full_disk(name, value, private=False):
+        raise OSError(28, "No space left on device")
+
+    runtime._save_json = full_disk
+    entry = incoming(sha256="cd" * 32, seq=7, channel="inbox", w="i" * 20)
+    runtime._take_scope_share(entry)
+
+    assert entry["body"]["data"]["aamio_scope"] == {"shared_as": "team", "name": "alice.team", "address": VECTOR_ADDRESS, "can_read": True, "kept": True}
+    said = [note for note in runtime.attention_taken() if note["state"] == "scope_share_not_recorded"]
+    assert len(said) == 1 and said[0]["seqs"] == [7] and said[0]["channel"] == "inbox"
+    assert "alice.team" in said[0]["what"] and "No space left on device" in said[0]["what"] and "would bring the scope back" in said[0]["what"]
+    assert runtime.scopes == [{"name": "alice.team", "key": VECTOR_KEY, "address": VECTOR_ADDRESS}], "nothing is held that was not written"
+    assert VECTOR_KEY not in json.dumps(entry) and VECTOR_KEY not in json.dumps(said)
+
+
+def test_the_same_through_a_read_whose_cursor_cannot_be_written_either(home):
+    # Both writes fail, as in the check: the message is handed over with the scope shown as held, and attention says
+    # both things, each once.
+    runtime = build(home)
+    runtime.scopes = [{"name": "alice.team", "key": VECTOR_KEY, "address": VECTOR_ADDRESS}]
+    channel = reading(runtime, stored("i" * 20, 1, "sealed", PARTNER))
+
+    def full_disk(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    runtime._save_json = full_disk
+    runtime.save_state = full_disk
+    entries = runtime.poll(channel)[1]
+    states = sorted(note["state"] for note in runtime.attention_taken())
+
+    assert [entry["body"]["data"]["aamio_scope"]["kept"] for entry in entries] == [True] and channel.after == 0
+    assert states.count("scope_share_not_recorded") == 1 and states.count("unsaved") == 1
+
+
+def test_an_invitation_taken_by_an_earlier_version_is_not_known_by_its_scope_and_the_readme_says_so(home):
+    # As 0.6.31 left a home whose state.json could not be written: the scope in scopes.json with no record of the
+    # invitation it came from, and the cursor before the invitation. Removed here and read again, the invitation is
+    # a message never seen, and nothing ties it to the scope that was removed, so it is taken (a check of 0.7.42, 11
+    # November 2026). That is where the promise ends, and the README says so. This test keeps the limit in sight: it
+    # is to be turned around the day the limit is closed.
+    with open(os.path.join(home, "scopes.json"), "w", encoding="utf-8") as handle:
+        json.dump([{"name": "alice.team", "key": VECTOR_KEY, "address": VECTOR_ADDRESS}], handle)
+    runtime = restarted(home)
+    runtime.scope_remove("alice.team")
+    assert json.load(open(os.path.join(home, "scopes.json"), encoding="utf-8")) == []
+
+    channel = reading(runtime, stored("i" * 20, 1, "sealed", PARTNER))
+    entries = runtime.poll(channel)[1]
+    assert entries[0]["body"]["data"]["aamio_scope"]["kept"] is True
+
+    readme = " ".join(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "README.md"), encoding="utf-8").read().split())
+    assert "taken by 0.6.31 or earlier is not recorded with its scope" in readme
+    assert "the 256 newest removed invitations" in readme

@@ -1644,8 +1644,13 @@ class Runtime:
                         if plain:
                             # Held from before, and shown as it is held: only
                             # the record of this invitation was not written.
+                            # Said in attention, where the reader looks: it
+                            # stood in the log alone, and the reader was told
+                            # kept with nothing more (a check of 11 November
+                            # 2026).
                             view = shown
-                            self.log("scopes.json: the invitation in message %s was not recorded with scope %s: %s" % (entry.get("seq"), held["name"], error))
+                            seq = entry.get("seq")
+                            self._note_trouble(entry.get("channel") or "scopes", "scope_share_not_recorded", "message %s shared scope %s, which is held here already as %s, and the invitation could not be recorded with it in scopes.json: %s: %s. The scope stays as it is. Removing it will not remember this invitation, so the same message read again after that would bring the scope back." % (seq, share.get("name"), held["name"], error.__class__.__name__, error), w=entry.get("w"), seqs=[seq] if type(seq) is int else None)
                             data["aamio_scope"] = view
                             return
                         # Said in attention, with what went wrong, and on the
@@ -2314,9 +2319,13 @@ class Runtime:
         # its address, instance and seq, and the first of its copies stands, as
         # it was first handed over: a copy in memory that knew only what it
         # showed hid an answer on the other thread, and a delivery read twice was
-        # listed twice (a check of the same day). Any other row is told by all
-        # it shows, its verified signer too, and two such rows that show the
-        # same are both kept: nothing says they are one.
+        # listed twice (a check of the same day). The first copy is the one the
+        # archive has from before, when it has one this process did not write:
+        # an answer read again after a restart was listed with the mark of the
+        # reading, replay, by the process that read it, and with the mark it
+        # first came with by the next (a check of 0.7.42, the same day). Any
+        # other row is told by all it shows, its verified signer too, and two
+        # such rows that show the same are both kept: nothing says they are one.
         def one(entry):
             instance = entry.get("instance")
             return (entry.get("w"), instance, entry.get("seq")) if isinstance(instance, str) else None
@@ -2348,11 +2357,27 @@ class Runtime:
             with channel.lock:
                 held.extend(channel.received)
 
+        # A board inbox is renewed while the old one still holds answers, and
+        # the old one keeps its own label and its own archive. Once that
+        # channel expires it leaves self.channels, and reading only the
+        # channels this process holds made those answers vanish from here
+        # although they had arrived, been decrypted and been written down.
+        rows = []
+        for label in sorted(self._archive_labels() | set(self.channels) | {"board"}):
+            rows.extend(self._archived(label, "received"))
+
+        # A delivery the archive has more rows of than this process wrote was
+        # written down before this process read it: that row is its first
+        # copy, and the copies held here are later readings of it.
+        stored = collections.Counter(delivery for delivery in map(one, rows) if delivery is not None)
+        written = collections.Counter(one(entry) for entry in held if one(entry) is not None and entry.get("archived") is not False)
+        earlier = {delivery for delivery, count in stored.items() if count > written[delivery]}
+
         named = set()
         for entry in held:
             delivery = one(entry)
             if delivery is not None:
-                if delivery in named:
+                if delivery in named or delivery in earlier:
                     continue
                 named.add(delivery)
             if wanted(entry):
@@ -2367,25 +2392,19 @@ class Runtime:
         # another delivery that shows the same.
         on_disk = collections.Counter(shown(entry) for entry in held if one(entry) is None and entry.get("archived") is not False)
 
-        # A board inbox is renewed while the old one still holds answers, and
-        # the old one keeps its own label and its own archive. Once that
-        # channel expires it leaves self.channels, and reading only the
-        # channels this process holds made those answers vanish from here
-        # although they had arrived, been decrypted and been written down.
-        for label in sorted(self._archive_labels() | set(self.channels) | {"board"}):
-            for entry in self._archived(label, "received"):
-                delivery = one(entry)
-                if delivery is not None:
-                    if delivery in named:
-                        continue
-                    named.add(delivery)
-                elif on_disk[shown(entry)] > 0:
-                    on_disk[shown(entry)] -= 1
+        for entry in rows:
+            delivery = one(entry)
+            if delivery is not None:
+                if delivery in named:
                     continue
-                if wanted(entry):
-                    out.append(dict(entry, from_archive=True))
-                else:
-                    skipped.append(entry)
+                named.add(delivery)
+            elif on_disk[shown(entry)] > 0:
+                on_disk[shown(entry)] -= 1
+                continue
+            if wanted(entry):
+                out.append(dict(entry, from_archive=True))
+            else:
+                skipped.append(entry)
 
         out.sort(key=lambda e: (e.get("at") or 0, e.get("seq") or 0))
         self.board_replies_left_out = len(skipped)
@@ -2406,10 +2425,10 @@ class Runtime:
         return out
 
     def _archive_labels(self, prefix=""):
-        """Labels this runtime has an archive for, the ones a board inbox uses."""
+        """Labels this runtime has an archive for, the ones a board inbox uses, whether the archive is on or off."""
         home = getattr(self, "home", None)
 
-        if not home or not getattr(self, "archive_enabled", False):
+        if not home:
             return set()
 
         try:
@@ -2422,11 +2441,17 @@ class Runtime:
 
     def _archived(self, label, kind):
         """Entries this client wrote down for a channel, oldest first. Silent
-        when archiving is off or the file is not there: an empty archive is not
-        an error, it is a client that was told not to keep one."""
+        when the file is not there: an empty archive is not an error, it is a
+        client that was told not to keep one.
+
+        With the archive off nothing is written, and what an earlier run wrote
+        is still read: it stays the record of what arrived until it is pruned.
+        A process with the archive off did not look, and listed an answer
+        written down before it with the mark of its own later reading (a check
+        of 11 November 2026)."""
         home = getattr(self, "home", None)
 
-        if not home or not getattr(self, "archive_enabled", False):
+        if not home:
             return []
 
         path = os.path.join(home, "archive", "%s.jsonl" % label)
@@ -3287,7 +3312,7 @@ class Runtime:
         with self.lock:
             if not hasattr(self, "attention"):
                 self.attention = {}
-            if state in ("kept_out", "unverified", "binding_conflict", "archive_failed", "scope_not_saved", "replay_unknown") and seqs is not None:
+            if state in ("kept_out", "unverified", "binding_conflict", "archive_failed", "scope_not_saved", "scope_share_not_recorded", "replay_unknown") and seqs is not None:
                 previous = self.attention.get((where, state), {})
                 note["seqs"] = previous.get("seqs", []) + list(seqs)
                 note["count"] = len(note["seqs"])

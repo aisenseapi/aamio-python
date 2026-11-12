@@ -307,6 +307,64 @@ def test_a_read_writes_its_cursor_once_and_says_where_it_stands_when_that_fails(
     assert [note for note in runtime.attention_taken() if note["state"] == "unsaved"] == []
 
 
+def board_home(home, answers, archive=True):
+    """A board channel at W in a home whose archive is the real one, on or off: what poll writes there, board replies read back."""
+    runtime, _ = build(answers)
+    runtime.home = str(home)
+    os.makedirs(os.path.join(runtime.home, "archive"), exist_ok=True)
+    runtime.archive_enabled = archive
+    runtime.archive_lock = threading.Lock()
+    runtime.pruned_at = time.time()
+    del runtime.archive
+    channel = Channel("board", "read-key", W, time.time() + 600)
+    runtime.channels = {"board": channel}
+    return runtime, channel
+
+
+def full_disk(*args, **kwargs):
+    raise OSError(28, "No space left on device")
+
+
+@pytest.mark.parametrize("archive_later", [True, False], ids=["the archive on in every process", "the archive off in the process that reads again"])
+def test_an_answer_read_again_after_a_restart_is_listed_as_it_was_first_written_down(tmp_path, archive_later):
+    # One answer, written down as it first came, replay false. Its cursor could not be written, its hashes were, by
+    # the save of another channel in the same read, and after a restart it came again, replay true: right for the
+    # read. The process that read it again listed it with that mark, and the next process with the first one (a
+    # check of 0.7.42, 11 November 2026). One row, as first written down, in the process that first read it, in the
+    # one that read it again, with its archive on or off, and in the next.
+    reply = stored(W, 1, "OK", ALICE)
+    first, channel = board_home(tmp_path, [answer(reply, created_at=1000, instance="x" * 16)])
+    first.save_state = full_disk
+    assert [entry["replay"] for entry in first.poll(channel)[1]] == [False] and channel.after == 0
+    assert [(r["seq"], r["replay"], "from_archive" in r) for r in first.board_replies()] == [(1, False, False)]
+    # As the save of the other channel left state.json: the hashes of this one, and its cursor at 0.
+    kept = channel.to_state()
+
+    second, _ = board_home(tmp_path, [answer(reply, created_at=1000, instance="x" * 16)], archive=archive_later)
+    second.channels["board"] = channel = Channel.from_state(kept)
+    assert [entry["replay"] for entry in second.poll(channel)[1]] == [True], "the read says it came before, as it did"
+    third, _ = board_home(tmp_path, [])
+    for reader in (second, third):
+        assert [(r["seq"], r["replay"], r.get("from_archive")) for r in reader.board_replies()] == [(1, False, True)]
+
+
+def test_a_first_handover_the_archive_refused_stands_while_the_process_that_made_it_runs(tmp_path):
+    # Two faults at once: the archive refused the answer as it first came, and its cursor could not be written, so
+    # it was read again and written down then, as a replay. The process that first handed it over still holds that,
+    # and lists it as it first came. The next process has what was written down, and nothing else to go by.
+    reply = stored(W, 1, "OK", ALICE)
+    runtime, channel = board_home(tmp_path, [answer(reply, created_at=1000, instance="x" * 16), answer(reply, created_at=1000, instance="x" * 16)])
+    real = runtime.archive
+    runtime.archive = full_disk
+    runtime.save_state = full_disk
+    assert [entry["replay"] for entry in runtime.poll(channel)[1]] == [False]
+    runtime.archive = real
+    runtime.save_state = lambda: None
+    assert [entry["replay"] for entry in runtime.poll(channel)[1]] == [True]
+    assert [(r["seq"], r["replay"], "from_archive" in r) for r in runtime.board_replies()] == [(1, False, False)]
+    assert [(r["seq"], r["replay"], r.get("from_archive")) for r in board_home(tmp_path, [])[0].board_replies()] == [(1, True, True)]
+
+
 def test_a_channel_read_from_state_json_knows_its_thread_by_the_instance_kept_there():
     first = stored(W, 1, "one", ALICE)
     runtime, channel = build([answer(first, created_at=1000, instance="a" * 16)])

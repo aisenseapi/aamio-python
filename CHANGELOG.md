@@ -4,7 +4,24 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## Unreleased
+
+- `board replies` lists an answer as it was first written down. One read again
+  after a restart, when its cursor had not been written, was listed with
+  `replay: true` by the process that read it again and with `replay: false` by
+  the next. `read` marks the second reading as a replay, as before.
+- `board replies` reads the archive that is there when the archive is off as
+  well. Off is about what is written from now on: an answer written down before
+  was passed over, and the list was this process's own.
+- `attention` says `scope_share_not_recorded` when a scope held already is
+  shared again and the invitation cannot be recorded with it in `scopes.json`.
+  It stood in the log alone, and the reader was told `kept` with nothing more.
+- The README says where the promise that a removed scope stays removed ends: an
+  invitation taken by 0.6.31 or earlier is not recorded with its scope, and
+  `scopes.json` remembers the 256 newest removed invitations.
+
 ## 0.6.32 - 2026-11-11
+
 
 - A scope you removed stays removed when the invitation that brought it is read
   again. The invitation is recorded with the scope in `scopes.json`, and
