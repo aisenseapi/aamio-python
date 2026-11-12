@@ -38,6 +38,7 @@ import time
 
 from . import __version__ as CORE_VERSION
 from .crypto import key_hash
+from .storage import HOME_ENCODING
 
 MANIFEST_FILE = "aamio-addon.json"
 KNOWN_CONTRACTS = (1, 2)
@@ -403,7 +404,7 @@ def _unreadable(path, manifest):
 def _read_hosts(path, manifest):
     try:
         with open(path, "rb") as handle:
-            rows = json.loads(handle.read().decode("utf-8"))
+            rows = json.loads(handle.read().decode(HOME_ENCODING))
     except FileNotFoundError:
         return None
     except (OSError, ValueError):

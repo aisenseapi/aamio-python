@@ -23,6 +23,16 @@ import tempfile
 import sys
 import time
 
+# How a file of the home is read: UTF-8, past a byte order mark at its start.
+# An editor on Windows may leave one in front of a file that is whole
+# otherwise. This runtime stopped on such a file where it had to have it, and
+# where it did not, read it as not there: an archive told to keep nothing was
+# kept again, and nothing said so (a check of 12 November 2026). The three
+# runtimes read the home's own files past the mark. The key is not one of
+# them: it holds the seed and nothing else. And what comes from outside the
+# home, a message, a card, an add-on's answer, is read as it is.
+HOME_ENCODING = "utf-8-sig"
+
 ARCHIVE_MODES = ("keep", "off", "days")
 DEFAULT_POLICY = {"mode": "keep", "days": None, "max_mb": None}
 
@@ -438,7 +448,7 @@ def check(home):
 def read_policy(home):
     """The archive policy of this home. No file means keep, which is what every version did."""
     try:
-        with open(os.path.join(home, "config.json"), encoding="utf-8") as handle:
+        with open(os.path.join(home, "config.json"), encoding=HOME_ENCODING) as handle:
             stored = json.load(handle).get("archive")
     except (OSError, ValueError, AttributeError):
         stored = None
@@ -495,7 +505,7 @@ def describe(policy):
 
 
 def _records(path):
-    with open(path, encoding="utf-8") as handle:
+    with open(path, encoding=HOME_ENCODING) as handle:
         for line in handle:
             if not line.strip():
                 continue

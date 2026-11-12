@@ -1170,7 +1170,7 @@ class Runtime:
         """
         try:
             with open(self._path(name), "rb") as handle:
-                text = handle.read().decode("utf-8")
+                text = handle.read().decode(storage.HOME_ENCODING)
             value = json.loads(text) if text.strip() else default
         except FileNotFoundError:
             return default
@@ -1217,6 +1217,8 @@ class Runtime:
     def _load_or_create_keys(self):
         path = self._path("key")
         try:
+            # Not past a mark, as the home's other files are: the key holds
+            # the seed and nothing else, in all three runtimes.
             with open(path, "r", encoding="utf-8") as handle:
                 text = handle.read().strip()
         except FileNotFoundError:
@@ -2561,7 +2563,7 @@ class Runtime:
 
         found = []
 
-        with open(path, encoding="utf-8") as handle:
+        with open(path, encoding=storage.HOME_ENCODING) as handle:
             for line in handle:
                 line = line.strip()
 

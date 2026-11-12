@@ -74,6 +74,16 @@ not what moved in the source.
   written, and change nothing. A full disk was a traceback, after the probe
   had run, and when it was the rename at the end that failed, a file of the
   command's own was left in the home.
+- A file of the home with a byte order mark in front, as an editor on Windows
+  may save it, is read past the mark: the state the runtime keeps, the
+  archive's policy, the list of enabled add-ons, an add-on's list of websites
+  and the archive's files. The runtime stopped on such a file, where the Node
+  runtime read it. And `config.json` with a mark was read as no choice at all,
+  so an archive that had been turned off was kept again with nothing said.
+  What follows the mark has to be what the file holds. The key is not read
+  past a mark: it holds the seed and nothing else, in all three runtimes. And
+  what comes from outside the home, a message, a card or an add-on's answer,
+  is read as it is.
 - `board channel` that is stopped at the gate once its channel is open says
   so on the command line: the answer has the channel in `opened` and the fix,
   as a failed send has. It was an error with no fix and no word of the

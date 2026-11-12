@@ -85,7 +85,7 @@ def enabled(given=None):
     """The distributions enabled in this home, in the order they were enabled, as the file spells them."""
     path = enabled_file(given)
     try:
-        with open(path, encoding="utf-8") as handle:
+        with open(path, encoding=storage.HOME_ENCODING) as handle:
             data = json.load(handle)
     except FileNotFoundError:
         return []

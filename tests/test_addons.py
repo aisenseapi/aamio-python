@@ -1041,3 +1041,23 @@ def test_a_rename_that_fails_says_so_and_leaves_no_file_behind(process_site, mon
     # And when the rename works again, so does the command.
     monkeypatch.setattr(addons.os, "replace", real)
     assert main(["addon", "disable", "demo2"], monkeypatch)[0] == 0 and enabled_in(tmp_path) == {"enabled": []}
+
+
+def test_the_lists_an_add_on_lives_by_are_read_past_a_byte_order_mark(process_site, monkeypatch, tmp_path):
+    """addons.json and an add-on's list of websites are files of the home: an editor's mark in front of them is passed, here as in aamio-php and the Node runtime."""
+    process_site()
+    home = tmp_path / "home"
+    assert main(["addon", "enable", "demo2"], monkeypatch)[0] == 0
+    assert main(["addon", "demo2", "allow", "firma.example"], monkeypatch)[0] == 0
+    for path in (home / "addons.json", home / "addons" / "demo2.hosts.json"):
+        raw = path.read_bytes()
+        assert raw and not raw.startswith(b"\xef\xbb\xbf")
+        path.write_bytes(b"\xef\xbb\xbf" + raw)
+    code, out, err = main(["addon", "list"], monkeypatch)
+    assert code == 0 and [(row["name"], row["enabled"]) for row in json.loads(out)["addons"]] == [("demo2", True)], err
+    code, out, err = main(["addon", "demo2", "list"], monkeypatch)
+    assert code == 0 and json.loads(out)["hosts"] == ["firma.example"], err
+    # And the next write leaves the list without the mark.
+    assert main(["addon", "demo2", "allow", "kunde.example"], monkeypatch)[0] == 0
+    assert not (home / "addons" / "demo2.hosts.json").read_bytes().startswith(b"\xef\xbb\xbf")
+    # An add-on's answer is not a file of the home, and a mark in front of one is still no answer.

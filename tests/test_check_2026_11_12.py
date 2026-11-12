@@ -522,3 +522,128 @@ def test_the_command_line_says_what_to_do_about_a_channel_whose_address_never_le
     assert said["fix"] == ("The channel tender is open and listed by `aamio channel list`: only the message carrying its address did not land. "
                            "Nothing left this machine, so nobody has been given its address. Close it with `aamio channel close tender`, put right what the error says, and open a new one.")
     assert "send it as a new message" not in said["fix"]
+
+
+# ------------------------------------------------------------------ a file of the home with a mark in front
+#
+# An editor on Windows may save a file with a byte order mark in front. The
+# Node runtime read the home's state past it and this runtime stopped, and a
+# policy file with one was read as no choice at all. The home's own files are
+# read past the mark by all three now.
+
+MARK = b"\xef\xbb\xbf"
+
+
+def marked(path):
+    """The file again, with a byte order mark in front of what it held."""
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    assert raw and not raw.startswith(MARK), path
+    with open(path, "wb") as handle:
+        handle.write(MARK + raw)
+
+
+def test_a_file_of_the_home_with_a_byte_order_mark_in_front_is_read(world):
+    service, runtime, base = world
+    a, b = partners(runtime)
+    a.scope_new("team")
+    w = a.channels["inbox"].w
+    written(b, a, w, "written down before the mark")
+    state, entries = a.poll(a.channels["inbox"], 0)
+    assert [entry["body"]["text"] for entry in entries] == ["written down before the mark"]
+    posted = a.board_post("need", "kept by python", "who answers?", ["archive"], 600)
+    a.peers[b.channels["inbox"].w] = b.keys.public
+    a.send(b.channels["inbox"].w, "one in the outbox", None)
+    home, key = a.home, a.keys.public
+    partners_before, scopes_before, outbox_before = a.partner_list(), a.scope_list(), dict(a.outbox)
+    a.close()
+
+    names = ["partners.json", "scopes.json", "state.json", "outbox.json", os.path.join("archive", "inbox.jsonl"), os.path.join("archive", "board.jsonl")]
+    for name in names:
+        marked(os.path.join(home, name))
+
+    again = Runtime(home=home, host="https://fake.test", tags=["a"], archive=True)
+    again.client = Board(service)
+    try:
+        assert again.keys.public == key, "the key is the one the home had"
+        assert (again.partner_list(), again.scope_list(), dict(again.outbox)) == (partners_before, scopes_before, outbox_before)
+        assert again.channels["inbox"].w == w and "board" in again.channels, "the channels are read from state.json"
+        # The archive's first line is a record like the rest.
+        assert [record["post"]["id"] for record in again._archived("board", "posted")] == [posted["post"]["id"]]
+        dated = [at for at, line in storage._records(os.path.join(home, "archive", "inbox.jsonl"))]
+        assert dated and all(at is not None for at in dated), "and it has its time, so a lifetime reaches it"
+        # What is saved next is written without the mark.
+        again.partner_add("c", again.keys.public)
+        with open(os.path.join(home, "partners.json"), "rb") as handle:
+            assert not handle.read().startswith(MARK)
+    finally:
+        again.close()
+
+
+def test_a_policy_file_with_a_mark_in_front_is_still_the_choice_that_was_made(world):
+    """Read as no choice at all, an archive told to keep nothing was kept again, and nothing said so."""
+    service, runtime, base = world
+    a, b = partners(runtime)
+    cli.set_archive(a, storage.parse_policy("off"))
+    home = a.home
+    a.close()
+    assert storage.read_policy(home)["mode"] == "off"
+    marked(os.path.join(home, "config.json"))
+    assert storage.read_policy(home)["mode"] == "off", "the home still keeps nothing"
+
+    again = Runtime(home=home, host="https://fake.test", tags=["a"])
+    again.client = Board(service)
+    try:
+        written(b, again, again.channels["inbox"].w, "not to be written down")
+        state, entries = again.poll(again.channels["inbox"], 0)
+        assert [entry["body"]["text"] for entry in entries] == ["not to be written down"]
+        assert not os.path.exists(os.path.join(home, "archive", "inbox.jsonl")), "and nothing was written down"
+    finally:
+        again.close()
+
+    # A file that is not JSON at all is no choice, as before: only the mark is passed.
+    with open(os.path.join(home, "config.json"), "wb") as handle:
+        handle.write(MARK + b"{ nope")
+    assert storage.read_policy(home)["mode"] == "keep"
+
+
+def test_a_state_file_that_is_not_json_still_stops_the_runtime(world):
+    """Only the mark is read past. What follows it has to be what the file holds."""
+    service, runtime, base = world
+    a, b = partners(runtime)
+    home = a.home
+    a.close()
+    with open(os.path.join(home, "partners.json"), "wb") as handle:
+        handle.write(MARK + MARK + b"[]")
+    with pytest.raises(RuntimeError, match="partners.json could not be read \\(not UTF-8 JSON\\)"):
+        Runtime(home=home, host="https://fake.test", tags=["a"])
+    with open(os.path.join(home, "partners.json"), "wb") as handle:
+        handle.write(b"\xff\xfe[\x00]\x00")
+    with pytest.raises(RuntimeError, match="partners.json could not be read \\(not UTF-8 JSON\\)"):
+        Runtime(home=home, host="https://fake.test", tags=["a"])
+
+
+def test_a_state_file_that_holds_the_mark_and_nothing_else_is_an_empty_file(world):
+    """As an empty file is, in all three: the home opens with no partners in it."""
+    service, runtime, base = world
+    a, b = partners(runtime)
+    home = a.home
+    a.close()
+    with open(os.path.join(home, "partners.json"), "wb") as handle:
+        handle.write(MARK)
+    again = Runtime(home=home, host="https://fake.test", tags=["a"])
+    try:
+        assert again.partner_list() == []
+    finally:
+        again.close()
+
+
+def test_the_key_is_not_read_past_a_mark(world):
+    """The key holds the seed and nothing else. The three runtimes refuse one with a mark in front, and the Node runtime's tests hold it to that."""
+    service, runtime, base = world
+    a, b = partners(runtime)
+    home = a.home
+    a.close()
+    marked(os.path.join(home, "key"))
+    with pytest.raises(RuntimeError, match="key could not be read \\(not a 64 character hex seed\\)"):
+        Runtime(home=home, host="https://fake.test", tags=["a"])
