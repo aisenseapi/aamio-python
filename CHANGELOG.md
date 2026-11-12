@@ -74,6 +74,12 @@ not what moved in the source.
   written, and change nothing. A full disk was a traceback, after the probe
   had run, and when it was the rename at the end that failed, a file of the
   command's own was left in the home.
+- After `partner remove`, the inbox that named the removed key is read until it
+  expires, as in aamio-php and the Node runtime from the same release. What the
+  partners still in the book write there is handed over; what the removed key
+  writes there is not, and a read says how many in `removed_key`. The whole
+  inbox was read no more, so a partner that had not yet learned the new
+  address wrote where nobody read, and nothing said so.
 - A post asked for as long as an inbox lives, `--ttl 3600`, is taken by the
   board. Its lifetime left the inbox no time for the work the board advises,
   which is done after the lifetime is set, since the work covers it, and the

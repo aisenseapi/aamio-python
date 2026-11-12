@@ -1,5 +1,7 @@
-"""A muted inbox is read no more on every path, every generation is judged,
-a failed presence publish is said, and a handoff binds the sender's key.
+"""What a removed key writes to an inbox that named it is not handed over on
+any path, and the inbox is read on for the partners still in the book; every
+generation is judged, a failed presence publish is said, and a handoff binds
+the sender's key.
 
 Round two of three runtimes talking over aamio, 21 September 2026, on the
 published 0.6.15: the poller that was already running for a muted inbox ran
@@ -10,7 +12,9 @@ channel address had no key bound to it, so the first send to it failed.
 
 These tests go the paths the round went: the poller loop, the queue the
 listener fills, the state loaded at start, the real publish_presence, and a
-signed message read by the real poll.
+signed message read by the real poll. Until 12 November 2026 a muted inbox was
+read no more at all, and a partner that had not yet learned the new address
+wrote where nobody read; it is read on now, judged message by message.
 """
 
 import base64
@@ -37,6 +41,8 @@ def key(n):
 # own allowlist to reach the record, as they would in the field.
 BK = keypair(1)
 B, C = BK.public, key(2)
+# A partner who stays in the book, with a real keypair, to write to the old inbox.
+STAYS = keypair(4)
 
 
 class Service:
@@ -90,19 +96,22 @@ def unsigned(seq, body="hello"):
     return stored("i" * 20, seq, body, keys=None)
 
 
-def test_a_poller_already_running_stops_when_its_inbox_is_muted():
+def test_a_poller_already_running_hands_over_nothing_the_removed_key_wrote_and_reads_on():
     service = Service()
-    runtime = build(service, [{"name": "b", "key": B}, {"name": "c", "key": C}], [B, C])
+    runtime = build(service, [{"name": "b", "key": B}, {"name": "stays", "key": STAYS.public}], [B, STAYS.public])
     old = runtime.channels["inbox"]
     held = threading.Event()
     release = threading.Event()
     polls = []
 
     def read(w, read_key, after, wait, **limits):
-        polls.append(after)
-        held.set()
-        release.wait(5)
-        return 200, {"exists": True, "created_at": 1000, "messages": [stored(old.w, 1, "from the removed key", keys=BK)], "next": 1}
+        polls.append((w, after))
+        if len(polls) == 1:
+            held.set()
+            release.wait(5)
+            return 200, {"exists": True, "created_at": 1000, "messages": [stored(old.w, 1, "from the removed key", keys=BK), stored(old.w, 2, "from a partner who stays", keys=STAYS)], "next": 2}
+        runtime.stop.set()
+        return 200, {"exists": True, "created_at": 1000, "messages": [], "next": after}
 
     service.read = read
     poller = threading.Thread(target=Runtime._poll_loop, args=(runtime, old), daemon=True)
@@ -114,10 +123,15 @@ def test_a_poller_already_running_stops_when_its_inbox_is_muted():
     release.set()
     poller.join(5)
 
-    assert not poller.is_alive(), "the poller stopped once its inbox was muted"
-    assert runtime.inbound.empty(), "what the poll brought back after the muting was handed to nobody"
-    assert polls == [0], "no second poll started"
-    assert len(old.received) == 1, "the message stays on the channel's record, for the receipt"
+    assert not poller.is_alive()
+    handed = []
+    while not runtime.inbound.empty():
+        handed.append(runtime.inbound.get_nowait())
+    assert [entry["body"]["text"] for entry in handed] == ["from a partner who stays"], "what the partner who stays wrote is handed over, and nothing of the removed key"
+    assert polls == [(old.w, 0), (old.w, 2)], "and the poller reads on, past both"
+    said = [note for note in runtime.attention.values() if note["state"] == "removed_key"]
+    assert len(said) == 1 and said[0]["seqs"] == [1] and said[0]["w"] == old.w, "the one passed by is said"
+    assert [entry["seq"] for entry in old.received] == [2], "and only what was handed over is on the record"
 
 
 def test_a_message_queued_before_the_removal_is_not_handed_over():
@@ -133,16 +147,25 @@ def test_a_message_queued_before_the_removal_is_not_handed_over():
     assert runtime.inbound.empty() and runtime.held_back == []
 
 
-def test_a_direct_poll_of_a_muted_channel_reads_nothing():
+def test_a_direct_poll_of_a_muted_inbox_hands_over_nothing_the_removed_key_wrote():
     service = Service()
-    runtime = build(service, [{"name": "b", "key": B}], [B], listener=False)
+    runtime = build(service, [{"name": "b", "key": B}, {"name": "stays", "key": STAYS.public}], [B, STAYS.public], listener=False)
     old = runtime.channels["inbox"]
-    asked = []
-    service.read = lambda w, read_key, after, wait, **limits: asked.append(w) or (200, {"exists": True, "created_at": 1000, "messages": [unsigned(1)], "next": 1})
+    service.read = lambda w, read_key, after, wait, **limits: (200, {"exists": True, "created_at": 1000, "messages": [stored(old.w, 1, "from the removed key", keys=BK), stored(old.w, 2, "from a partner who stays", keys=STAYS)], "next": 2})
 
     runtime.partner_remove("b")
+    state, entries = runtime.poll(old, 0)
 
-    assert runtime.poll(old, 0) == ("muted", []) and asked == [], "a library caller gets nothing from a muted channel, and the service is not asked"
+    assert state == "ok" and [entry["body"]["text"] for entry in entries] == ["from a partner who stays"], "a library caller gets what the partners still in the book wrote, and nothing of the removed key"
+    assert old.after == 2, "the cursor is past both, or the removed key's message is passed by again on every read"
+    said = [note for note in runtime.attention.values() if note["state"] == "removed_key"]
+    assert len(said) == 1 and said[0]["seqs"] == [1]
+
+    # Taken back into the book: what the key writes there from then on is read.
+    runtime.partner_add("b", B)
+    service.read = lambda w, read_key, after, wait, **limits: (200, {"exists": True, "created_at": 1000, "messages": [stored(old.w, 3, "back in the book", keys=BK)], "next": 3})
+    state, entries = runtime.poll(old, 0)
+    assert state == "ok" and [entry["body"]["text"] for entry in entries] == ["back in the book"]
 
 
 def test_every_generation_that_names_a_removed_key_is_muted():

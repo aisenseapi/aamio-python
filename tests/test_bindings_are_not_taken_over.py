@@ -5,7 +5,7 @@ encryption on the 24th: a verified message naming an address in channel or
 reply_to bound the signer's key to that address whoever had it before, so a
 stranger's signed message naming a partner's address made the next send there
 seal to the stranger. The signature proves who made the claim, not who holds
-the address. And N2: a poll whose channel was muted while the read was out
+the address. And N2: a poll whose partner was removed while the read was out
 still applied the bindings it brought back.
 """
 
@@ -96,20 +96,22 @@ def test_an_unverified_claim_and_a_malformed_address_bind_nothing():
     assert runtime.peers == {}
 
 
-def test_a_poll_muted_while_the_read_was_out_applies_nothing_it_brought_back():
-    runtime = build(Service(), [{"name": "partner", "key": PARTNER.public}], None, listener=False)
+def test_a_poll_whose_partner_was_removed_while_the_read_was_out_applies_nothing_it_brought_back():
+    runtime = build(Service(), [{"name": "partner", "key": PARTNER.public}], [PARTNER.public], listener=False)
     inbox = runtime.channels["inbox"]
+    # Written to the inbox as it is before the removal, which opens another.
+    brought = claim(runtime, 1, "channel", ADDRESS, PARTNER)
 
     def read(w, read_key, after, wait, **limits):
-        # The partner is removed while this read is out, so the inbox is muted
-        # by the time the answer arrives.
-        inbox.muted = True
-        return 200, {"exists": True, "created_at": 1000, "messages": [claim(runtime, 1, "channel", ADDRESS, PARTNER)], "next": 1}
+        # The partner is removed while this read is out, so the key has left
+        # the address book by the time the answer arrives.
+        runtime.partner_remove("partner")
+        return 200, {"exists": True, "created_at": 1000, "messages": [brought], "next": 1}
 
     runtime.client.read = read
 
     state, entries = runtime.poll(inbox, 0)
 
-    assert state == "muted" and entries == []
+    assert state == "ok" and entries == []
     assert runtime.peers == {}, "the binding the answer carried was not made"
-    assert len(inbox.received) == 1, "while the message stays on the channel's record, for the receipt"
+    assert [note["seqs"] for note in runtime.attention.values() if note["state"] == "removed_key"] == [[1]], "and the message passed by is said"

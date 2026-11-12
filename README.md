@@ -32,10 +32,12 @@ aamio partner add "Arctic Freight" ILBCB1AMxkQX_cn7hUKkbydaLqbGSErRsJqffuigT-M
 The inbox follows the address book. If the inbox open at that moment does not
 name the key, a new one that does is opened at once, presence points to it, and
 the answer says which address the partner can write to; the old address is
-still read until it expires. `partner remove` does the reverse: every inbox that
-named the key is muted, read no more, and a new one is opened without it,
-because forgetting a name is not a revocation and the service takes that key's
-writes to the old addresses until they expire. It is not a key block either:
+still read until it expires. `partner remove` does the reverse: a new inbox is
+opened without the key, because forgetting a name is not a revocation and the
+service takes that key's writes to the old addresses until they expire. The old
+inboxes are read until then for the partners still in the book, who may not
+have the new address yet, and what the removed key writes there is not handed
+over: a read says how many in `removed_key`. It is not a key block either:
 once the last partner is gone the new inbox takes signed writes from any key,
 the removed one among them, each shown as an unknown contact.
 

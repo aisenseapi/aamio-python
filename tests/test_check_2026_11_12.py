@@ -794,3 +794,32 @@ def test_a_post_asked_for_as_long_as_an_inbox_lives_leaves_it_room(world):
     assert inbox.expire_at - time.time() - posted["post"]["ttl"] >= 30 - 2
     usual = a.board_post("need", "twenty minutes", "well inside", None, 1200)
     assert usual["post"]["ttl"] == 1200, "a post well inside its inbox keeps the lifetime it asked for"
+
+
+def test_the_inbox_that_named_a_removed_key_is_read_on_for_the_partners_still_in_the_book(world):
+    """Read no more, the old inbox lost what a partner wrote there before it had the new address."""
+    service, runtime, base = world
+    a, b = partners(runtime)
+    c = runtime("c")
+    a.partner_add("c", c.keys.public)
+    c.partner_add("a", a.keys.public)
+    old = a.channels["inbox"]
+    assert sorted(old.allow) == sorted([b.keys.public, c.keys.public])
+    removed = a.partner_remove("c")
+    assert removed["rotated"] is True and removed["old_inbox"]["w"] == old.w and removed["old_inbox"]["muted"] is True
+    a.attention_taken()
+
+    # Both still have the old address, as a partner has until it learns the new one.
+    written(b, a, old.w, "from a partner who stays")
+    written(c, a, old.w, "from the key that was removed")
+    got = a.read(wait=0)
+    assert [(m["sender"], m["body"]["text"]) for m in got] == [("b", "from a partner who stays")], "what a partner still in the book writes to the old inbox arrives, and only that"
+    said = [note for note in a.attention_taken() if note["state"] == "removed_key"]
+    assert len(said) == 1 and said[0]["w"] == old.w and said[0]["seqs"] == [2], "and the one from the removed key is said, never dropped in silence"
+    assert old.after == 2, "the cursor moves past it, or it is passed by again on every read"
+    assert a.read(wait=0) == []
+
+    # Taken back into the book: what the key writes there from then on arrives.
+    a.partner_add("c", c.keys.public)
+    written(c, a, old.w, "back in the book")
+    assert [(m["sender"], m["body"]["text"]) for m in a.read(wait=0)] == [("c", "back in the book")]

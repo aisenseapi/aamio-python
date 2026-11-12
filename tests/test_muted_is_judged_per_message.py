@@ -1,5 +1,6 @@
-"""A channel muted while a read is out: the key still comes out of a scope
-share, and the mute is judged message by message.
+"""A partner removed while a read is out: nothing of what its key wrote is
+taken, the key still comes out of a scope share, and the removal is judged
+message by message.
 
 Findings K1 and K2 of the health check of 24 September 2026, on 0.6.18. The
 fix for N2 read the mute once before the batch and skipped the whole scope
@@ -26,7 +27,7 @@ def message(inbox, seq, body):
     return stored(inbox.w, seq, json.dumps(body), keys=PARTNER, type="json")
 
 
-def test_a_scope_key_comes_out_of_a_message_even_when_the_channel_was_muted_meanwhile():
+def test_a_scope_from_a_partner_removed_while_the_read_was_out_is_not_taken_at_all():
     runtime = build(Service(), [{"name": "partner", "key": PARTNER.public}], [PARTNER.public], listener=False)
     inbox = runtime.channels["inbox"]
     archived = []
@@ -35,15 +36,41 @@ def test_a_scope_key_comes_out_of_a_message_even_when_the_channel_was_muted_mean
 
     def read(w, read_key, after, wait, **limits):
         # The partner is removed while this read is out.
-        inbox.muted = True
+        runtime.partner_remove("partner")
         return 200, {"exists": True, "created_at": 1000, "messages": [share], "next": 1}
 
     runtime.client.read = read
     state, entries = runtime.poll(inbox, 0)
 
-    assert state == "muted" and entries == [] and runtime.scopes == [], "nothing is handed over and no scope is kept"
-    kept = inbox.received[0]["body"]["data"]["aamio_scope"]
-    assert kept["kept"] is False and "key" not in kept and "muted" in kept["note"], kept
+    assert state == "ok" and entries == [] and runtime.scopes == [], "nothing is handed over and no scope is kept"
+    assert inbox.received == [] and archived == [], "the message is not taken: not on the channel's record and not in the archive"
+    said = [note for note in runtime.attention.values() if note["state"] == "removed_key"]
+    assert len(said) == 1 and said[0]["seqs"] == [1] and SECRET not in json.dumps(list(runtime.attention.values()))
+    assert inbox.after == 1
+
+
+def test_a_scope_key_comes_out_of_a_message_whose_signer_left_after_it_was_judged():
+    runtime = build(Service(), [{"name": "partner", "key": PARTNER.public}], [PARTNER.public], listener=False)
+    inbox = runtime.channels["inbox"]
+    archived = []
+    runtime.archive = lambda label, record: archived.append(json.dumps(record))
+    asked = []
+
+    def left(channel, key):
+        # The removal lands between the judging of the message and its applying.
+        asked.append(key)
+        return len(asked) > 1
+
+    runtime._left_the_book = left
+    share = message(inbox, 1, {"text": "a scope for you", "channel": ADDRESS, "data": {"aamio_scope": {"name": "chapter-review", "key": SECRET}}})
+    runtime.client.read = lambda w, read_key, after, wait, **limits: (200, {"exists": True, "created_at": 1000, "messages": [share], "next": 1})
+
+    state, entries = runtime.poll(inbox, 0)
+
+    assert state == "ok" and len(entries) == 1, "read while the partner still was one, it is handed over"
+    kept = entries[0]["body"]["data"]["aamio_scope"]
+    assert kept["kept"] is False and "key" not in kept and "left the address book" in kept["note"], kept
+    assert runtime.scopes == [] and runtime.peers == {}, "and nothing of it is taken: no scope, no binding"
     assert SECRET not in json.dumps(inbox.received), "the key is out of the channel's record"
     assert archived and SECRET not in "".join(archived), "and out of the archive"
 
@@ -66,6 +93,9 @@ def test_a_partner_removed_between_two_messages_of_one_batch_binds_nothing_from_
 
     state, entries = runtime.poll(inbox, 0)
 
-    assert state == "muted" and entries == []
+    assert state == "ok" and [entry["seq"] for entry in entries] == [1], "the message read while the partner still was one is handed over, the one after the removal is not"
     assert runtime.peers == {ADDRESS: PARTNER.public}, "the first message bound its address while the partner still was one; the second, read after the removal, bound nothing"
-    assert len(inbox.received) == 2, "both stay on the record, for the receipt"
+    assert [entry["seq"] for entry in inbox.received] == [1], "only what was handed over is on the record"
+    said = [note for note in runtime.attention.values() if note["state"] == "removed_key"]
+    assert len(said) == 1 and said[0]["seqs"] == [2]
+    assert inbox.after == 2

@@ -758,10 +758,11 @@ class Channel:
         # thing that tells the two apart.
         self.created_at = created_at
         self.gone = False
-        # Read no more, kept for its records and its receipt until it expires.
-        # An inbox is muted when a partner is removed: the removed key can
-        # still write to the address it was given until the thread expires,
-        # and nothing from there is delivered.
+        # An inbox is marked muted when it names a key that has left the
+        # address book: the removed key can still write to the address it was
+        # given until the thread expires. It is read until then for the
+        # partners still in the book, and what the removed key writes there is
+        # not handed over.
         self.muted = False
         # How many messages the last poll had fetched and left for the next
         # one, because the caller's limit was reached. They are still at the
@@ -1013,8 +1014,9 @@ class Runtime:
         self.lock = threading.RLock()
         # Partners may have changed while this process was not running. The
         # current inbox is compared with the address book on the first read;
-        # the older generations are judged here, so a key removed while the
-        # runtime was down is read no more from any address it was given.
+        # the older generations are marked here. What a key removed while the
+        # runtime was down writes to an address it was given is not handed
+        # over, since every message is judged against the book as it is.
         self._mute_generations("a restart")
         self.stop = threading.Event()
         self.listener = None
@@ -1341,9 +1343,11 @@ class Runtime:
         """A partner out of the address book, and out of the inbox at once.
 
         Forgetting the name is not a revocation: the service takes the removed
-        key's writes to the old address until that thread expires. So the old
-        inbox is muted, read no more, and a new one is opened without the key.
-        Once the last partner is gone the new inbox takes signed writes from any
+        key's writes to the old address until that thread expires. So a new
+        inbox is opened without the key, and the old one is read until it
+        expires for the partners still in the book, who may not have the new
+        address yet, while what the removed key writes there is not handed
+        over. Once the last partner is gone the new inbox takes signed writes from any
         key, each shown as an unknown one, rather than unsigned writes from
         anyone at an address the partners were given.
         """
@@ -1368,7 +1372,10 @@ class Runtime:
         except OSError as error:
             raise RuntimeError("partners.json could not be written (%s), so the address book is as it was. Free the disk, or give this user write access to %s, then do it again."
                                % (errno.errorcode.get(error.errno, error.__class__.__name__), self.home)) from None
-        self.partners = partners
+        # Under the lock a read holds while it judges a message by the book, so
+        # a message being applied as the partner goes sees one book or the other.
+        with self.lock:
+            self.partners = partners
 
     def _inbox_after_change(self, reason, outcome):
         """Whether the inbox still matches the address book, and a new one if not."""
@@ -1651,8 +1658,8 @@ class Runtime:
         key is taken out of the message either way, and aamio_scope is replaced
         whatever it holds and wherever it sits, so whoever reads the message
         never sees a key in it. With apply False nothing is kept, and the key
-        still comes out: for a message read on a channel that was muted
-        meanwhile, which stays on the record and goes to the archive."""
+        still comes out: for a message whose signer left the address book
+        while it was being read, which goes to the archive."""
         body = entry.get("body")
         if not isinstance(body, dict):
             return
@@ -1669,7 +1676,7 @@ class Runtime:
         view = {"shared_as": share.get("name") if isinstance(share.get("name"), str) else None, "can_read": key is not None, "kept": False}
         partner = self.partner_by_key(entry.get("from_key")) if entry.get("from_key") else None
         if not apply:
-            view["note"] = "not kept: this channel was muted while the message was being read, so nothing from it is taken"
+            view["note"] = "not kept: the key that signed it left the address book while the message was being read, so nothing from it is taken"
         elif not (entry.get("verified") and entry.get("encrypted") and entry.get("known_contact") and partner is not None):
             view["note"] = "not kept: a scope is only taken when it comes sealed from a partner in your address book"
         elif entry.get("replay"):
@@ -1833,13 +1840,16 @@ class Runtime:
         return [self.name_for_key(k) or k for k in (allow or [])]
 
     def _mute_generations(self, reason):
-        """Every inbox generation that names a key no longer in the address book is muted.
+        """Every inbox generation that names a key no longer in the address book is marked muted.
 
-        Muted means read no more: no poller, nothing handed over, the record
-        and the receipt kept until the address expires. It is this runtime's
-        delivery stopping, not a revocation; the service takes the removed
-        key's writes until the thread expires. An open generation, or one that
-        takes any signed key, names nobody and is left as it is.
+        It is still read until it expires: what the partners still in the
+        book write there is handed over, and what a removed key writes there
+        is not. Read no more, as it was, a partner that had not yet learned
+        the new address wrote where nobody read (a check of 12 November 2026).
+        It is this runtime's delivery stopping for that key, not a revocation;
+        the service takes the removed key's writes until the thread expires.
+        An open generation, or one that takes any signed key, names nobody and
+        is left as it is.
         """
         partners = {p["key"] for p in self.partners}
         current = self.channels.get("inbox")
@@ -1850,18 +1860,35 @@ class Runtime:
             gone = [k for k in (channel.allow or []) if k != "*" and k not in partners]
             if not gone:
                 continue
-            # Under the lock poll holds while it applies a message, so a
-            # message being applied as the partner goes sees the mute before
-            # it binds or shares anything.
             with self.lock:
                 channel.muted = True
             muted.append(channel.w)
-            self._note(channel, "muted", "inbox %s is read no more after %s: %d removed key(s) can still write there until %d, and nothing from there is delivered" % (channel.w, reason, len(gone), channel.expire_at))
+            self._note(channel, "muted", "inbox %s names %d key(s) no longer in the address book after %s. They can still write there until %d, and what they write is not handed over; what the partners still in the book write there is read until then." % (channel.w, len(gone), reason, channel.expire_at))
         return muted
 
-    def _muted_address(self, w):
+    def _left_the_book(self, channel, key):
+        """Whether a message on this channel is signed by a key that has left the address book.
+
+        On an inbox that named the key, which is read on for the partners
+        still in the book. Judged message by message against the book as it
+        is, so a key taken back in is read again. Called under the lock a
+        removal takes to change the book.
+        """
+        if not isinstance(key, str) or not channel.label.startswith("inbox"):
+            return False
+        allow = channel.allow or []
+        if "*" in allow or key not in allow:
+            return False
+        return key not in {p["key"] for p in self.partners}
+
+    def _withheld_since(self, entry):
+        """A message read before its signer left the address book, still waiting to be handed over: it is not, and that is said."""
         with self.lock:
-            return any(c.muted and c.w == w for c in self.channels.values())
+            channel = next((c for c in self.channels.values() if c.w == entry.get("w")), None)
+            if channel is None or entry.get("verified") is not True or not self._left_the_book(channel, entry.get("from_key")):
+                return False
+        self._note(channel, "removed_key", "This message was read before the key that signed it left the address book, and was waiting to be handed over. It is not handed over; the archive has it if one is kept.", seqs=[entry.get("seq")])
+        return True
 
     def ensure_inbox(self):
         inbox = self.channels.get("inbox")
@@ -3486,7 +3513,7 @@ class Runtime:
         with self.lock:
             if not hasattr(self, "attention"):
                 self.attention = {}
-            if state in ("kept_out", "unverified", "binding_conflict", "archive_failed", "scope_not_saved", "scope_share_not_recorded", "replay_unknown") and seqs is not None:
+            if state in ("kept_out", "removed_key", "unverified", "binding_conflict", "archive_failed", "scope_not_saved", "scope_share_not_recorded", "replay_unknown") and seqs is not None:
                 previous = self.attention.get((where, state), {})
                 note["seqs"] = previous.get("seqs", []) + list(seqs)
                 note["count"] = len(note["seqs"])
@@ -3618,11 +3645,9 @@ class Runtime:
         channel.more_at_service = False
         channel.more_at_limit = False
         channel.stopped_at_budget = False
-        # A muted channel is read no more, whoever calls: the read path and the
-        # listener skip it, and a library caller that asks straight out gets
-        # the same answer instead of the removed partner's messages.
-        if channel.muted:
-            return "muted", []
+        # A muted inbox is read like any other, until it expires: each message
+        # is judged against the address book below, and what a removed key
+        # writes there is not handed over, whoever calls.
         # Passed only when there is one, so a client given a plain read function, as
         # every test and every older integration hands over, is called as before.
         #
@@ -3748,6 +3773,9 @@ class Runtime:
 
         entries = []
         kept_out = []
+        # Messages signed by a key that has left the address book, on an inbox
+        # that named it: passed by like the ones the list keeps out, and said.
+        withheld = []
         last_seq = None
         # The budget is kept here as well, for what is handed over, measured as
         # it is handed over: the service counts its own form of each message, and
@@ -3795,6 +3823,11 @@ class Runtime:
             if excluded:
                 kept_out.append(entry["seq"])
                 continue
+            with self.lock:
+                gone = entry["verified"] is True and self._left_the_book(channel, sender_key)
+            if gone:
+                withheld.append(entry["seq"])
+                continue
             if entry["sha256"] is not None:
                 remember(channel, entry["sha256"], entry["from_key"])
             # Before the message is kept, archived or shown: a scope key in it
@@ -3805,17 +3838,16 @@ class Runtime:
             # first send to it failed with no key known for the address; an
             # address another key already holds is not rebound by a claim.
             #
-            # Under the lock a removal takes to mute this channel, and judged
+            # Under the lock a removal takes to change the book, and judged
             # message by message: a partner removed while the read was out, or
             # while this batch is being applied, shares nothing and binds
             # nothing from that moment on. The key comes out of the message
-            # either way, since the message stays on the channel's record for
-            # the receipt and goes to the archive. Read once before the batch,
-            # the mute was missed by everything after that reading; skipped
-            # whole, the share left its key in the record. Findings K1 and K2
-            # of the health check of 24 September 2026.
+            # either way, since the message goes to the archive. Read once
+            # before the batch, a removal was missed by everything after that
+            # reading; skipped whole, the share left its key in the record.
+            # Findings K1 and K2 of the health check of 24 September 2026.
             with self.lock:
-                applying = not channel.muted
+                applying = not (entry["verified"] is True and self._left_the_book(channel, sender_key))
                 self._take_scope_share(entry, apply=applying)
                 if applying and isinstance(entry["body"], dict) and entry["verified"] and sender_key:
                     for field in ("reply_to", "channel"):
@@ -3885,7 +3917,8 @@ class Runtime:
         # record of what was delivered, not the delivery itself: holding the
         # cursor back would re-read that message forever while the disk stayed
         # full, and redeliver everything after it. And past messages the list
-        # kept out, or the same messages are read and kept out on every call.
+        # kept out, or the same messages are read and kept out on every call,
+        # and past those of a key that has left the book, for the same reason.
         #
         # After a reset the service's next is the cursor, and it is lower than
         # the one this channel held. Keeping the higher of the two would ask past
@@ -3894,10 +3927,10 @@ class Runtime:
         # next covers messages this call never looked at, so the cursor is the
         # last one it did look at, handed over or kept out.
         to = channel.after
-        moved = bool(entries or kept_out)
+        moved = bool(entries or kept_out or withheld)
         if entries:
             to = max(to, entries[-1]["seq"])
-        if kept_out:
+        if kept_out or withheld:
             to = max(to, last_seq)
         if channel.left_waiting or channel.stopped_at_budget:
             if last_seq is not None:
@@ -3913,13 +3946,11 @@ class Runtime:
             # one that was never sent.
             opened_for = "any key, signed only" if "*" in channel.allow else "%d named key(s)" % len(channel.allow)
             self._note(channel, "kept_out", "This channel was opened for %s, and these messages did not satisfy that list as checked here. They are not handed over and not archived." % opened_for, seqs=kept_out)
+        if withheld:
+            # Said as well: what the removed key writes is passed by, never dropped in silence.
+            self._note(channel, "removed_key", "These messages are signed by a key that is no longer in the address book, on an inbox that was given to it. They are not handed over and not archived. Add the key as a partner again to take what it writes from then on.", seqs=withheld)
         if oversized is not None:
             self._note(channel, "over_budget", "message %s on this channel is %d bytes as handed over here, larger than the whole byte budget of %d this read asked for. It had already come, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose." % (oversized[0], oversized[1], max_bytes))
-        # Muted since the read went out: what came back is on the record and
-        # is handed to nobody.
-        with self.lock:
-            if channel.muted:
-                return "muted", []
         return "ok", entries
 
     def _bind_claimed_address(self, channel, entry, field, address, sender_key):
@@ -4211,11 +4242,11 @@ class Runtime:
 
     def _poll_loop(self, channel):
         """One long-poll loop per channel, so mail on any channel is seen at once."""
-        # A poller already running when its channel was muted used to run on,
-        # and everything it fetched went into the queue: the removed partner's
-        # messages arrived through the listener, which the MCP server uses,
-        # while the command line delivered nothing.
-        while not self.stop.is_set() and not channel.closed and not channel.muted and channel.expire_at > time.time():
+        # A muted inbox is polled too, until it expires, for the partners still
+        # in the book: poll judges every message against the book, and what a
+        # removed key writes there is not handed over, by the listener the MCP
+        # server uses as by the command line.
+        while not self.stop.is_set() and not channel.closed and channel.expire_at > time.time():
             entries = []
 
             try:
@@ -4236,11 +4267,6 @@ class Runtime:
                 )
                 self.log("poller %s: %s" % (channel.label, error))
                 time.sleep(3)
-
-            if channel.muted:
-                # Muted while this poll was out: what it brought back stays on
-                # the channel's record and is handed to nobody.
-                entries = []
 
             for entry in entries:
                 self.inbound.put(entry)
@@ -4266,8 +4292,6 @@ class Runtime:
                         if label != "inbox":
                             with self.lock:
                                 self.channels.pop(label, None)
-                        continue
-                    if channel.muted:
                         continue
                     if channel.poller is None:
                         channel.poller = threading.Thread(target=self._poll_loop, args=(channel,), daemon=True)
@@ -4340,8 +4364,6 @@ class Runtime:
             # whole wait, until 30 September 2026.
             answered = []
             for channel in list(self.channels.values()):
-                if channel.muted:
-                    continue
                 # A channel that answered 410 or nothing at all never gets the
                 # wait: it used to eat it, so a read with wait 25 came back at
                 # once and the inbox was only ever asked with wait 0. A gone
@@ -4433,11 +4455,11 @@ class Runtime:
 
                     continue
 
-            # Nothing from a muted inbox is handed over, whatever fetched it: a
-            # poller that was already running, or a message that sat in the
-            # queue before the partner was removed. It stays on the channel's
-            # record, for the receipt.
-            if self._muted_address(entry.get("w")):
+            # Nothing from a key that has left the address book is handed over
+            # from an inbox that named it, whatever fetched it: a message that
+            # sat in the queue before the partner was removed is not either,
+            # and that is said.
+            if self._withheld_since(entry):
                 continue
 
             if max_bytes is not None:

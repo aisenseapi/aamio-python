@@ -612,6 +612,8 @@ def test_another_senders_message_with_the_same_text_reaches_the_agent_when_a_cur
     assert first["sha256"] == second["sha256"], "the hash is of the text alone"
     runtime, channel = kept_without_instance(1, [first["sha256"]], now)
     channel.allow = [ALICE.public, bob.public]
+    # Both in the book, as the keys an inbox names are.
+    runtime.partners = [{"name": "alice", "key": ALICE.public}, {"name": "bob", "key": bob.public}]
     runtime.client.read = lambda w, read_key, after, wait, **limits: answer(*[r for r in (first, second) if r["seq"] > after], created_at=now, expire_at=now + 3600, instance="a" * 16)
     assert [(e["seq"], e["from_key"]) for e in runtime.read()] == [(1, ALICE.public), (2, bob.public)], "both, the other sender's too"
     # A thread opened again in the same second, with the same lifetime and list, whose first message is the other

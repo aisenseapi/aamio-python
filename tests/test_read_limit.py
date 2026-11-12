@@ -37,7 +37,10 @@ def build(threads, allow=None):
     runtime.lock = threading.RLock()
     runtime.attention = {}
     runtime.peers = {}
-    runtime.partners = []
+    # The keys the inbox names are partners in the book, as in an inbox the
+    # runtime opens: a key named there and not in the book has left it, and
+    # what it writes is passed by.
+    runtime.partners = [{"name": "partner%d" % n, "key": key} for n, key in enumerate(allow or []) if key != "*"]
     runtime.scopes = []
     runtime.log = lambda line: None
     runtime.saved = []
