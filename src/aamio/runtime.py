@@ -1337,15 +1337,17 @@ class Runtime:
         anyone at an address the partners were given.
         """
         known = self.partner_by_name(name)
-        partners = [p for p in self.partners if p["name"] != name]
-        self._save_json("partners.json", partners)
-        self.partners = partners
-        outcome = {"partner": name, "known": known is not None}
         if known is None:
             inbox = self.channels.get("inbox")
-            outcome["inbox"] = inbox.w if inbox else None
-            return outcome
-        return self._inbox_after_change("partner %s was removed" % name, outcome)
+            return {"partner": name, "known": False, "inbox": inbox.w if inbox else None}
+        # The partner the name finds, as a send finds it: apart from upper and
+        # lower case when only one is so named. Filtered by the name as given,
+        # a name in another case was said to be known and removed nothing (a
+        # check of 12 November 2026).
+        partners = [p for p in self.partners if p["name"] != known["name"]]
+        self._save_json("partners.json", partners)
+        self.partners = partners
+        return self._inbox_after_change("partner %s was removed" % known["name"], {"partner": known["name"], "known": True})
 
     def _inbox_after_change(self, reason, outcome):
         """Whether the inbox still matches the address book, and a new one if not."""

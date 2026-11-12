@@ -74,6 +74,11 @@ not what moved in the source.
   written, and change nothing. A full disk was a traceback, after the probe
   had run, and when it was the rename at the end that failed, a file of the
   command's own was left in the home.
+- `partner remove` with a name in another case than the address book has it
+  removes that partner, as a send finds it: apart from upper and lower case
+  when only one is so named, and refused as ambiguous when two are. It said
+  the partner was known and removed nothing. The answer names the partner as
+  the book spells it.
 - A file of the home with a byte order mark in front, as an editor on Windows
   may save it, is read past the mark: the state the runtime keeps, the
   archive's policy, the list of enabled add-ons, an add-on's list of websites

@@ -44,7 +44,8 @@ class Board(trace_fixture.Client):
     def board_withdraw(self, post_id, body, signature):
         if self.service.__dict__.setdefault("posts", {}).pop(post_id, None) is None:
             return 404, {"error": "No live post with this id"}
-        return 200, {"withdrawn": True, "id": post_id}
+        # What the board answers (func_aamio_board.php).
+        return 200, {"id": post_id, "deleted": True}
 
     def delete(self, w, read_key):
         answers = self.service.__dict__.setdefault("closing", [])
@@ -254,7 +255,7 @@ def test_a_post_a_withdrawal_and_a_receipt_that_are_done_say_so_with_what_could_
     assert len(service.posts) == 2, "each post is on the board, once"
 
     withdrawn = a.board_withdraw(posted["post"]["id"])
-    assert withdrawn["withdrawn"] is True and "No space left on device" in withdrawn["archive_error"] and posted["post"]["id"] not in service.posts
+    assert withdrawn["deleted"] is True and "No space left on device" in withdrawn["archive_error"] and posted["post"]["id"] not in service.posts
 
     written(b, a, a.channels["inbox"].w, "one line")
     a.poll(a.channels["inbox"], 0)
@@ -647,3 +648,28 @@ def test_the_key_is_not_read_past_a_mark(world):
     marked(os.path.join(home, "key"))
     with pytest.raises(RuntimeError, match="key could not be read \\(not a 64 character hex seed\\)"):
         Runtime(home=home, host="https://fake.test", tags=["a"])
+
+
+# ------------------------------------------------------------------ partner remove takes the partner the name finds
+
+def test_partner_remove_takes_the_partner_the_name_finds(world):
+    """A name in another case was said to be known and removed nothing. The Node runtime is held to the same now."""
+    from aamio.runtime import AmbiguousPartner
+
+    service, runtime, base = world
+    a, b = partners(runtime)
+    removed = a.partner_remove("B")
+    assert (removed["partner"], removed["known"]) == ("b", True) and a.partner_list() == []
+    with open(os.path.join(a.home, "partners.json"), encoding="utf-8") as handle:
+        assert json.load(handle) == [], "the book on disk is the book in memory"
+    assert a.partner_remove("nobody") == {"partner": "nobody", "known": False, "inbox": a.channels["inbox"].w}
+
+    # Two names that differ only in case, as another client may have written them: a guess would remove the wrong one.
+    ann, other = b.keys.public, a.keys.public
+    a.partners = [{"name": "Ann", "key": ann}, {"name": "ANN", "key": other}]
+    a._save_json("partners.json", a.partners)
+    with pytest.raises(AmbiguousPartner):
+        a.partner_remove("ann")
+    assert [p["name"] for p in a.partner_list()] == ["Ann", "ANN"], "and nothing was removed"
+    assert a.partner_remove("ANN")["partner"] == "ANN"
+    assert [(p["name"], p["key"]) for p in a.partner_list()] == [("Ann", ann)], "the exact name removes that one alone"
