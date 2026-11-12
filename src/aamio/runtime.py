@@ -239,7 +239,7 @@ class SendFailed(RuntimeError):
     the other side. The entry stays in the outbox under message_id.
     """
 
-    def __init__(self, outcome, message_id, status, detail, opened=None, trace_error=None):
+    def __init__(self, outcome, message_id, status, detail, opened=None, trace_error=None, archive_error=None):
         super().__init__("send %s (http %s): %s" % (outcome, status, detail))
         self.outcome = outcome
         self.message_id = message_id
@@ -254,6 +254,8 @@ class SendFailed(RuntimeError):
         # once and exits never fetches attention, and was told of the refusal
         # and not of the trace (a check of 12 November 2026).
         self.trace_error = trace_error
+        # And the archive's record of the attempt, when that could not be written.
+        self.archive_error = archive_error
 
 
 def outbox_retryable(entry):
@@ -390,6 +392,22 @@ def check_gate(gate):
             raise ValueError("gate.%s must be an object. %s" % (key, shape))
 
     return gate
+
+
+def check_label(label):
+    """A label for a channel of the caller's own.
+
+    It names the channel in every answer and its file in the archive, so it is
+    made of what a file's name may hold and nothing else: a label with a path
+    in it put what was read on the channel outside the home (a check of 12
+    November 2026). The labels that start with inbox or board are the
+    runtime's own channels. The rule and its words are the Node runtime's and
+    aamio-php's.
+    """
+    if not storage.is_safe_label(label):
+        raise ValueError("a channel's label is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit, and not a name the system keeps for a device: it names the channel's file in the archive")
+    if re.match(r"(?:inbox|board)", label, re.IGNORECASE):
+        raise ValueError("the label %s is the runtime's own: a label that starts with inbox or board names an inbox or a board inbox. Choose another" % label)
 
 
 def is_message_hash(value):
@@ -1236,7 +1254,7 @@ class Runtime:
             line.encode("utf-8")
         except UnicodeEncodeError:
             line = json.dumps(record, ensure_ascii=True)
-        path = os.path.join(self.home, "archive", "%s.jsonl" % label)
+        path = os.path.join(self.home, "archive", "%s.jsonl" % storage.archive_name(label))
         # One writer at a time: every channel has a poller, and they archive.
         with getattr(self, "archive_lock", None) or threading.Lock():
             # A crash in the middle of a write leaves a last line with no end.
@@ -1876,8 +1894,10 @@ class Runtime:
         data binds nothing. Until 30 September 2026 only the command line could
         hand an address over, with aamio board channel.
         """
-        if label in self.channels or label.startswith("inbox"):
-            raise ValueError("channel exists or reserved: " + label)
+        check_label(label)
+        taken = self._channel_called(label)
+        if taken is not None:
+            raise ValueError("there is a channel called %s already. Close it or choose another label" % taken.label)
         if note is not None and to is None:
             raise ValueError("note travels with the address to whoever to names, so without to there is nothing to carry it")
         keys = []
@@ -1928,6 +1948,14 @@ class Runtime:
         opened.update({"handed_to": self.name_for_key(key) or key, "address_sent_to": reply_to}, **told)
 
         return opened
+
+    def _channel_called(self, label):
+        """The channel a label names, apart from upper and lower case: two labels that differ only so are one file in the archive where the file system says so."""
+        wanted = str(label).lower()
+        for channel in list(self.channels.values()):
+            if channel.label.lower() == wanted:
+                return channel
+        return None
 
     def _can_hand_over(self, reply_to):
         """Whether the inbox at reply_to takes a handover from here, asked before a channel is opened for it.
@@ -2023,15 +2051,42 @@ class Runtime:
         return {}
 
     def close_channel(self, label):
+        """Closes a channel before it expires, and says what happened here and at the service.
+
+        The thread is asked gone at the service first, and the channel leaves
+        this home when the service says it is gone: deleted now, or not there
+        any more. When the service does not say so, the channel stays and is
+        still read. It used to leave the home whatever the answer was: with no
+        answer at all the thread lived on at the service, and whoever wrote
+        there wrote where nobody read (a check of 12 November 2026, found
+        while the Node runtime's channels were built).
+        """
         channel = self.channels.get(label)
         if channel is None:
             raise ValueError("no such channel: " + label)
         status, data = self.client.delete(channel.w, channel.read_key)
-        channel.closed = True
+        if status not in (200, 404, 410):
+            return {
+                "label": label, "w": channel.w, "status": status, "deleted": False, "closed_here": False,
+                "note": "%s, so the thread may still be there, and the channel is kept and still read. Close it again, or let it expire at %d."
+                        % ("The service did not answer" if status == 0 else "The service answered %s" % status, channel.expire_at),
+            }
         with self.lock:
             self.channels.pop(label, None)
-        self.save_state()
-        return {"label": label, "status": status, "deleted": status == 200}
+        try:
+            self.save_state()
+        except OSError as error:
+            with self.lock:
+                self.channels[label] = channel
+            raise RuntimeError(
+                "%s, and state.json could not be written (%s), so this home still lists %s. Close it again once the disk takes writes."
+                % ("the thread is deleted at the service" if status == 200 else "there is no thread at the service any more", errno.errorcode.get(error.errno, error.__class__.__name__), label)
+            ) from None
+        channel.closed = True
+        closed = {"label": label, "w": channel.w, "status": status, "deleted": status == 200, "closed_here": True}
+        if status != 200:
+            closed["note"] = "There was no thread at this address any more: it had expired, or was closed before. The channel is taken out of this home."
+        return closed
 
     def channel_list(self):
         # expired, since a channel past its time was listed like any other
@@ -2114,13 +2169,15 @@ class Runtime:
         status, data = self.client.board_post(body, self.keys.public, self.keys.sign(board_signing_input(self.keys.public, body)), work)
         if status not in (200, 201):
             raise RuntimeError("board post failed: %s %s" % (status, data))
-        self.archive("board", {"kind": "posted", "at": time.time(), "post": data})
+        archive_error = self._archive_done("board", {"kind": "posted", "at": time.time(), "post": data}, "the post %s" % (data.get("id") if isinstance(data, dict) else ""))
         # Where the answers go, and how to read them, in the answer itself. An
         # agent took board replies for the whole inbox, got nothing back, and
         # spent an hour decrypting by hand what read would have shown at once.
         posted = {"post": data, "inbox": channel.w, "answers_arrive_on": "board", "read_them_with": "Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes. board replies lists only the answers, the messages that name a post of yours or arrived on a board inbox, and says how many it left out."}
         if held is not None:
             posted["scope"] = held["name"]
+        if archive_error is not None:
+            posted["archive_error"] = archive_error
         return posted
 
     def _board_advised_bits(self):
@@ -2205,8 +2262,8 @@ class Runtime:
         status, data = self.client.board_withdraw(post_id, body, self.keys.sign(board_delete_signing_input(post_id, body)))
         if status != 200:
             raise RuntimeError("withdraw failed: %s %s" % (status, data))
-        self.archive("board", {"kind": "withdrawn", "at": time.time(), "id": post_id})
-        return data
+        archive_error = self._archive_done("board", {"kind": "withdrawn", "at": time.time(), "id": post_id}, "the withdrawal of post %s" % post_id)
+        return dict(data, archive_error=archive_error) if archive_error is not None and isinstance(data, dict) else data
 
     def board_answer(self, post, text=None, data=None, scope=None):
         """Answer a post, sealed to the poster's key and signed by ours.
@@ -2272,9 +2329,9 @@ class Runtime:
         # the outbox the same bytes go again, and a copy is a replay there.
         entry = self._outbox_add(post["w"], post["key"], envelope, body)
         status, result = self._deliver(entry)
-        self.archive("board", {"kind": "answered", "at": time.time(), "post": post["id"], "w": post["w"], "status": status, "message_id": entry["id"], "outcome": entry["status"], "body": body})
+        archive_error = self._archive_done("board", {"kind": "answered", "at": time.time(), "post": post["id"], "w": post["w"], "status": status, "message_id": entry["id"], "outcome": entry["status"], "body": body}, "the answer %s" % entry["id"])
         if status != 201:
-            raise SendFailed(entry["status"], entry["id"], status, result, trace_error=entry.get("trace_error"))
+            raise SendFailed(entry["status"], entry["id"], status, result, trace_error=entry.get("trace_error"), archive_error=archive_error)
         answer = {"post": post["id"], "w": post["w"], "message_id": entry["id"], "seq": result["seq"], "at": result["at"], "replies_arrive_on": "board", "reply_to": channel.w}
         if "met" in result:
             answer["met"] = result["met"]
@@ -2285,6 +2342,8 @@ class Runtime:
         # logger and no second call to fetch attention.
         if entry.get("trace_error"):
             answer["trace_error"] = entry["trace_error"]
+        if archive_error is not None:
+            answer["archive_error"] = archive_error
         if own_post:
             answer["warning"] = "You answered your own post. The answer is sealed to your own key, so it reaches nobody but you."
         return answer
@@ -2378,9 +2437,12 @@ class Runtime:
         # channel expires it leaves self.channels, and reading only the
         # channels this process holds made those answers vanish from here
         # although they had arrived, been decrypted and been written down.
+        # By the files that are there, and the files the channels held here
+        # write to: a file an earlier version wrote under a label as it stood
+        # is read under the name it has.
         rows = []
-        for label in sorted(self._archive_labels() | set(self.channels) | {"board"}):
-            rows.extend(self._archived(label, "received"))
+        for name in sorted(self._archive_labels() | {storage.archive_name(label) for label in self.channels} | {"board"}):
+            rows.extend(self._archived(name, "received"))
 
         # A delivery the archive has more rows of than this process wrote was
         # written down before this process read it: that row is its first
@@ -2456,7 +2518,7 @@ class Runtime:
         return {name[: -len(".jsonl")] for name in names if name.endswith(".jsonl") and name.startswith(prefix)}
 
     def _archived(self, label, kind):
-        """Entries this client wrote down for a channel, oldest first. Silent
+        """Entries this client wrote down for a channel, or in one file of the archive by its name, oldest first. Silent
         when the file is not there: an empty archive is not an error, it is a
         client that was told not to keep one.
 
@@ -2470,7 +2532,14 @@ class Runtime:
         if not home:
             return []
 
-        path = os.path.join(home, "archive", "%s.jsonl" % label)
+        # The file the folder lists under this name, when it lists one, and
+        # else the file archive() writes for this label. Board replies read
+        # by the names the folder lists, so each file is read once: the one
+        # an earlier version wrote under a label as it stood, a name with a
+        # space in it, as well as the one written now. A name is the folder's
+        # own or made here, never a path a caller gave.
+        name = label if label in self._archive_labels() else storage.archive_name(label)
+        path = os.path.join(home, "archive", "%s.jsonl" % name)
 
         if not os.path.isfile(path):
             return []
@@ -2527,8 +2596,13 @@ class Runtime:
             if partner is None:
                 raise ValueError("not a key and not a known partner: " + str(key))
             key = partner["key"]
+        if label:
+            # A label the caller chose is a file's name too, as in open_channel.
+            check_label(label)
         label = label or ("with-" + key_hash(key)[:8])
-        if label in self.channels:
+        # Taken apart from case counts as taken: the two would be one file in
+        # the archive where the file system says so.
+        if self._channel_called(label) is not None:
             label = "%s-%d" % (label, int(time.time()))
         if reply_to:
             self._handover_fits(key, int(ttl), note)
@@ -2725,7 +2799,7 @@ class Runtime:
         archive_error = self._archive_sent(record)
 
         if status != 201:
-            raise SendFailed(entry["status"], entry["id"], status, result, trace_error=entry.get("trace_error"))
+            raise SendFailed(entry["status"], entry["id"], status, result, trace_error=entry.get("trace_error"), archive_error=archive_error)
 
         sent = {"to": record["to"], "w": entry["w"], "message_id": entry["id"], "seq": result["seq"], "at": result["at"], "sha256": result["sha256"], "expire_at": result["expire_at"]}
         # Only from an inbox with a gate: what it found, and what the caller
@@ -2742,6 +2816,33 @@ class Runtime:
         if entry.get("trace_error"):
             sent["trace_error"] = entry["trace_error"]
         return sent
+
+    def _archive_done(self, label, record, what):
+        """Write the record of something that is done already, and say what went wrong instead of raising it.
+
+        The post is made, the answer delivered, the receipt taken. A record of
+        it that cannot be written is said beside it and in attention. Raised,
+        it told the caller that the thing itself had failed: an answer on the
+        board was stored at the service and settled as delivered in the
+        outbox while the call raised OSError, and over MCP the advice that
+        went with it was to call again, which is a second answer (a check of
+        12 November 2026, found while the Node runtime's archive was built). A
+        send has had this since _archive_sent.
+        """
+        try:
+            self.archive(label, record)
+        except Exception as error:
+            how = "%s: %s" % (error.__class__.__name__, error)
+            self.log("archive %s: %s" % (label, how))
+            # Attention keeps one note for each place and state, so a second
+            # record that could not be written would take the place of the
+            # first. Each is said, in the one note, until the note is taken.
+            with self.lock:
+                missing = list(getattr(self, "archive_missing", [])) + ["%s could not be written to the archive: %s." % (what, how)]
+                self.archive_missing = missing
+            self._note_trouble("archive", "archive_failed", "%s The archive does not have %s." % (" ".join(missing), "it" if len(missing) == 1 else "them"))
+            return how
+        return None
 
     def _archive_sent(self, record):
         """Write a sent record, and say what went wrong instead of raising it."""
@@ -3349,6 +3450,7 @@ class Runtime:
         with self.lock:
             taken = sorted(getattr(self, "attention", {}).values(), key=lambda note: (note["at"], note["channel"]))
             self.attention = {}
+            self.archive_missing = []
         return taken
 
     def _read_entry(self, channel, raw):
@@ -4426,7 +4528,11 @@ class Runtime:
                 result["anchor"] = proof
             else:
                 result["anchor"] = {"error": status, "detail": proof.get("detail") if isinstance(proof, dict) and proof.get("tool_error") else proof}
-        self.archive(label, {"kind": "receipt", "at": time.time(), "result": result})
+        # Taken, and anchored when that was asked: a record of it that cannot
+        # be written is said beside it.
+        archive_error = self._archive_done(label, {"kind": "receipt", "at": time.time(), "result": dict(result)}, "the receipt for %s" % label)
+        if archive_error is not None:
+            result["archive_error"] = archive_error
         return result
 
     def close(self):

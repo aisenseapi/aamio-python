@@ -111,6 +111,8 @@ aamio archive prune --all     # remove the archive that is there
 aamio init --archive off      # the same choice, made when the runtime is set up
 ```
 
+The archive is a record of what was done, never the outcome of it. When a record cannot be written, a full disk or a file that is locked, a delivered send, a post, an answer on the board, a withdrawal and a receipt still answer as done, with `archive_error` beside the answer, and `attention` says `archive_failed` with each record that is missing. A send that failed says `archive_error` too. A channel's file is named after its label, `archive/tender.jsonl`; a channel an earlier version opened under a label that cannot be a file's name is kept as `archive/channel-<16 hex>.jsonl`, the same name aamio-php and the Node runtime give it.
+
 With the archive off nothing decrypted is written, and what was written before stays until you prune it: `board replies` still reads it. The key, the read keys of open threads and the outbox with its sealed bytes still are: the runtime cannot work without them. A record this cannot date is kept, since what cannot be told old is not thrown away as old.
 
 Every file is opened private from its first byte, and files an older version wrote with the default mode are made private when the runtime starts. Mode bits say little on Windows, where inherited access decides who reads a folder, so `aamio doctor` reads the access list there and names anyone beside you, SYSTEM and Administrators. What it could not check it says it could not check, never that it is fine.
@@ -280,6 +282,10 @@ aamio channel open tender --ttl 600 --allow "Nordlys,Polar,Kabelhuset"
 ```
 
 opens a thread that only those partners can write to and that expires in ten minutes. Take `receipt --channel tender` when the deadline passes. aamio refuses late writes itself.
+
+The label is what the channel is called here, and the name of its file in the archive, so it is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit. A label that starts with `inbox` or `board` is the runtime's own, and a label that differs from one in use only in upper and lower case is taken: the two would be one file where the file system says so.
+
+`aamio channel close tender` asks the service to delete the thread, and the channel leaves this home when the service says the thread is gone: deleted now, or not there any more. When the service does not answer, or answers anything else, the thread may still be there, so the channel is kept and still read, and the answer says `closed_here: false` with a note. Close it again, or let it expire.
 
 The address alone is enough for whoever writes to it directly, with a client of their own. It is not enough for a partner's runtime, which sends only to an address it knows the key behind, and learns that from presence, or from `reply_to` or `channel` in a verified message. An address pasted into the text of a message, or put in `data`, binds nothing, and the partner's first send to it stops with "no key known for address".
 

@@ -28,6 +28,35 @@ not what moved in the source.
   delivery said it, and the rest was in `attention`, which a command that
   sends once and exits never fetches. A row of `outbox retry` says it too, and
   says it of that attempt alone.
+- A channel's label is 1 to 64 letters, digits, dots, dashes and underscores,
+  starting with a letter or a digit, and not a name Windows keeps for a
+  device. It is the name of the channel's file in the archive, and it was used
+  there as it was given: a channel opened as `../../notes` had what was read
+  on it written outside the home, in a file no archive policy pruned, and
+  `with:colon` made a stream on Windows that no listing shows. A label that
+  starts with `inbox` or `board` is the runtime's own, where only `inbox` was
+  refused, and a label that differs from one in use only in upper and lower
+  case is taken. A channel an earlier version opened under another kind of
+  label keeps working: its records go to `archive/channel-<16 hex>.jsonl`,
+  the name aamio-php and the Node runtime give the same label, and a file
+  already written under the old name is still read.
+- A record that cannot be written to the archive no longer turns what was done
+  into an error. `board post`, `board answer`, `board withdraw` and `receipt`
+  raised when the archive could not take their record, after the post was
+  made, the answer delivered and settled as delivered in the outbox, the post
+  withdrawn or the receipt taken, and over MCP the advice that went with the
+  error was to call again, which is a second answer. Each now answers as
+  done, with `archive_error` beside it, and `attention` says `archive_failed`
+  with every record that is missing. A send that failed says `archive_error`
+  as well, on the command line and over MCP.
+- `channel close` and `aamio_close_channel` take the channel out of this home
+  when the service says its thread is gone: deleted now, or not there any
+  more. With no answer, or any other answer, the channel is kept and still
+  read, and the answer says `closed_here: false` and why. It used to leave the
+  home whatever the service said, while the thread lived on there and whoever
+  wrote to it wrote where nobody read. The answer has `w`, `closed_here` and,
+  when there is something to say, `note`, beside `label`, `status` and
+  `deleted`.
 
 ## 0.6.32 - 2026-11-11
 

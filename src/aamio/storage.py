@@ -14,6 +14,7 @@ a choice with a lifetime: keep, off, or so many days, with a ceiling on size.
 """
 
 import errno
+import hashlib
 import json
 import os
 import re
@@ -24,6 +25,35 @@ import time
 
 ARCHIVE_MODES = ("keep", "off", "days")
 DEFAULT_POLICY = {"mode": "keep", "days": None, "max_mb": None}
+
+# What a channel may be called when its name is also a file's: letters, digits,
+# dots, dashes and underscores, starting with a letter or a digit.
+SAFE_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+# Names Windows takes for a device, with or without an extension after them.
+DEVICE_NAME = re.compile(r"(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)", re.IGNORECASE)
+
+
+def is_safe_label(label):
+    """Whether a label can be a file's name as it is: nothing in it leaves the folder or names a device."""
+    return isinstance(label, str) and SAFE_LABEL.fullmatch(label) is not None and DEVICE_NAME.match(label) is None and not label.endswith(".")
+
+
+def archive_name(label):
+    """The file a channel's records go in, without its extension.
+
+    The label, when it can be a file's name. A label that cannot, one an
+    earlier version let through with a path or a device in it, is kept under a
+    name made of its hash, inside the folder: written as it stood,
+    ../../notes put what was read on that channel outside the home, in a file
+    no policy ever pruned, and with:colon made a stream on Windows that no
+    listing shows (a check of 12 November 2026). The name is the one the Node
+    runtime and aamio-php give the same label, so a home has one file for it.
+    """
+    if is_safe_label(label):
+        return label
+    # A lone surrogate is written as U+FFFD, as the other two runtimes write it.
+    text = str(label).encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+    return "channel-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 # Who may have access to a private folder on Windows without it being a finding:
 # the system itself, the administrators of the machine, and whoever created or

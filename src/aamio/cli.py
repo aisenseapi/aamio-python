@@ -112,9 +112,12 @@ def send_failed(error, operation):
         told["opened"] = error.opened
         told["fix"] = "The channel %s is open and listed by `aamio channel list`: only the message carrying its address did not land. %s" % (error.opened["label"], fix)
 
-    # The trace that could not be written, beside the failure it belongs to.
+    # The trace that could not be written, beside the failure it belongs to,
+    # and the archive's record of the attempt.
     if getattr(error, "trace_error", None):
         told["trace_error"] = error.trace_error
+    if getattr(error, "archive_error", None):
+        told["archive_error"] = error.archive_error
 
     out(told)
 
