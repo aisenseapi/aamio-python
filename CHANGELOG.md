@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## Unreleased
+## 0.6.33 - 2026-11-12
 
 - `board replies` lists an answer as it was first written down. One read again
   after a restart, when its cursor had not been written, was listed with
