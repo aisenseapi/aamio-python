@@ -646,6 +646,8 @@ def dispatch(runtime: Runtime, name: str, arguments: dict, ask=None):
             "status": error.status,
             "retryable": retryable,
             "fix": still_open(opened) + fix,
+            # The trace that could not be written, beside the failure it belongs to.
+            **({"trace_error": error.trace_error} if getattr(error, "trace_error", None) else {}),
         }, True)
     except GateStop as error:
         # The inbox asked for something this client will not or cannot do, and

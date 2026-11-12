@@ -638,3 +638,81 @@ def test_a_message_made_of_thousands_of_field_names_does_not_make_the_trace_larg
     kept = normalize_traces(held, 50, 100)[b.keys.public]["received"][0]["fields"]
     assert len(kept) == 32
     assert normalize_traces({b.keys.public: {"sent": [], "received": [{"sha256": "a" * 64, "fields": ["ж" * 64, "ж" * 65, "text"]}], "last_read": None, "active": 1}}, 50, 100)[b.keys.public]["received"][0]["fields"] == ["text", "ж" * 64]
+
+
+def test_a_send_that_failed_says_the_trace_that_could_not_be_written_too(capsys):
+    # The answer was 429 and trace.json could not be written. A delivery said so on its answer; the failure said the
+    # 429 and not the trace, which was in attention alone, and a command that sends once and exits never fetches it
+    # (a check of 12 November 2026).
+    from aamio import cli
+
+    service, a, b = pair()
+    target = b.channels["inbox"].w
+    saves = a._save_json
+
+    def no_room_for_the_trace(name, value, private=True):
+        if name == "trace.json":
+            raise OSError("no space left on device")
+        return saves(name, value, private=private)
+
+    a._save_json = no_room_for_the_trace
+    real = answer_with(a, 429, stored=False)
+    with pytest.raises(SendFailed) as turned:
+        a.send(target, "turned away, and untraced", None)
+    failure = turned.value
+    assert (failure.outcome, failure.status) == ("refused", 429)
+    assert "trace.json: OSError" in (failure.trace_error or ""), "the failure said nothing of the trace it lost: %r" % failure.trace_error
+
+    # On the command line, and over the local server.
+    assert cli.send_failed(failure, "send") == 1
+    told = json.loads(capsys.readouterr().out)
+    assert told["status"] == 429 and told["retryable"] is True and "trace.json: OSError" in told["trace_error"], told
+    over = mcp_server.dispatch(a, "aamio_send", {"to": target, "text": "the same over the local server"})
+    assert over["isError"] is True and over["structuredContent"]["status"] == 429
+    assert "trace.json: OSError" in over["structuredContent"]["trace_error"], over["structuredContent"]
+
+    # A retry that is delivered while the trace still cannot be written says so in its row.
+    a.client.post = real
+    row = a.outbox_retry(failure.message_id)[0]
+    assert (row["status"], row["http"]) == ("delivered", 201) and "trace.json: OSError" in row["trace_error"], row
+
+    # And one whose trace is written says nothing of the attempt before it.
+    answer_with(a, 429, stored=False)
+    with pytest.raises(SendFailed) as second:
+        a.send(target, "turned away once more", None)
+    assert second.value.trace_error
+    a.client.post = real
+    a._save_json = saves
+    row = a.outbox_retry(second.value.message_id)[0]
+    assert (row["status"], row["http"]) == ("delivered", 201) and "trace_error" not in row, row
+    assert "trace_error" not in a.outbox[second.value.message_id]
+
+    # A failure that is traced says nothing of it either.
+    answer_with(a, 429, stored=False)
+    with pytest.raises(SendFailed) as traced:
+        a.send(target, "turned away, and traced", None)
+    assert traced.value.trace_error is None
+    assert cli.send_failed(traced.value, "send") == 1
+    assert "trace_error" not in json.loads(capsys.readouterr().out)
+    a.close()
+    b.close()
+
+
+def test_an_answer_on_the_board_that_failed_says_the_trace_that_could_not_be_written_too():
+    service, a, b = pair()
+    saves = a._save_json
+
+    def no_room_for_the_trace(name, value, private=True):
+        if name == "trace.json":
+            raise OSError("no space left on device")
+        return saves(name, value, private=private)
+
+    a._save_json = no_room_for_the_trace
+    answer_with(a, 500, stored=False)
+    post = {"id": "p" * 20, "w": b.channels["inbox"].w, "key": b.keys.public, "expire_at": int(time.time()) + 600}
+    with pytest.raises(SendFailed) as failed:
+        a.board_answer(post, "I can")
+    assert (failed.value.outcome, failed.value.status) == ("attempted", 500)
+    assert "trace.json: OSError" in (failed.value.trace_error or "")
+    a.close()
+    b.close()

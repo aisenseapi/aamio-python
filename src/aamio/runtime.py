@@ -239,7 +239,7 @@ class SendFailed(RuntimeError):
     the other side. The entry stays in the outbox under message_id.
     """
 
-    def __init__(self, outcome, message_id, status, detail, opened=None):
+    def __init__(self, outcome, message_id, status, detail, opened=None, trace_error=None):
         super().__init__("send %s (http %s): %s" % (outcome, status, detail))
         self.outcome = outcome
         self.message_id = message_id
@@ -249,6 +249,11 @@ class SendFailed(RuntimeError):
         # of a channel just opened: the channel is there, and the caller has
         # to be told which, or it is a thread nobody knows about.
         self.opened = opened
+        # The trace of this attempt, when it could not be written. A delivery
+        # said so on its answer and a failure did not: a command that sends
+        # once and exits never fetches attention, and was told of the refusal
+        # and not of the trace (a check of 12 November 2026).
+        self.trace_error = trace_error
 
 
 def outbox_retryable(entry):
@@ -2012,9 +2017,9 @@ class Runtime:
                 return {"outbox_error": why}
             # A refusal the service answered settles it, and anything else that
             # left may have landed.
-            raise SendFailed("refused" if settled == "refused" else "unknown", entry["id"], entry.get("last_status") or 0, why, opened=opened) from error
+            raise SendFailed("refused" if settled == "refused" else "unknown", entry["id"], entry.get("last_status") or 0, why, opened=opened, trace_error=entry.get("trace_error")) from error
         if status != 201:
-            raise SendFailed(entry["status"], entry["id"], status, handed, opened=opened)
+            raise SendFailed(entry["status"], entry["id"], status, handed, opened=opened, trace_error=entry.get("trace_error"))
         return {}
 
     def close_channel(self, label):
@@ -2269,7 +2274,7 @@ class Runtime:
         status, result = self._deliver(entry)
         self.archive("board", {"kind": "answered", "at": time.time(), "post": post["id"], "w": post["w"], "status": status, "message_id": entry["id"], "outcome": entry["status"], "body": body})
         if status != 201:
-            raise SendFailed(entry["status"], entry["id"], status, result)
+            raise SendFailed(entry["status"], entry["id"], status, result, trace_error=entry.get("trace_error"))
         answer = {"post": post["id"], "w": post["w"], "message_id": entry["id"], "seq": result["seq"], "at": result["at"], "replies_arrive_on": "board", "reply_to": channel.w}
         if "met" in result:
             answer["met"] = result["met"]
@@ -2720,7 +2725,7 @@ class Runtime:
         archive_error = self._archive_sent(record)
 
         if status != 201:
-            raise SendFailed(entry["status"], entry["id"], status, result)
+            raise SendFailed(entry["status"], entry["id"], status, result, trace_error=entry.get("trace_error"))
 
         sent = {"to": record["to"], "w": entry["w"], "message_id": entry["id"], "seq": result["seq"], "at": result["at"], "sha256": result["sha256"], "expire_at": result["expire_at"]}
         # Only from an inbox with a gate: what it found, and what the caller
@@ -3013,7 +3018,10 @@ class Runtime:
 
         self._record_answer(entry, status, result)
         self.save_outbox()
-        # After the outcome is saved, and unable to change it.
+        # After the outcome is saved, and unable to change it. What the entry
+        # says of the trace is this attempt's: a retry whose trace was written
+        # does not go on saying that the first attempt's could not be.
+        entry.pop("trace_error", None)
         self._trace_safely("sent", self._trace_sent, entry, status, result, on=entry)
 
         return status, result
@@ -3143,7 +3151,11 @@ class Runtime:
                 continue
 
             status, _ = self._deliver(entry)
-            out.append({"id": entry["id"], "w": entry["w"], "status": entry["status"], "http": status})
+            row = {"id": entry["id"], "w": entry["w"], "status": entry["status"], "http": status}
+            # A retry run once from a script never fetches attention either.
+            if entry.get("trace_error"):
+                row["trace_error"] = entry["trace_error"]
+            out.append(row)
 
         return out
 

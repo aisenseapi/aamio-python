@@ -23,6 +23,11 @@ not what moved in the source.
   64 characters. The names are the sender's to choose: one message of
   thousands of them gave a row of 56 KB, and fifty such from one key megabytes,
   in a file written again at every read.
+- A send or an answer on the board that failed while the trace could not be
+  written says so, as `trace_error`, on the command line and over MCP. Only a
+  delivery said it, and the rest was in `attention`, which a command that
+  sends once and exits never fetches. A row of `outbox retry` says it too, and
+  says it of that attempt alone.
 
 ## 0.6.32 - 2026-11-11
 
