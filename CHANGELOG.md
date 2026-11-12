@@ -74,6 +74,11 @@ not what moved in the source.
   written, and change nothing. A full disk was a traceback, after the probe
   had run, and when it was the rename at the end that failed, a file of the
   command's own was left in the home.
+- A post asked for as long as an inbox lives, `--ttl 3600`, is taken by the
+  board. Its lifetime left the inbox no time for the work the board advises,
+  which is done after the lifetime is set, since the work covers it, and the
+  board refused it as outliving the inbox. It leaves the inbox 30 seconds now,
+  as aamio-php and the Node runtime do from the same release.
 - A channel whose address the service turned away, or a gate stopped, is
   answered with what to do about it: nobody has the address, so close the
   channel and open a new one. The advice was to send the corrected message as

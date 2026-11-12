@@ -779,3 +779,18 @@ def test_a_handover_the_service_turned_away_says_to_close_the_channel(world, cap
     a.client.post = real
     assert cli.send_failed(later.value, "board_channel") == 1
     assert "outbox retry" in json.loads(capsys.readouterr().out)["fix"]
+
+
+def test_a_post_asked_for_as_long_as_an_inbox_lives_leaves_it_room(world):
+    """The lifetime is in the body the board's work covers, so it is set before the work: with nothing left over, the board refused it."""
+    from aamio.runtime import BOARD_POST_MARGIN
+
+    service, runtime, base = world
+    a, b = partners(runtime)
+    posted = a.board_post("need", "a whole hour", "as long as it may", None, 3600)
+    inbox = a.channels["board"]
+    assert BOARD_POST_MARGIN == 30
+    assert 3600 - 30 - 2 <= posted["post"]["ttl"] <= 3600 - 30, "the post gives way by the margin, not the promise"
+    assert inbox.expire_at - time.time() - posted["post"]["ttl"] >= 30 - 2
+    usual = a.board_post("need", "twenty minutes", "well inside", None, 1200)
+    assert usual["post"]["ttl"] == 1200, "a post well inside its inbox keeps the lifetime it asked for"

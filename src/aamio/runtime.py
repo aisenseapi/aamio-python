@@ -32,6 +32,13 @@ INBOX_TTL = 3600
 # lifetime whether the field is sent or left out. The board decides; this is a
 # copy, and it is the only copy in this client.
 BOARD_TTL = 1800
+# What a post leaves its inbox: time for the work the board advises and the
+# round trip. The board refuses a post that would outlive the inbox when it
+# arrives, and the lifetime is in the body the work covers, so it is set before
+# the work is done. With nothing left over, a post asked for as long as an inbox
+# lives was refused whenever the work took a second (a check of 12 November
+# 2026). The same in aamio-php and the Node runtime.
+BOARD_POST_MARGIN = 30
 # How much longer than the post itself a reply address should live. The poster
 # reads answers on their own schedule, and a minute either way is the
 # difference between a conversation and a dead end.
@@ -2171,12 +2178,13 @@ class Runtime:
         """
         # Before the inbox is opened, so a name that is not here costs nothing.
         held = self._scope_named(scope) if scope is not None else None
-        channel = self.ensure_board_inbox(int(ttl))
+        channel = self.ensure_board_inbox(int(ttl) + BOARD_POST_MARGIN)
         # The board refuses a post that would outlive the inbox behind it, so
         # that an address on the board is always an address that still works.
         # At the top of the range the inbox cannot be opened for longer than
-        # the post asked for, so the post gives way, not the promise.
-        life = min(int(ttl), int(channel.expire_at - time.time()))
+        # the post asked for, so the post gives way, not the promise, and it
+        # leaves the inbox the margin the work and the round trip take.
+        life = min(int(ttl), int(channel.expire_at - time.time()) - BOARD_POST_MARGIN)
         if life < int(ttl):
             self.log("board post shortened to %ds to stay inside the inbox" % life)
         fields = {"kind": kind, "title": title, "text": text, "w": channel.w, "ttl": life}
