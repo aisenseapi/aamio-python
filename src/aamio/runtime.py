@@ -258,6 +258,18 @@ class SendFailed(RuntimeError):
         self.archive_error = archive_error
 
 
+def handover_unsettled(outcome):
+    """Whether a message that carried a channel's address may be with them, for the words in front of the fix.
+
+    A refusal says the message is not there, and one that never left is not
+    there either. Anything else that left may have arrived. "Only the message
+    carrying its address did not go" was said of all of them, and of a message
+    that was with them it read as leave to open another channel and invite
+    again (a check of 12 November 2026).
+    """
+    return outcome not in ("refused", "never_sent")
+
+
 def outbox_retryable(entry):
     """Whether sending these same bytes again is the right next move.
 

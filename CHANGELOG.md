@@ -67,7 +67,15 @@ not what moved in the source.
   nothing of the add-on runs. It was a traceback.
 - `addon enable` and `addon disable` say so when `addons.json` cannot be
   written, and change nothing. A full disk was a traceback, after the probe
-  had run.
+  had run, and when it was the rename at the end that failed, a file of the
+  command's own was left in the home.
+- A channel whose address was sent, with no answer coming back, says that the
+  message may have arrived: `board channel` and `aamio_open_channel` said that
+  only the message carrying the address did not go, of a message that was with
+  its recipient, which reads as leave to open another channel and invite
+  again. The fix now says that the outcome is not known and that a new attempt
+  is the same message under the same `message_id`. A refusal, and a message
+  that never left, are said not to have gone, as before.
 - An add-on's short name cannot be a name Windows keeps for a device, such as
   `nul`. It names the add-on's list of websites and its own directory in the
   home, and a list written to `nul.hosts.json` is written nowhere.

@@ -30,7 +30,7 @@ import sys
 
 from . import __version__, addons, compat, storage
 from .gate import GateStop
-from .runtime import Runtime, SendFailed, send_advice, BOARD_TTL
+from .runtime import Runtime, SendFailed, send_advice, BOARD_TTL, handover_unsettled
 
 
 def out(value):
@@ -110,7 +110,13 @@ def send_failed(error, operation):
 
     if getattr(error, "opened", None):
         told["opened"] = error.opened
-        told["fix"] = "The channel %s is open and listed by `aamio channel list`: only the message carrying its address did not land. %s" % (error.opened["label"], fix)
+        # What is said of the message follows what is known of it.
+        if handover_unsettled(error.outcome):
+            still = ("The channel %s is open and listed by `aamio channel list`, and the message carrying its address may have arrived: its outcome is not known. "
+                     "Do not open another channel for this: a new attempt is the same message, under the same message_id." % error.opened["label"])
+        else:
+            still = "The channel %s is open and listed by `aamio channel list`: only the message carrying its address did not land." % error.opened["label"]
+        told["fix"] = "%s %s" % (still, fix)
 
     # The trace that could not be written, beside the failure it belongs to,
     # and the archive's record of the attempt.

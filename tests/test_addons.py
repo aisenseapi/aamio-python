@@ -1004,3 +1004,40 @@ def test_the_limits_hold_when_the_process_exits_at_once(process_site, monkeypatc
     assert code == 5 and said["reason"] == "addon_failed" and "standard error" in said["fix"] and "y" * 100 not in err, "a valid answer beside too much standard error is refused, and the error is not relayed"
     code, out, err = main(["addon", "demo2", "mutter"], monkeypatch)
     assert code == 0 and json.loads(out)["pong"] is True and "y" * 500 in err and "y" * 501 not in err, "exactly the limit passes, and is relayed whole"
+
+
+@pytest.mark.parametrize("failure, said", [
+    (OSError(28, "No space left on device"), "addons.json could not be written: ENOSPC. Nothing changed; check the disk and the home's permissions, and try again."),
+    (PermissionError(13, "Permission denied"), "addons.json could not be replaced: another program holds it. Nothing changed; try again."),
+])
+def test_a_rename_that_fails_says_so_and_leaves_no_file_behind(process_site, monkeypatch, tmp_path, failure, said):
+    """A check of 12 November 2026: a full disk at the rename itself was an error out of the core, and the file this process had written stayed in the home."""
+    process_site()
+    home = tmp_path / "home"
+    real = os.replace
+    monkeypatch.setattr(addons.time, "sleep", lambda seconds: None)
+
+    def no_rename(source, target):
+        if str(target).endswith("addons.json"):
+            raise failure
+        return real(source, target)
+
+    left = lambda: sorted(name for name in os.listdir(home) if name.endswith(".tmp"))
+
+    # Enabling: nothing is recorded, and nothing is left behind.
+    monkeypatch.setattr(addons.os, "replace", no_rename)
+    code, out, err = main(["addon", "enable", "demo2"], monkeypatch)
+    assert code == 2 and out == "" and said in err and "Traceback" not in err
+    assert not (home / "addons.json").exists() and left() == []
+
+    # Disabling: the list stays as it was, and nothing is left behind.
+    monkeypatch.setattr(addons.os, "replace", real)
+    assert main(["addon", "enable", "demo2"], monkeypatch)[0] == 0 and enabled_in(tmp_path) == {"enabled": ["demo2-pkg"]}
+    monkeypatch.setattr(addons.os, "replace", no_rename)
+    code, out, err = main(["addon", "disable", "demo2"], monkeypatch)
+    assert code == 2 and out == "" and said in err and "Traceback" not in err
+    assert enabled_in(tmp_path) == {"enabled": ["demo2-pkg"]} and left() == []
+
+    # And when the rename works again, so does the command.
+    monkeypatch.setattr(addons.os, "replace", real)
+    assert main(["addon", "disable", "demo2"], monkeypatch)[0] == 0 and enabled_in(tmp_path) == {"enabled": []}

@@ -140,10 +140,7 @@ def _write_enabled(given, names):
     except OSError as error:
         # A full disk, or a home that takes no writes: said as that, with the
         # list as it was. It was an error out of the core, after the probe had run.
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        _drop(tmp)
         raise AddonError("%s could not be written: %s. Nothing changed; check the disk and the home's permissions, and try again." % (path, errno.errorcode.get(error.errno, error.__class__.__name__))) from None
     for attempt in range(20):
         try:
@@ -152,10 +149,25 @@ def _write_enabled(given, names):
         except PermissionError:
             # Windows: a reader holds the file for a moment.
             if attempt == 19:
-                os.unlink(tmp)
+                _drop(tmp)
                 raise AddonError("%s could not be replaced: another program holds it. Nothing changed; try again." % path) from None
             time.sleep(0.05)
+        except OSError as error:
+            # What else the rename can say, a full disk among them. The write
+            # above was an answer and this was not: an error out of the core,
+            # with the file of this process's own left in the home (a check of
+            # 12 November 2026).
+            _drop(tmp)
+            raise AddonError("%s could not be written: %s. Nothing changed; check the disk and the home's permissions, and try again." % (path, errno.errorcode.get(error.errno, error.__class__.__name__))) from None
     _cache.clear()
+
+
+def _drop(path):
+    """The file of this process's own, removed when the list could not be written. A file that will not go is left: the answer is about the list."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- installed

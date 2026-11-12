@@ -323,6 +323,11 @@ def test_the_local_engine_makes_and_reads_the_sound_here_and_sends_nothing():
     result = said["result"]
     assert said["exit_code"] == 0 and result["status"] == "heard" and result["engine"] == "local" and result["mode"] == "high" and result["card"]["name"] == "rom-42"
     assert aisense.decoded == [] and result["protocol"] == "aisense-audio-v2", "read here, in its own range, with nothing sent"
+    # The same card with a byte order mark in front is no card: the editions for PHP and Node say the same of this sound.
+    said = run(request("tool", "aamio_addon_earshot_listen", engine="local"), Aisense(), microphone=Microphone(sound=codec.encode(b"\xef\xbb\xbf" + TIMED, "high")))
+    result = said["result"]
+    assert said["exit_code"] == 3 and said["is_error"] is False and result["status"] == "not_understood" and result["reason"] == "not_an_aamio_card" and result["engine"] == "local"
+    assert result["heard"]["text"][0] == "\ufeff" and result["heard"]["byte_length"] == len(TIMED) + 3, "and what was heard is handed over as it was"
 
 
 def test_when_aisense_cannot_be_reached_the_recording_is_read_here():

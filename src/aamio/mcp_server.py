@@ -21,7 +21,7 @@ import time
 from . import __version__, addons
 from .crypto import is_key
 from .gate import GateStop
-from .runtime import Runtime, SendFailed, send_advice, outbox_outcome, OUTBOX_NOTES, BOARD_TTL, check_gate
+from .runtime import Runtime, SendFailed, send_advice, outbox_outcome, OUTBOX_NOTES, BOARD_TTL, check_gate, handover_unsettled
 
 SUPPORTED = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"]
 
@@ -151,10 +151,20 @@ def result_of(data, is_error=False):
     return {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}], "structuredContent": data if isinstance(data, dict) else {"result": data}, "isError": is_error}
 
 
-def still_open(opened):
-    """What comes first in the fix when a channel was opened and the message carrying its address did not go."""
+def still_open(opened, outcome=None):
+    """What comes first in the fix when a channel was opened and the message carrying its address was stopped.
+
+    outcome is the send's, or None for a stop at the gate, where nothing went.
+    A message that left with no answer that settles it may be with them, and
+    the words say so: "did not go" there read as leave to open another channel
+    and invite again (a check of 12 November 2026).
+    """
     if not opened:
         return ""
+
+    if outcome is not None and handover_unsettled(outcome):
+        return ("The channel %s is open and listed by aamio_channels, and the message carrying its address may have arrived: its outcome is not known. "
+                "Do not open another channel for this: a new attempt is the same message, under the same message_id. " % opened["label"])
 
     return "The channel %s is open and listed by aamio_channels: only the message carrying its address did not go. " % opened["label"]
 
@@ -645,7 +655,7 @@ def dispatch(runtime: Runtime, name: str, arguments: dict, ask=None):
             "message_id": error.message_id,
             "status": error.status,
             "retryable": retryable,
-            "fix": still_open(opened) + fix,
+            "fix": still_open(opened, error.outcome) + fix,
             # The trace that could not be written, beside the failure it belongs to.
             **({"trace_error": error.trace_error} if getattr(error, "trace_error", None) else {}),
             **({"archive_error": error.archive_error} if getattr(error, "archive_error", None) else {}),

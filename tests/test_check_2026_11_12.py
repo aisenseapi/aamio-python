@@ -345,3 +345,84 @@ def test_the_tool_says_what_a_close_does_not_do(world):
     # And a close the service confirms deletes the thread and takes the channel out of the home, as before.
     opened = a.open_channel("tender", 600, ["b"])
     assert a.close_channel("tender")["deleted"] is True and opened["w"] not in service.threads and "tender" not in a.channels
+
+
+# ------------------------------------------------------------------ what is said of a handover follows what is known
+#
+# Found in a check of the candidate for Node the same day: an invitation that
+# was stored, with its answer lost on the way back, was said not to have gone.
+# The agent's next move is then another channel and another invitation, and
+# whoever got the first has two.
+
+MAY = ("and the message carrying its address may have arrived: its outcome is not known. "
+       "Do not open another channel for this: a new attempt is the same message, under the same message_id.")
+
+
+def handed(service, a, b, status, stored):
+    """A channel for b opened by a, with the answer to the message carrying its address as the fixture says."""
+    a.peers[b.channels["inbox"].w] = b.keys.public
+    real = trace_fixture.answer_with(a, status, stored)
+    with pytest.raises(SendFailed) as turned:
+        a.open_channel("tender-%d" % status, 600, None, None, "b")
+    a.client.post = real
+    return turned.value
+
+
+def test_a_handover_whose_answer_was_lost_says_it_may_have_arrived(world, capsys):
+    service, runtime, base = world
+    a, b = partners(runtime)
+    lost = handed(service, a, b, 0, True)
+    assert (lost.outcome, lost.status, lost.opened["label"]) == ("unknown", 0, "tender-0") and lost.opened["w"] in service.threads
+
+    # On the command line.
+    assert cli.send_failed(lost, "board_channel") == 1
+    said = json.loads(capsys.readouterr().out)
+    assert (said["outcome"], said["retryable"], said["message_id"], said["opened"]) == ("unknown", None, lost.message_id, lost.opened)
+    assert said["fix"].startswith("The channel tender-0 is open and listed by `aamio channel list`, %s No answer came back, so this message may already have been delivered." % MAY)
+    assert "aamio outbox retry --id %s" % lost.message_id in said["fix"]
+    assert "did not land" not in json.dumps(said) and "did not go" not in json.dumps(said)
+
+    # It was there all along: b reads the address before anything is sent again.
+    got = trace_fixture.read_all(b)
+    assert [(entry["body"].get("channel"), entry.get("replay")) for entry in got] == [(lost.opened["w"], False)]
+    # The same message again, under its id, and b marks it the copy it is.
+    assert [(row["id"], row["status"]) for row in a.outbox_retry(lost.message_id)] == [(lost.message_id, "delivered")]
+    again = trace_fixture.read_all(b)
+    assert [(entry["body"].get("channel"), entry.get("replay")) for entry in again] == [(lost.opened["w"], True)]
+
+
+def test_over_mcp_a_lost_answer_says_may_have_arrived_and_a_refusal_says_did_not_go(world):
+    service, runtime, base = world
+    a, b = partners(runtime)
+    a.peers[b.channels["inbox"].w] = b.keys.public
+
+    def opened_with(label, status, stored):
+        real = trace_fixture.answer_with(a, status, stored)
+        answer = mcp_server.dispatch(a, "aamio_open_channel", {"label": label, "ttl": 600, "to": "b"})
+        a.client.post = real
+        assert answer["isError"] is True and answer["structuredContent"]["operation"] == "open_channel" and answer["structuredContent"]["opened"]["label"] == label
+        return answer["structuredContent"]
+
+    lost = opened_with("lost", 0, True)
+    assert (lost["outcome"], lost["status"], lost["retryable"]) == ("unknown", 0, None)
+    assert lost["fix"].startswith("The channel lost is open and listed by aamio_channels, %s No answer came back, so this message may already have been delivered." % MAY)
+    assert "did not go" not in json.dumps(lost) and "did not land" not in json.dumps(lost)
+    assert [entry["body"].get("channel") for entry in trace_fixture.read_all(b)] == [lost["opened"]["w"]], "and it had arrived"
+
+    # An answer that settles nothing is not a refusal either: a 500 does not say the message was not stored.
+    failing = opened_with("failing", 500, False)
+    assert failing["outcome"] == "attempted" and failing["fix"].startswith("The channel failing is open and listed by aamio_channels, %s " % MAY)
+
+    # A refusal says it is not there, and so do the words. So does a rate window, which is decided before the body is read.
+    for label, status in (("refused", 403), ("later", 429)):
+        refused = opened_with(label, status, False)
+        assert refused["outcome"] == "refused" and refused["status"] == status
+        assert refused["fix"].startswith("The channel %s is open and listed by aamio_channels: only the message carrying its address did not go. " % label)
+        assert "may have arrived" not in refused["fix"]
+
+
+def test_the_words_of_a_handover_know_which_outcomes_are_settled():
+    from aamio.runtime import handover_unsettled
+
+    assert [handover_unsettled(outcome) for outcome in ("refused", "never_sent", "unknown", "attempted", "sending", "something new")] == [False, False, True, True, True, True]
+    assert mcp_server.still_open(None, "unknown") == "" and mcp_server.still_open({"label": "x"}).endswith("did not go. "), "a stop at the gate went nowhere"
