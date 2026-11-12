@@ -30,7 +30,7 @@ import sys
 
 from . import __version__, addons, compat, storage
 from .gate import GateStop
-from .runtime import Runtime, SendFailed, send_advice, BOARD_TTL, handover_unsettled
+from .runtime import Runtime, SendFailed, send_advice, BOARD_TTL, SEND_TRY_LATER, handover_unsettled
 
 
 def out(value):
@@ -97,7 +97,7 @@ def gate_stopped(stop):
 
     if opened:
         told["opened"] = opened
-        told["fix"] = "The channel %s is open and listed by `aamio channel list`: only the message carrying its address did not go. %s" % (opened["label"], stop.fix)
+        told["fix"] = "The channel %s is open and listed by `aamio channel list`: only the message carrying its address did not go. Nothing was sent, so nobody has been given its address: close it with `aamio channel close %s`, and open a new one when the inbox's conditions can be met. %s" % (opened["label"], opened["label"], stop.fix)
 
     out(told)
 
@@ -140,6 +140,9 @@ def send_failed(error, operation):
         # the command line cannot do.
         if error.outcome == "never_sent":
             fix = "Nothing left this machine, so nobody has been given its address. Close it with `aamio channel close %s`, put right what the error says, and open a new one." % error.opened["label"]
+        elif error.outcome == "refused" and error.status not in SEND_TRY_LATER:
+            # Nobody has the address either: a corrected message would need it.
+            fix = "aamio refused it, so nobody has been given its address. Close it with `aamio channel close %s`, put right what the error says, and open a new one." % error.opened["label"]
         told["fix"] = "%s %s" % (still, fix)
 
     # The trace that could not be written, beside the failure it belongs to,
@@ -360,7 +363,7 @@ def main(argv=None):
         return run(args, runtime)
     except SendFailed as failed:
         return send_failed(failed, args.command)
-    except (RuntimeError, LookupError, ValueError) as error:
+    except (RuntimeError, LookupError, ValueError, OSError) as error:
         # One command is one process, and what it could not do is the answer,
         # as JSON like every other answer here. It used to be a traceback.
         out({"error": str(error), "error_code": error.__class__.__name__})

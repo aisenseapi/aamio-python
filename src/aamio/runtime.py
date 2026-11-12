@@ -166,7 +166,12 @@ OWNER_LOCK = "owner.lock"
 # Later: nothing about the message is wrong, only the moment.
 # Anything else answered by the server is left undecided on purpose. It told us
 # it failed, but not whether it had already stored the message.
-SEND_DETERMINISTIC = (400, 403, 410, 413, 415, 422, 428, 501)
+# 401 and 409 are among them: a signature that does not verify over these
+# bytes, a thread that is full, a key that has used up the gate's per_key. The
+# service answers each before it stores anything. Left out, a handover answered
+# so said the address may have arrived, and retry sent the same bytes to the
+# same refusal (a check of 12 November 2026).
+SEND_DETERMINISTIC = (400, 401, 403, 409, 410, 413, 415, 422, 428, 501)
 SEND_TRY_LATER = (429, 503)
 # Answers that prove the message was never stored. The deterministic ones, and a
 # rate window, which aamio decides before it reads the body. 503 is deliberately
@@ -898,7 +903,7 @@ class Runtime:
         try:
             with self.archive_lock:
                 gone = storage.prune(self.home, policy)
-        except OSError as error:
+        except (OSError, ValueError) as error:
             # The archive keeps growing, in plain text, and the policy that was
             # meant to bound it did not run. Worth hearing about once per reason.
             self._note_trouble(
@@ -1322,8 +1327,7 @@ class Runtime:
         # (the release check of 9 November 2026, found in the Node runtime).
         partners = [p for p in self.partners if p["name"] != name and p["key"] != key]
         partners.append({"name": name, "key": key})
-        self._save_json("partners.json", partners)
-        self.partners = partners
+        self._save_partners(partners)
         return self._inbox_after_change("partner %s was added" % name, {"partner": name, "key": key})
 
     def partner_remove(self, name):
@@ -1336,7 +1340,9 @@ class Runtime:
         key, each shown as an unknown one, rather than unsigned writes from
         anyone at an address the partners were given.
         """
-        known = self.partner_by_name(name)
+        # A key or a name, as a send takes them: the refusal of an ambiguous
+        # name says to give the key, and partner remove did not take one.
+        known = self.partner_by_key(name) if is_key(str(name)) else self.partner_by_name(name)
         if known is None:
             inbox = self.channels.get("inbox")
             return {"partner": name, "known": False, "inbox": inbox.w if inbox else None}
@@ -1345,9 +1351,17 @@ class Runtime:
         # a name in another case was said to be known and removed nothing (a
         # check of 12 November 2026).
         partners = [p for p in self.partners if p["name"] != known["name"]]
-        self._save_json("partners.json", partners)
-        self.partners = partners
+        self._save_partners(partners)
         return self._inbox_after_change("partner %s was removed" % known["name"], {"partner": known["name"], "known": True})
+
+    def _save_partners(self, partners):
+        """Writes the address book, and only then holds it. One that cannot be written is an error that says so, with the book as it was: it was a traceback."""
+        try:
+            self._save_json("partners.json", partners)
+        except OSError as error:
+            raise RuntimeError("partners.json could not be written (%s), so the address book is as it was. Free the disk, or give this user write access to %s, then do it again."
+                               % (errno.errorcode.get(error.errno, error.__class__.__name__), self.home)) from None
+        self.partners = partners
 
     def _inbox_after_change(self, reason, outcome):
         """Whether the inbox still matches the address book, and a new one if not."""
@@ -2565,20 +2579,24 @@ class Runtime:
 
         found = []
 
-        with open(path, encoding=storage.HOME_ENCODING) as handle:
-            for line in handle:
-                line = line.strip()
+        for raw in storage.raw_lines(path):
+            # A line that is not UTF-8 is no record, as one cut short by a
+            # crash is not. Read as text, it stopped the whole read.
+            try:
+                line = raw.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                continue
 
-                if not line:
-                    continue
+            if not line:
+                continue
 
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
 
-                if isinstance(record, dict) and record.get("kind") == kind:
-                    found.append(record)
+            if isinstance(record, dict) and record.get("kind") == kind:
+                found.append(record)
 
         return found
 
@@ -2624,6 +2642,11 @@ class Runtime:
         if self._channel_called(label) is not None:
             label = "%s-%d" % (label, int(time.time()))
         if reply_to:
+            # The gate of the inbox the address goes to, read before anything
+            # is opened, as open_channel and the Node runtime read it: a gate
+            # that cannot be met stopped the handover after the channel was
+            # open, and it stayed open with nobody given its address.
+            self._can_hand_over(reply_to)
             self._handover_fits(key, int(ttl), note)
         status, data, read_key, w = self.client.open_thread(int(ttl), [key])
         if status != 201:

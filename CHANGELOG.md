@@ -74,6 +74,28 @@ not what moved in the source.
   written, and change nothing. A full disk was a traceback, after the probe
   had run, and when it was the rename at the end that failed, a file of the
   command's own was left in the home.
+- A channel whose address the service turned away, or a gate stopped, is
+  answered with what to do about it: nobody has the address, so close the
+  channel and open a new one. The advice was to send the corrected message as
+  a new one, which needs the address. `board channel` reads the gate of the
+  inbox the address goes to before it opens anything, as `aamio_open_channel`
+  does: a gate that could not be met left the channel open.
+- The command line answers an error of the file system as JSON, as it answers
+  every other error. It was a traceback.
+- A send answered 401 or 409 is settled as refused: a signature that does
+  not verify, a thread that is full, or a key that has used up the gate's
+  `per_key`. The service answers each before it stores anything. They were
+  left open, so `outbox retry` sent the same bytes to the same refusal, and a
+  channel's handover said the address may have arrived.
+- `partner remove` takes a partner's key as well as its name, as `send` does.
+  The refusal of a name two partners share apart from upper and lower case
+  says to give the key.
+- `partner add` and `partner remove` say so when `partners.json` cannot be
+  written, and change nothing. It was a traceback.
+- A line of the archive that is not UTF-8 is no record when the archive is
+  read, and is kept byte for byte when it is pruned. One such line stopped
+  the prune, and with it a runtime that keeps its archive so many days or so
+  many megabytes, which prunes at its start.
 - `partner remove` with a name in another case than the address book has it
   removes that partner, as a send finds it: apart from upper and lower case
   when only one is so named, and refused as ambiguous when two are. It said

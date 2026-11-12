@@ -21,7 +21,7 @@ import time
 from . import __version__, addons
 from .crypto import is_key
 from .gate import GateStop
-from .runtime import Runtime, SendFailed, send_advice, outbox_outcome, OUTBOX_NOTES, BOARD_TTL, check_gate, handover_unsettled
+from .runtime import Runtime, SendFailed, send_advice, outbox_outcome, OUTBOX_NOTES, BOARD_TTL, SEND_TRY_LATER, check_gate, handover_unsettled
 
 SUPPORTED = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"]
 
@@ -645,6 +645,9 @@ def dispatch(runtime: Runtime, name: str, arguments: dict, ask=None):
         # address, and nobody has it.
         if opened and error.outcome == "never_sent":
             fix = "Nothing left this machine, so nobody has been given its address. Close it with aamio_close_channel, put right what the error says, and open a new one with to."
+        elif opened and error.outcome == "refused" and error.status not in SEND_TRY_LATER:
+            # Nobody has the address either: a corrected message would need it.
+            fix = "aamio refused it, so nobody has been given its address. Close it with aamio_close_channel, put right what the error says, and open a new one with to."
 
         return result_of({
             "error": str(error),
@@ -671,7 +674,7 @@ def dispatch(runtime: Runtime, name: str, arguments: dict, ask=None):
             "error_code": "gate",
             "operation": "open_channel" if name == "aamio_open_channel" else "send",
             "retryable": False,
-            "fix": still_open(opened) + error.fix,
+            "fix": still_open(opened) + ("Nothing was sent, so nobody has been given its address: close it with aamio_close_channel, and open a new one when the inbox's conditions can be met. " if opened else "") + error.fix,
         }, True)
     except (ValueError, LookupError, RuntimeError) as error:
         return result_of({"error": str(error)}, True)

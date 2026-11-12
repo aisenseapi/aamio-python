@@ -504,18 +504,48 @@ def describe(policy):
     return "Decrypted messages and receipts are kept in archive/ until you remove them%s. The service itself keeps nothing past a thread's expiry: this archive is yours, on this machine. `aamio archive days:30` gives it a lifetime, `aamio archive off` stops it." % size
 
 
+def raw_lines(path):
+    """The lines of a file of the home as bytes, without their line ends, the first past a byte order mark."""
+    with open(path, "rb") as handle:
+        data = handle.read()
+
+    if data.startswith(b"\xef\xbb\xbf"):
+        data = data[3:]
+
+    lines = data.split(b"\n")
+
+    if lines and lines[-1] == b"":
+        lines.pop()
+
+    return lines
+
+
 def _records(path):
-    with open(path, encoding=HOME_ENCODING) as handle:
-        for line in handle:
-            if not line.strip():
-                continue
+    """Each line of an archive file as it is, with the time its record gives, or None when it gives none.
 
-            try:
-                at = json.loads(line).get("at")
-            except (ValueError, AttributeError):
-                at = None
+    A line that is not UTF-8 gives none, and is kept byte for byte: what cannot
+    be told old is not thrown away as old, and not written back changed. Read
+    as text, one such line stopped the prune, and with it the runtime that
+    pruned at its start (a check of 12 November 2026).
+    """
+    for raw in raw_lines(path):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = None
 
-            yield (float(at) if isinstance(at, (int, float)) else None), line if line.endswith("\n") else line + "\n"
+        if text is not None and not text.strip():
+            continue
+
+        if text is None and not raw:
+            continue
+
+        try:
+            at = json.loads(text).get("at") if text is not None else None
+        except (ValueError, AttributeError):
+            at = None
+
+        yield (float(at) if isinstance(at, (int, float)) else None), raw + b"\n"
 
 
 def prune(home, policy, now=None, everything=False):
@@ -557,7 +587,7 @@ def prune(home, policy, now=None, everything=False):
     ceiling = int(policy["max_mb"] * 1024 * 1024) if policy.get("max_mb") else None
 
     if ceiling is not None:
-        total = sum(len(line.encode("utf-8")) for records in kept.values() for _, line in records)
+        total = sum(len(line) for records in kept.values() for _, line in records)
         oldest_first = sorted(((at if at is not None else now, name, index) for name, records in kept.items() for index, (at, _) in enumerate(records)))
         gone = set()
 
@@ -565,7 +595,7 @@ def prune(home, policy, now=None, everything=False):
             if total <= ceiling:
                 break
 
-            total -= len(kept[name][index][1].encode("utf-8"))
+            total -= len(kept[name][index][1])
             gone.add((name, index))
             removed += 1
 
@@ -576,14 +606,15 @@ def prune(home, policy, now=None, everything=False):
 
     for name, records in kept.items():
         path = os.path.join(folder, name)
-        text = "".join(line for _, line in records)
-        left += len(text.encode("utf-8"))
+        text = b"".join(line for _, line in records)
+        left += len(text)
 
         if removed == 0:
             continue
 
         with open_private(path + ".tmp") as handle:
-            handle.write(text)
+            # The lines as they were, byte for byte.
+            handle.buffer.write(text)
             handle.flush()
             os.fsync(handle.fileno())
 

@@ -496,7 +496,9 @@ def test_the_command_line_says_the_channel_a_stop_at_the_gate_left_open(world, c
     assert code == 1 and said["error_code"] == "gate" and said["error"].endswith("Nothing was sent.")
     label = said["opened"]["label"]
     assert label in a.channels and said["opened"]["w"] in service.threads, "the channel is there, and the answer names it"
-    assert said["fix"] == "The channel %s is open and listed by `aamio channel list`: only the message carrying its address did not go. Ask its owner for an inbox that asks for less." % label
+    assert said["fix"] == ("The channel %s is open and listed by `aamio channel list`: only the message carrying its address did not go. "
+                           "Nothing was sent, so nobody has been given its address: close it with `aamio channel close %s`, and open a new one when the inbox's conditions can be met. "
+                           "Ask its owner for an inbox that asks for less." % (label, label))
 
     # A stop with no channel behind it is said as before, on every command that can meet a gate.
     stop = GateStop("The inbox asks for a captcha", "Open an address whose conditions this client can meet.")
@@ -673,3 +675,107 @@ def test_partner_remove_takes_the_partner_the_name_finds(world):
     assert [p["name"] for p in a.partner_list()] == ["Ann", "ANN"], "and nothing was removed"
     assert a.partner_remove("ANN")["partner"] == "ANN"
     assert [(p["name"], p["key"]) for p in a.partner_list()] == [("Ann", ann)], "the exact name removes that one alone"
+
+
+# ------------------------------------------------------------------ after the follow-up check of the evening
+
+def test_a_401_or_a_409_is_the_service_saying_no(world):
+    """Both are answered before anything is stored. A handover answered so said the address may have arrived."""
+    service, runtime, base = world
+    a, b = partners(runtime)
+    a.peers[b.channels["inbox"].w] = b.keys.public
+    for label, status in (("full", 409), ("unsigned", 401)):
+        real = trace_fixture.answer_with(a, status, False)
+        answer = mcp_server.dispatch(a, "aamio_open_channel", {"label": label, "ttl": 600, "to": "b"})
+        a.client.post = real
+        said = answer["structuredContent"]
+        assert (said["outcome"], said["status"], said["retryable"], said["opened"]["label"]) == ("refused", status, False, label)
+        assert said["fix"] == "The channel %s is open and listed by aamio_channels: only the message carrying its address did not go. %s" % (label, "aamio refused it, so nobody has been given its address. Close it with aamio_close_channel, put right what the error says, and open a new one with to.")
+    assert a.outbox_pending() == [] and a.outbox_retry() == [], "neither waits to be sent again, and a retry of everything sends neither"
+
+
+def test_partner_remove_takes_a_key_and_says_a_book_that_cannot_be_written(world):
+    service, runtime, base = world
+    a, b = partners(runtime)
+    removed = a.partner_remove(b.keys.public)
+    assert (removed["partner"], removed["known"]) == ("b", True) and a.partner_list() == []
+    assert a.partner_remove(b.keys.public)["known"] is False, "a key nobody in the book has changes nothing"
+    a.partner_add("b", b.keys.public)
+    save = a._save_json
+
+    def full(name, value, private=True):
+        if name == "partners.json":
+            raise OSError(28, "No space left on device")
+        return save(name, value, private)
+
+    a._save_json = full
+    with pytest.raises(RuntimeError, match="partners.json could not be written \\(ENOSPC\\), so the address book is as it was"):
+        a.partner_remove("b")
+    with pytest.raises(RuntimeError, match="partners.json could not be written \\(ENOSPC\\)"):
+        a.partner_add("c", a.keys.public)
+    a._save_json = save
+    assert [p["name"] for p in a.partner_list()] == ["b"]
+    with open(os.path.join(a.home, "partners.json"), encoding="utf-8") as handle:
+        assert [p["name"] for p in json.load(handle)] == ["b"]
+
+
+def test_an_archive_line_that_is_not_utf8_is_no_record_and_is_kept_as_it_was(world):
+    """Read as text, one such line stopped the prune, and the runtime that pruned at its start."""
+    service, runtime, base = world
+    a, b = partners(runtime)
+    folder = os.path.join(a.home, "archive")
+    os.makedirs(folder, exist_ok=True)
+    odd = b'{"kind":"posted","at":1,"post":{"id":"caf\xe9"}}\n'
+    old = b'{"kind":"posted","at":1,"post":{"id":"old"}}\n'
+    fresh = (json.dumps({"kind": "posted", "at": time.time(), "post": {"id": "fresh"}}) + "\n").encode("utf-8")
+    with open(os.path.join(folder, "board.jsonl"), "wb") as handle:
+        handle.write(odd + old + fresh)
+    assert [record["post"]["id"] for record in a._archived("board", "posted")] == ["old", "fresh"]
+    gone = storage.prune(a.home, {"mode": "days", "days": 1, "max_mb": None})
+    assert gone["removed"] == 1
+    with open(os.path.join(folder, "board.jsonl"), "rb") as handle:
+        assert handle.read() == odd + fresh, "the line that is not UTF-8 is kept as it was, not written back changed"
+    # And a runtime that prunes at its start opens.
+    home = a.home
+    cli.set_archive(a, storage.parse_policy("days:1"))
+    a.close()
+    again = Runtime(home=home, host="https://fake.test", tags=["a"])
+    again.close()
+
+
+def test_board_channel_reads_the_gate_before_it_opens(world):
+    """A gate that cannot be met stopped the handover after the channel was open, and it stayed open with nobody given its address."""
+    from aamio.gate import GateStop
+
+    service, runtime, base = world
+    a, b = partners(runtime)
+    inbox = b.channels["inbox"].w
+    a.peers[inbox] = b.keys.public
+    a.client.gate_timed = lambda w: (200, {"require": {"captcha": {"site": "x"}}}, None)
+    a.client.gate = lambda w: (200, {"require": {"captcha": {"site": "x"}}})
+    threads, labels = len(service.threads), sorted(a.channels)
+    with pytest.raises(GateStop):
+        a.open_channel_with(b.keys.public, 600, None, inbox)
+    assert (len(service.threads), sorted(a.channels)) == (threads, labels), "nothing was opened"
+
+
+def test_a_handover_the_service_turned_away_says_to_close_the_channel(world, capsys):
+    """The advice of a refused send, to send the corrected message as a new one, needs the address, which goes only with a channel."""
+    service, runtime, base = world
+    a, b = partners(runtime)
+    a.peers[b.channels["inbox"].w] = b.keys.public
+    real = trace_fixture.answer_with(a, 403, False)
+    with pytest.raises(SendFailed) as turned:
+        a.open_channel("tender", 600, None, None, "b")
+    a.client.post = real
+    assert cli.send_failed(turned.value, "board_channel") == 1
+    said = json.loads(capsys.readouterr().out)
+    assert said["fix"] == ("The channel tender is open and listed by `aamio channel list`: only the message carrying its address did not land. "
+                           "aamio refused it, so nobody has been given its address. Close it with `aamio channel close tender`, put right what the error says, and open a new one.")
+    # A rate window is the moment and not the message: the same message goes again.
+    real = trace_fixture.answer_with(a, 429, False)
+    with pytest.raises(SendFailed) as later:
+        a.open_channel("later", 600, None, None, "b")
+    a.client.post = real
+    assert cli.send_failed(later.value, "board_channel") == 1
+    assert "outbox retry" in json.loads(capsys.readouterr().out)["fix"]

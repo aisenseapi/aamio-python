@@ -69,10 +69,10 @@ def test_a_partner_change_that_could_not_be_written_is_not_in_this_process_eithe
     switch = failing(a, "partners.json")
 
     for name, key in (("carol", second), ("dave", Keys.generate().public)):
-        with pytest.raises(OSError):
+        with pytest.raises(RuntimeError, match="partners.json could not be written .*, so the address book is as it was"):
             a.partner_add(name, key)
         assert book(a) == {"b": b.keys.public, "carol": first}, name
-    with pytest.raises(OSError):
+    with pytest.raises(RuntimeError, match="partners.json could not be written .*, so the address book is as it was"):
         a.partner_remove("carol")
     assert book(a) == {"b": b.keys.public, "carol": first}
 
