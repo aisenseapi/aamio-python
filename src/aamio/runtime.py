@@ -2185,7 +2185,10 @@ class Runtime:
         # Where the answers go, and how to read them, in the answer itself. An
         # agent took board replies for the whole inbox, got nothing back, and
         # spent an hour decrypting by hand what read would have shown at once.
-        posted = {"post": data, "inbox": channel.w, "answers_arrive_on": "board", "read_them_with": "Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes. board replies lists only the answers, the messages that name a post of yours or arrived on a board inbox, and says how many it left out."}
+        # And until when that inbox is open, which is not the post's own time:
+        # post.expire_at is when the post leaves the board, and the inbox
+        # outlives it. The three runtimes say it under the same name.
+        posted = {"post": data, "inbox": channel.w, "inbox_expires_at": channel.expire_at, "answers_arrive_on": "board", "read_them_with": "Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes. board replies lists only the answers, the messages that name a post of yours or arrived on a board inbox, and says how many it left out."}
         if held is not None:
             posted["scope"] = held["name"]
         if archive_error is not None:

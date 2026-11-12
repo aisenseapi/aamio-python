@@ -85,6 +85,25 @@ def doctor(runtime):
     }
 
 
+def gate_stopped(stop):
+    """A stop at the gate, as JSON: the reason, the fix, and the channel when one was opened for a message that was then stopped.
+
+    board channel caught a failed send and not this, so a stop at the gate
+    came out as an error with no fix, and with no word of the channel that was
+    open by then (a check of 12 November 2026).
+    """
+    told = {"error": stop.reason, "error_code": "gate", "fix": stop.fix}
+    opened = getattr(stop, "opened", None)
+
+    if opened:
+        told["opened"] = opened
+        told["fix"] = "The channel %s is open and listed by `aamio channel list`: only the message carrying its address did not go. %s" % (opened["label"], stop.fix)
+
+    out(told)
+
+    return 1
+
+
 def send_failed(error, operation):
     """A send that stored nothing, as JSON and not as a traceback.
 
@@ -116,6 +135,11 @@ def send_failed(error, operation):
                      "Do not open another channel for this: a new attempt is the same message, under the same message_id." % error.opened["label"])
         else:
             still = "The channel %s is open and listed by `aamio channel list`: only the message carrying its address did not land." % error.opened["label"]
+        # A message that never left has nothing to send again, and an address
+        # goes only with a channel: "send it as a new message" named a thing
+        # the command line cannot do.
+        if error.outcome == "never_sent":
+            fix = "Nothing left this machine, so nobody has been given its address. Close it with `aamio channel close %s`, put right what the error says, and open a new one." % error.opened["label"]
         told["fix"] = "%s %s" % (still, fix)
 
     # The trace that could not be written, beside the failure it belongs to,
@@ -396,8 +420,7 @@ def run(args, runtime):
         except GateStop as stop:
             # Not a crash: the inbox asked for something this client does not
             # do, nothing was sent, and the reader needs the reason and the way on.
-            out({"error": stop.reason, "error_code": "gate", "fix": stop.fix})
-            return 1
+            return gate_stopped(stop)
     elif args.command == "read":
         # attention carries what the read could not do. Without it an expired
         # thread and a service that did not answer both read as "no messages".
@@ -446,8 +469,7 @@ def run(args, runtime):
             except SendFailed as failed:
                 return send_failed(failed, "board_answer")
             except GateStop as stop:
-                out({"error": stop.reason, "error_code": "gate", "fix": stop.fix})
-                return 1
+                return gate_stopped(stop)
         elif args.board_command == "replies":
             # Always, and the board inboxes only. With no wait given this read
             # nothing at all, and said nobody had answered.
@@ -478,6 +500,8 @@ def run(args, runtime):
                 out(runtime.open_channel_with(args.key, args.ttl, None, args.reply_to, args.note))
             except SendFailed as failed:
                 return send_failed(failed, "board_channel")
+            except GateStop as stop:
+                return gate_stopped(stop)
     elif args.command == "scope":
         if args.scope_command == "new":
             out(runtime.scope_new(args.name))

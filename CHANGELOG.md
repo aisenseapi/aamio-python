@@ -62,6 +62,11 @@ not what moved in the source.
   which opens a new thread with no list and no gate that nobody reads, and
   the writer is answered that it was stored. The tool said the thread was
   gone for everyone holding its address.
+- `board post` says until when the inbox its answers go to is open, as
+  `inbox_expires_at` beside `inbox`, the name `whoami` gives the inbox's time.
+  It is not the post's own time: `post.expire_at` is when the post leaves the
+  board, and the inbox outlives it. aamio-php and the Node runtime answer
+  with the same field.
 - An add-on whose own directory cannot be made, with a file in the way of
   `addons/` in the home or a full disk, is an answer, `addon_failed`, and
   nothing of the add-on runs. It was a traceback.
@@ -69,6 +74,12 @@ not what moved in the source.
   written, and change nothing. A full disk was a traceback, after the probe
   had run, and when it was the rename at the end that failed, a file of the
   command's own was left in the home.
+- `board channel` that is stopped at the gate once its channel is open says
+  so on the command line: the answer has the channel in `opened` and the fix,
+  as a failed send has. It was an error with no fix and no word of the
+  channel, which stayed open with nobody told. A channel whose address never
+  left this machine is answered with what to do about it, close it and open a
+  new one, where the fix said to send the message as a new one.
 - A channel whose address was sent, with no answer coming back, says that the
   message may have arrived: `board channel` and `aamio_open_channel` said that
   only the message carrying the address did not go, of a message that was with

@@ -426,3 +426,99 @@ def test_the_words_of_a_handover_know_which_outcomes_are_settled():
 
     assert [handover_unsettled(outcome) for outcome in ("refused", "never_sent", "unknown", "attempted", "sending", "something new")] == [False, False, True, True, True, True]
     assert mcp_server.still_open(None, "unknown") == "" and mcp_server.still_open({"label": "x"}).endswith("did not go. "), "a stop at the gate went nowhere"
+
+
+# ------------------------------------------------------------------ a post says until when its inbox is open
+
+def test_a_post_says_until_when_its_inbox_is_open(world):
+    """The fields the three runtimes answer a post with, in the order they are given, and no others."""
+    service, runtime, base = world
+    a, b = partners(runtime)
+    posted = a.board_post("need", "kept by python", "who answers?", ["archive"], 600)
+    board = a.channels["board"]
+    assert list(posted) == ["post", "inbox", "inbox_expires_at", "answers_arrive_on", "read_them_with"]
+    assert (posted["inbox"], posted["inbox_expires_at"]) == (board.w, board.expire_at)
+    assert posted["inbox_expires_at"] >= posted["post"]["expire_at"], "the inbox outlives the post"
+    # What the post holds is in the post, and nowhere else.
+    assert not {"kind", "title", "expire_at", "work_bits"} & set(posted)
+    # It is the name whoami gives the inbox's own time.
+    assert "inbox_expires_at" in a.whoami()
+
+
+# ------------------------------------------------------------------ the same bytes, read the same way
+
+def test_a_sealed_message_with_a_byte_order_mark_in_front_is_text(world):
+    """What the Node runtime is held to as well: the mark is kept, so what follows it is not JSON, and an address in it binds nothing."""
+    service, runtime, base = world
+    a, b = partners(runtime)
+    w = a.channels["inbox"].w
+    offered = "c" * 20
+    body = json.dumps({"channel": offered, "text": "write here"})
+
+    def write(text):
+        envelope = b.keys.seal(a.keys.public, text.encode("utf-8"))
+        status, _ = b.client.post(w, envelope, b.keys.public, b.keys.sign(thread_signing_input(w, envelope)))
+        assert status == 201
+
+    write("\ufeff" + body)
+    state, entries = a.poll(a.channels["inbox"], 0)
+    assert [(entry["format"], entry["verified"], entry["body"]) for entry in entries] == [("text", True, {"text": "\ufeff" + body})]
+    assert offered not in a.peers
+
+    write(body)
+    state, entries = a.poll(a.channels["inbox"], 0)
+    assert [(entry["format"], entry["body"].get("channel")) for entry in entries] == [("json", offered)]
+    assert a.peers.get(offered) == b.keys.public
+
+
+# ------------------------------------------------------------------ the command line says the channel that is open
+
+def test_the_command_line_says_the_channel_a_stop_at_the_gate_left_open(world, capsys):
+    """board channel caught a failed send and not a stop at the gate: the error came out with no fix and no channel."""
+    from types import SimpleNamespace
+
+    from aamio.gate import GateStop
+
+    service, runtime, base = world
+    a, b = partners(runtime)
+    inbox = b.channels["inbox"].w
+    a.peers[inbox] = b.keys.public
+    deliver = a._deliver
+
+    def stopped(entry):
+        raise GateStop("The inbox asks for 30 bits of proof of work, more than this call may take", "Ask its owner for an inbox that asks for less.")
+
+    a._deliver = stopped
+    code = cli.run(SimpleNamespace(command="board", board_command="channel", key=b.keys.public, ttl=600, reply_to=inbox, note=None), a)
+    a._deliver = deliver
+    said = json.loads(capsys.readouterr().out)
+    assert code == 1 and said["error_code"] == "gate" and said["error"].endswith("Nothing was sent.")
+    label = said["opened"]["label"]
+    assert label in a.channels and said["opened"]["w"] in service.threads, "the channel is there, and the answer names it"
+    assert said["fix"] == "The channel %s is open and listed by `aamio channel list`: only the message carrying its address did not go. Ask its owner for an inbox that asks for less." % label
+
+    # A stop with no channel behind it is said as before, on every command that can meet a gate.
+    stop = GateStop("The inbox asks for a captcha", "Open an address whose conditions this client can meet.")
+    assert cli.gate_stopped(stop) == 1
+    assert json.loads(capsys.readouterr().out) == {"error": "The inbox asks for a captcha. Nothing was sent.", "error_code": "gate", "fix": "Open an address whose conditions this client can meet."}
+
+
+def test_the_command_line_says_what_to_do_about_a_channel_whose_address_never_left(world, capsys):
+    service, runtime, base = world
+    a, b = partners(runtime)
+    a.peers[b.channels["inbox"].w] = b.keys.public
+    save = a.save_outbox
+
+    def full():
+        raise OSError(28, "No space left on device")
+
+    a.save_outbox = full
+    with pytest.raises(SendFailed) as turned:
+        a.open_channel("tender", 600, None, None, "b")
+    a.save_outbox = save
+    assert turned.value.outcome == "never_sent" and turned.value.opened["label"] == "tender"
+    assert cli.send_failed(turned.value, "board_channel") == 1
+    said = json.loads(capsys.readouterr().out)
+    assert said["fix"] == ("The channel tender is open and listed by `aamio channel list`: only the message carrying its address did not land. "
+                           "Nothing left this machine, so nobody has been given its address. Close it with `aamio channel close tender`, put right what the error says, and open a new one.")
+    assert "send it as a new message" not in said["fix"]
