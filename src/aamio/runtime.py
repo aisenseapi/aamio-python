@@ -421,13 +421,24 @@ TRACE_RECEIVED_FIELDS = {
     "error": str, "fields": list, "text_chars": int, "re": "hash", "seen": "hash",
 }
 TRACE_READ_FIELDS = {"sha256": "hash", "seq": int, "w": str, "at": int}
+# How many field names a row keeps, and how long a name may be, in characters.
+# The names of a message that arrived are its sender's to choose: one message
+# of the largest size can carry thousands of them, fifty such from one key were
+# megabytes in a file that is written again at every read, and a board inbox
+# takes any signed key (found while the Node runtime's trace was built, 12
+# November 2026). The fields the three runtimes write are a handful of short
+# names, so what is cut is only what was made to be long.
+TRACE_FIELDS = 32
+TRACE_FIELD_CHARS = 64
 
 
 def _trace_value(kind, value):
     if kind == "hash":
         return value if is_message_hash(value) else None
     if kind is list:
-        return sorted(item for item in value if isinstance(item, str)) if isinstance(value, list) else None
+        if not isinstance(value, list):
+            return None
+        return sorted(item for item in value if isinstance(item, str) and len(item) <= TRACE_FIELD_CHARS)[:TRACE_FIELDS]
     # type() rather than isinstance(): True is an int to isinstance.
     return value if type(value) is kind else None
 

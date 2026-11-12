@@ -19,6 +19,10 @@ not what moved in the source.
 - The README says where the promise that a removed scope stays removed ends: an
   invitation taken by 0.6.31 or earlier is not recorded with its scope, and
   `scopes.json` remembers the 256 newest removed invitations.
+- A row of the trace keeps at most 32 field names of a message, each of at most
+  64 characters. The names are the sender's to choose: one message of
+  thousands of them gave a row of 56 KB, and fifty such from one key megabytes,
+  in a file written again at every read.
 
 ## 0.6.32 - 2026-11-11
 

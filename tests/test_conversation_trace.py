@@ -22,6 +22,7 @@ copy while a read records (R4).
 import base64
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -36,7 +37,7 @@ sys.path.insert(0, "tests")
 from aamio import mcp_server
 from aamio.crypto import Keys, thread_signing_input
 from aamio.gate import GateStop
-from aamio.runtime import Runtime, SendFailed
+from aamio.runtime import Runtime, SendFailed, normalize_traces
 
 
 class Service:
@@ -612,3 +613,28 @@ def test_both_come_through_the_mcp_tools():
     assert bad["isError"] is True and "sha256" in bad["structuredContent"]["error"]
     unknown = mcp_server.dispatch(a, "aamio_trace", {"who": "nobody"})
     assert unknown["isError"] is True
+
+
+def test_a_message_made_of_thousands_of_field_names_does_not_make_the_trace_large():
+    # The names of a message's fields are its sender's to choose, and a board inbox takes any signed key. One message
+    # of thousands of names gave a row of 56 KB, fifty of them megabytes, in a file written again at every read
+    # (found while the Node runtime's trace was built, 12 November 2026). The row keeps a bounded few.
+    service, a, b = pair()
+    body = {"text": "ordinary text", "x" * 200: 1}
+    for n in range(2500):
+        body["field%05d" % n] = 1
+    direct(b, a, body)
+    got = read_all(a)
+    assert len(got) == 1 and len(got[0]["body"]) == 2502, "the message itself is handed over whole"
+
+    row = a.trace("b")["received"][0]
+    assert len(row["fields"]) == 32 and all(len(name) <= 64 for name in row["fields"])
+    assert row["text_chars"] == 13, "and what else the row says of it is as before"
+    assert os.path.getsize(os.path.join(a.home, "trace.json")) < 4000, "the file is the size of its rows, not of the message"
+
+    # A file that already holds such a row is cut to the same bound when it is read, and a name is measured in
+    # characters, as the Node runtime and aamio-php measure it.
+    held = {b.keys.public: {"sent": [], "received": [{"sha256": "a" * 64, "fields": sorted(body) + ["ж" * 64, "ж" * 65]}], "last_read": None, "active": 1}}
+    kept = normalize_traces(held, 50, 100)[b.keys.public]["received"][0]["fields"]
+    assert len(kept) == 32
+    assert normalize_traces({b.keys.public: {"sent": [], "received": [{"sha256": "a" * 64, "fields": ["ж" * 64, "ж" * 65, "text"]}], "last_read": None, "active": 1}}, 50, 100)[b.keys.public]["received"][0]["fields"] == ["text", "ж" * 64]
