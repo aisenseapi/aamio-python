@@ -32,6 +32,7 @@ a broken one out again.
 """
 
 import argparse
+import errno
 import importlib
 import json
 import os
@@ -132,9 +133,18 @@ def _write_enabled(given, names):
     """Writes the list, under the lock the caller holds: a file of this process's own first, then one rename."""
     path = enabled_file(given)
     tmp = "%s.%d.tmp" % (path, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump({"enabled": names}, handle, indent=2)
-        handle.write("\n")
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump({"enabled": names}, handle, indent=2)
+            handle.write("\n")
+    except OSError as error:
+        # A full disk, or a home that takes no writes: said as that, with the
+        # list as it was. It was an error out of the core, after the probe had run.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise AddonError("%s could not be written: %s. Nothing changed; check the disk and the home's permissions, and try again." % (path, errno.errorcode.get(error.errno, error.__class__.__name__))) from None
     for attempt in range(20):
         try:
             os.replace(tmp, path)

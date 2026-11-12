@@ -775,6 +775,17 @@ def test_a_card_past_its_time_is_turned_down_and_one_in_time_is_heard():
     assert said["result"]["reason"] == "not_a_wav", "decode reads only a WAV, before the time matters"
 
 
+def test_a_card_whose_time_is_far_ahead_is_heard_on_every_system():
+    # A card takes a time of up to eleven digits. Windows' gmtime refuses one past the year 3000, and the answer
+    # says until when the card is good: the call stopped with an error where it had an answer.
+    far = "aamio:scope/%s?n=rom-42&t=99999999999" % ADDRESS
+    said = run(request("tool", "aamio_addon_earshot_listen"), Aisense(text=far))
+    result = said["result"]
+    assert said["exit_code"] == 0 and result["status"] == "heard" and result["card"]["expires_at"] == 99999999999
+    assert "It is good until 5138-11-16T09:46:39Z." in result["note"]
+    assert process._when(0) == "1970-01-01T00:00:00Z" and process._when(NOW) == "2026-11-08T15:00:00Z" == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW))
+
+
 def test_the_local_engine_through_the_core_needs_no_network(real_addon, tmp_path, capsys):
     home = str(tmp_path / "home")
     out = tmp_path / "card.wav"

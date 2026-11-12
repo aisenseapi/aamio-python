@@ -326,6 +326,17 @@ def test_the_card_has_the_sound_add_ons_time_rules():
 
 # ----------------------------------------------------------------- read
 
+def test_a_card_whose_time_is_far_ahead_is_read_on_every_system(tmp_path):
+    # A card takes a time of up to eleven digits. Windows' gmtime refuses one past the year 3000, and the answer
+    # says until when the card is good: the call stopped with an error where it had an answer.
+    far = "aamio:scope/%s?n=stue-tv&t=99999999999" % ADDRESS
+    said = run(request("command", "read", file=picture(tmp_path)), local=Local(texts=[far]))
+    result = said["result"]
+    assert said["exit_code"] == 0 and result["status"] == "seen" and result["card"]["expires_at"] == 99999999999
+    assert "It is good until 5138-11-16T09:46:39Z." in result["note"]
+    assert process._when(0) == "1970-01-01T00:00:00Z" and process._when(NOW) == "2026-11-08T15:00:00Z" == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW))
+
+
 def test_read_is_done_here_by_default_and_sends_nothing(tmp_path):
     aisense = Aisense()
     local = Local()

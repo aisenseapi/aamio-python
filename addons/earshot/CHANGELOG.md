@@ -4,6 +4,14 @@ aamio-earshot, the add-on, called aamio-sound up to 0.2.0. Dates are the day the
 tagged on release, and the two are the same day. Every entry says what changed
 for somebody using it.
 
+## 0.3.3 - 2026-11-12
+
+- A card whose time is far ahead is heard on Windows. A card takes a time of
+  up to eleven digits, and the answer says until when it is good. Past the
+  year 3000 Windows could not write that date, so `listen`, `decode` and
+  `broadcast` stopped with an error where they had an answer, and anyone
+  within earshot can play such a card.
+
 ## 0.3.2 - 2026-11-09
 
 - When aisenseapi.com answers but cannot do the work, with a 503 or a 429, or

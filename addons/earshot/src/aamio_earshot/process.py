@@ -25,6 +25,7 @@ either.
 """
 
 import base64
+import datetime
 import io
 import json
 import os
@@ -186,7 +187,11 @@ def _local_decode(sound, mode):
 
 
 def _when(seconds):
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+    # From the epoch by hand, and not with time.gmtime: a card takes a time of
+    # up to eleven digits, and on Windows gmtime refuses one past the year
+    # 3000, so a card anyone can put in front of this add-on stopped the call
+    # with an error where it had an answer (a check of 12 November 2026).
+    return (datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=int(seconds))).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _expires(arguments, now):

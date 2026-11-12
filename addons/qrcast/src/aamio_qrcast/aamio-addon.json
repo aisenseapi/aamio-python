@@ -1,7 +1,7 @@
 {
   "aamio_addon": 2,
   "name": "qrcast",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "process": {"python": "aamio_qrcast.process", "php": "process.php"},
   "deadline_seconds": 90,
   "environment": ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"],

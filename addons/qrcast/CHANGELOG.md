@@ -4,6 +4,14 @@ aamio-qrcast, the add-on. Dates are the day the version was committed; it is
 tagged on release, and the two are the same day. Every entry says what changed
 for somebody using it.
 
+## 0.1.2 - 2026-11-12
+
+- A card whose time is far ahead is read on Windows. A card takes a time of
+  up to eleven digits, and the answer says until when it is good. Past the
+  year 3000 Windows could not write that date, so `read`, `scan` and `show`
+  stopped with an error where they had an answer, and anyone can show such a
+  code to the camera.
+
 ## 0.1.1 - 2026-11-09
 
 - When aisenseapi.com answers but cannot do the work, with a 503 or a 429, or

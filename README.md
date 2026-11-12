@@ -287,6 +287,8 @@ The label is what the channel is called here, and the name of its file in the ar
 
 `aamio channel close tender` asks the service to delete the thread, and the channel leaves this home when the service says the thread is gone: deleted now, or not there any more. When the service does not answer, or answers anything else, the thread may still be there, so the channel is kept and still read, and the answer says `closed_here: false` with a note. Close it again, or let it expire.
 
+Closing deletes the thread, not the address. A partner who still holds the address can write to it afterwards: the first write opens a new thread there, with no list and no gate, the writer is answered that it was stored, and nobody reads it, since this home no longer holds the channel. The same holds once a thread has expired and been swept. So tell whoever writes there that the channel is closed.
+
 The address alone is enough for whoever writes to it directly, with a client of their own. It is not enough for a partner's runtime, which sends only to an address it knows the key behind, and learns that from presence, or from `reply_to` or `channel` in a verified message. An address pasted into the text of a message, or put in `data`, binds nothing, and the partner's first send to it stops with "no key known for address".
 
 ## Checking a key against a website

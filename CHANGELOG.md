@@ -57,6 +57,20 @@ not what moved in the source.
   wrote to it wrote where nobody read. The answer has `w`, `closed_here` and,
   when there is something to say, `note`, beside `label`, `status` and
   `deleted`.
+- `aamio_close_channel` and the README say what a close does not do: the
+  address is not closed. Whoever still holds it can write there afterwards,
+  which opens a new thread with no list and no gate that nobody reads, and
+  the writer is answered that it was stored. The tool said the thread was
+  gone for everyone holding its address.
+- An add-on whose own directory cannot be made, with a file in the way of
+  `addons/` in the home or a full disk, is an answer, `addon_failed`, and
+  nothing of the add-on runs. It was a traceback.
+- `addon enable` and `addon disable` say so when `addons.json` cannot be
+  written, and change nothing. A full disk was a traceback, after the probe
+  had run.
+- An add-on's short name cannot be a name Windows keeps for a device, such as
+  `nul`. It names the add-on's list of websites and its own directory in the
+  home, and a list written to `nul.hosts.json` is written nowhere.
 
 ## 0.6.32 - 2026-11-11
 

@@ -335,3 +335,13 @@ def test_a_channel_leaves_the_home_when_the_service_says_its_thread_is_gone_and_
     assert "offer" not in a.channels and other["w"] not in service.threads
     over_mcp = mcp_server.dispatch(a, "aamio_close_channel", {"label": "offer"})
     assert over_mcp["isError"] is True and "no such channel" in over_mcp["structuredContent"]["error"]
+
+
+def test_the_tool_says_what_a_close_does_not_do(world):
+    service, runtime, base = world
+    a, b = partners(runtime)
+    said = next(tool["description"] for tool in mcp_server.TOOLS if tool["name"] == "aamio_close_channel")
+    assert "The address is not closed: whoever still holds it can write there afterwards" in said and "nobody reads it" in said and "gone for everyone" not in said
+    # And a close the service confirms deletes the thread and takes the channel out of the home, as before.
+    opened = a.open_channel("tender", 600, ["b"])
+    assert a.close_channel("tender")["deleted"] is True and opened["w"] not in service.threads and "tender" not in a.channels

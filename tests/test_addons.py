@@ -888,6 +888,57 @@ def test_a_manifest_may_not_ask_for_the_home_or_use_bad_names(process_site, monk
     assert not (tmp_path / "home" / "addons.json").exists()
 
 
+def test_a_short_name_that_is_a_device_s_on_windows_is_refused(process_site, monkeypatch, tmp_path):
+    # The short name is the name of the add-on's list of websites and of its own directory in the home.
+    ran, _ = process_site(name="nul", manifest=manifest_for("nul", "demo2_pkg"))
+    code, _, err = main(["addon", "enable", "nul"], monkeypatch)
+    assert code == 2 and "its manifest's name, nul, is one Windows keeps for a device, and it names the add-on's files in the home" in err
+    assert not (tmp_path / "home" / "addons.json").exists() and not ran.exists(), "nothing was recorded, and nothing of it ran"
+    code, out, _ = main(["addon", "list"], monkeypatch)
+    assert "one Windows keeps for a device" in json.loads(out)["addons"][0]["error"]
+
+
+def test_an_add_on_with_no_directory_of_its_own_is_an_answer(process_site, monkeypatch, tmp_path):
+    ran, _ = process_site()
+    assert main(["addon", "enable", "demo2"], monkeypatch)[0] == 0
+    home = tmp_path / "home"
+    # A file stands where the home keeps what belongs to add-ons.
+    (home / "addons").write_text("in the way", encoding="utf-8")
+    code, out, _ = main(["addon", "demo2", "ping"], monkeypatch)
+    said = json.loads(out)
+    assert code == 5 and (said["status"], said["reason"], said["addon"]) == ("unreachable", "addon_failed", "demo2")
+    assert "the add-on demo2 has no directory of its own: addons/demo2 in the home could not be made (" in said["fix"] and "Nothing of the add-on ran." in said["fix"]
+    assert ran.read_text(encoding="utf-8") == "probe probe\n", "the process was not started"
+    # A command that needs no home needs no directory, and runs.
+    assert main(["addon", "demo2", "local", "somewhere"], monkeypatch)[0] == 0
+    # Over the local server it is the same answer, and the core's own tools answer after it.
+    runtime = Runtime(home=str(home), host="https://fake.test", archive=False)
+    try:
+        answer = mcp_server.dispatch(runtime, "aamio_addon_demo2_ping", {})
+        assert answer["isError"] is True and answer["structuredContent"]["reason"] == "addon_failed"
+        assert mcp_server.dispatch(runtime, "aamio_whoami", {})["isError"] is False
+    finally:
+        runtime.close()
+
+
+def test_a_list_that_cannot_be_written_says_so_and_changes_nothing(process_site, monkeypatch, tmp_path):
+    ran, _ = process_site()
+    real = open
+
+    def no_room(path, mode="r", *rest, **more):
+        if "w" in mode and str(path).endswith(".tmp"):
+            raise OSError(28, "No space left on device")
+        return real(path, mode, *rest, **more)
+
+    monkeypatch.setattr(addons, "open", no_room, raising=False)
+    code, out, err = main(["addon", "enable", "demo2"], monkeypatch)
+    assert code == 2 and out == "" and "addons.json could not be written: ENOSPC. Nothing changed; check the disk and the home's permissions, and try again." in err
+    assert not (tmp_path / "home" / "addons.json").exists(), "nothing was recorded"
+    assert ran.read_text(encoding="utf-8") == "probe probe\n", "though the probe had answered"
+    monkeypatch.delattr(addons, "open")
+    assert main(["addon", "enable", "demo2"], monkeypatch)[0] == 0 and enabled_in(tmp_path) == {"enabled": ["demo2-pkg"]}
+
+
 def test_listing_a_nested_entry_point_imports_nothing(process_site, monkeypatch, tmp_path):
     ran, imported = process_site(entry="demo2_pkg.sub")
     code, out, _ = main(["addon", "list"], monkeypatch)

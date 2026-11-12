@@ -24,6 +24,7 @@ docs/aamio-tillegg-kontrakt-2-2026-11-08.md and on https://aamio.at/docs/addons.
 import argparse
 import base64
 import collections
+import errno
 import importlib.util
 import ipaddress
 import json
@@ -76,6 +77,9 @@ ENVIRONMENT = (
 )
 
 _NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+# Names Windows takes for a device. An add-on's short name is the name of its
+# list of websites and of its own directory in the home.
+_DEVICE = re.compile(r"(?:con|prn|aux|nul|com[0-9]|lpt[0-9])")
 _COMMAND = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _POSITIONAL = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 _OPTION = re.compile(r"--[a-z][a-z0-9-]{0,31}")
@@ -209,6 +213,9 @@ class Manifest:
             self._wrong("its manifest has no name of 1 to 32 characters of a-z, 0-9, dash and underscore")
         if self.NAME in RESERVED:
             raise AddonError("%s cannot be called %s: that is a command of aamio addon itself. To go on without it: %s." % (self.module, self.NAME, self.fix))
+        # On Windows a file of that name is the device: a list of websites written to nul.hosts.json is written nowhere.
+        if _DEVICE.fullmatch(self.NAME) is not None:
+            self._wrong("its manifest's name, %s, is one Windows keeps for a device, and it names the add-on's files in the home" % self.NAME)
         if not isinstance(self.__version__, str) or not self.__version__:
             self._wrong("its manifest has no version")
         if not isinstance(self.process_module, str) or _MODULE.fullmatch(self.process_module) is None:
@@ -682,6 +689,21 @@ def state_dir(runtime, manifest):
     return path
 
 
+def _own_directory(runtime, manifest):
+    """The add-on's own directory for this call, or the answer that says it could not be made.
+
+    A home whose disk is full, or with a file in the way of addons/, stops the
+    call before the process starts, as an answer like any other. It was an
+    error out of the core: a traceback on the command line (a check of 12
+    November 2026, found while the Node runtime's add-ons were built).
+    """
+    try:
+        return state_dir(runtime, manifest), None
+    except OSError as error:
+        why = errno.errorcode.get(error.errno, error.__class__.__name__)
+        return None, _failure(manifest, "addon_failed", "the add-on %s has no directory of its own: addons/%s in the home could not be made (%s). Nothing of the add-on ran. Check the disk and the home's permissions." % (manifest.NAME, manifest.NAME, why))
+
+
 # ------------------------------------------------------------- the command line
 
 def add_commands(manifest, parser):
@@ -756,13 +778,17 @@ def _run_command(manifest, name, spec, args, runtime):
     except Refused as refused:
         out(refusal(refused, host=host, **(_subject_fields(subject) if subject else {})))
         return 2
+    directory, no_directory = _own_directory(runtime, manifest) if runtime is not None else (None, None)
+    if no_directory is not None:
+        out(no_directory["result"])
+        return no_directory["exit_code"]
     limits = limits_of(manifest.NAME)
     busy = limits.take()
     if busy is not None:
         out(refusal(Refused(busy, "At most %d calls of the add-on %s run at once and %d start per minute here. Nothing was done. Try again shortly." % (MAX_AT_ONCE, manifest.NAME, MAX_PER_WINDOW), status="unreachable"), host=host))
         return 5
     try:
-        answer = run(manifest, "command", name, arguments, subject, own_key, state_dir(runtime, manifest) if runtime is not None else None, stderr=lambda text: (sys.stderr.write(text), sys.stderr.flush()))
+        answer = run(manifest, "command", name, arguments, subject, own_key, directory, stderr=lambda text: (sys.stderr.write(text), sys.stderr.flush()))
     finally:
         limits.give_back()
     if "raw" in answer:
@@ -839,12 +865,15 @@ def dispatch(manifest, runtime, name, arguments, ask):
                 return result_of(answer, "fix" in answer)
     except Refused as refused:
         return result_of(refusal(refused, host=host, **(_subject_fields(subject) if subject else {})), True)
+    directory, no_directory = _own_directory(runtime, manifest)
+    if no_directory is not None:
+        return result_of(no_directory["result"], True)
     limits = limits_of(manifest.NAME)
     busy = limits.take()
     if busy is not None:
         return result_of(refusal(Refused(busy, "At most %d calls of the add-on %s run at once and %d start per minute here. Nothing was done. Try again shortly." % (MAX_AT_ONCE, manifest.NAME, MAX_PER_WINDOW), status="unreachable"), host=host), True)
     try:
-        answer = run(manifest, "tool", name, arguments, subject, own_key, state_dir(runtime, manifest))
+        answer = run(manifest, "tool", name, arguments, subject, own_key, directory)
     finally:
         limits.give_back()
     if "raw" in answer:
