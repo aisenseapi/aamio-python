@@ -21,6 +21,7 @@ import time
 from . import __version__, addons
 from .crypto import is_key
 from .gate import GateStop
+from .errors import code_of
 from .runtime import Runtime, SendFailed, send_advice, outbox_outcome, OUTBOX_NOTES, BOARD_TTL, SEND_TRY_LATER, check_gate, handover_unsettled
 
 SUPPORTED = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"]
@@ -551,6 +552,7 @@ def dispatch(runtime: Runtime, name: str, arguments: dict, ask=None):
                 except ValueError as wrong:
                     return result_of({
                         "error": str(wrong),
+                        "error_code": code_of(wrong),
                         "fix": "Send a gate with require, advise or both, as in {\"require\": {\"pow\": {\"bits\": 20}, \"per_key\": 5}}, or leave gate out to take writes from anyone on the allowlist.",
                         "given": arguments.get("gate"),
                     }, is_error=True)
@@ -677,7 +679,9 @@ def dispatch(runtime: Runtime, name: str, arguments: dict, ask=None):
             "fix": still_open(opened) + ("Nothing was sent, so nobody has been given its address: close it with aamio_close_channel, and open a new one when the inbox's conditions can be met. " if opened else "") + error.fix,
         }, True)
     except (ValueError, LookupError, RuntimeError) as error:
-        return result_of({"error": str(error)}, True)
+        # With the code the other two runtimes give the same failure, as the
+        # command line says it (a check of 13 November 2026).
+        return result_of({"error": str(error), "error_code": code_of(error)}, True)
     except OSError as error:
         # A file that would not read or write. This call's failure, and the
         # server stays up for the next one. It was answered as a wrong argument,
@@ -918,7 +922,13 @@ def serve(runtime: Runtime):
     # to the background rather than into a call that times out with nobody
     # knowing whether the message went.
     runtime.work_budget = 40
-    runtime.start()
+    # Without the service the server starts all the same, as the Node
+    # runtime's does, and the listener tries again. It stopped here, and a
+    # host that started it while the network was down showed a server that
+    # had failed (a check of 13 November 2026). Asked only of a start that
+    # takes it, so a runtime someone wrapped keeps the signature it had.
+    takes = inspect.signature(runtime.start).parameters
+    runtime.start(**({"require_inbox": False} if "require_inbox" in takes else {}))
     runtime.log("serving on stdio, inbox %s" % runtime.whoami()["inbox"])
     # One process serves one client, so what initialize settles holds for
     # every line after it.

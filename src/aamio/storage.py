@@ -23,6 +23,8 @@ import tempfile
 import sys
 import time
 
+from .errors import CodedValueError
+
 # How a file of the home is read: UTF-8, past a byte order mark at its start.
 # An editor on Windows may leave one in front of a file that is whole
 # otherwise. This runtime stopped on such a file where it had to have it, and
@@ -492,11 +494,11 @@ def parse_policy(text, max_mb=None):
     elif text.startswith("days:") and text[5:].isdigit() and int(text[5:]) > 0:
         policy.update(mode="days", days=int(text[5:]))
     else:
-        raise ValueError("the archive is keep, off or days:N with N a whole number of days, not %r" % text)
+        raise CodedValueError("invalid_archive", "the archive is keep, off or days:N with N a whole number of days, not %r" % text)
 
     if max_mb is not None:
         if max_mb <= 0:
-            raise ValueError("--max-mb is a size above zero")
+            raise CodedValueError("invalid_archive", "--max-mb is a size above zero")
 
         policy["max_mb"] = max_mb
 

@@ -77,10 +77,28 @@ not what moved in the source.
 - `doctor` and `init` ask whoami, icacls and PowerShell by their place in
   System32. In Git Bash another whoami.exe came first on the path, and the
   second way of reading who can read the home read nothing.
-- `serve` that cannot start, as with no service to open its inbox at, says why
-  on standard error, where the host keeps its log. It wrote it as JSON on
-  standard output, which is the protocol's alone, and the host read a line it
-  could not take as a message. Every other command answers so, as before.
+- `serve` starts when the service cannot be reached, as the Node runtime's
+  server does: the listener tries again every two seconds, and a call that
+  needs the inbox says why it could not have it. It stopped, and wrote the
+  reason as JSON on standard output, which is the protocol's alone, so the host
+  read a line it could not take as a message and showed a server that had
+  failed. What it says about the inbox goes to standard error.
+- `error_code` is the code the three runtimes share, as `unknown_channel` or
+  `invalid_key`, on the command line and over MCP, where a failed call had
+  none. It was the name of a Python class. An error without a shared code is
+  still said by its class.
+- What can be seen to be wrong from the command line alone is refused before
+  the home is opened or made, on standard error with 2, as in the other two
+  runtimes: a number outside its bounds, `--data` or `--gate` that is not JSON
+  (`NaN` and `Infinity` are not), and a label, scope name, lifetime or archive
+  choice that cannot be. They went to the service or into the home first, and
+  came back with 1. A partner's name or key and `--re` are the command's
+  answer, as JSON with 1, and no home is made for them either.
+- A partner's name is 1 to 64 characters with no control characters, as in the
+  other two. Any name was taken, and one with a line break in it went into
+  partners.json and into every list that showed it.
+- A channel's lifetime is checked here, 30 to 3600 seconds, before the service
+  is asked, by `channel open`, `board channel` and over MCP.
 - A message body with `NaN`, `Infinity` or `-Infinity` is read as text, as
   the Node runtime and aamio-php read it. They are not JSON: the body was JSON
   here and text there, and an answer that carried it on was no JSON.

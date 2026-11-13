@@ -25,6 +25,7 @@ import time
 from . import storage
 from .client import AamioClient, DEFAULT_HOST, is_scope_address, is_scope_key, make_scope_key, normalize_allow, scope_address
 from .gate import GateStop, board_advised_bits, describe as describe_seconds, plan as gate_plan, solve as gate_solve, solve_board
+from .errors import CodedLookupError, CodedRuntimeError, CodedValueError
 from .crypto import Keys, board_delete_signing_input, board_signing_input, check_message, is_envelope, is_key, key_hash, presence_signing_input, sha256hex, thread_signing_input, unb64url
 
 INBOX_TTL = 3600
@@ -392,6 +393,63 @@ class WorkDropped(RuntimeError):
     """
 
 
+def _board_code(status):
+    """board_unreachable when nothing answered, board_failed when the board said no, as the Node runtime names them."""
+    return "board_failed" if status else "board_unreachable"
+
+
+# A partner's name, as the Node runtime takes it: 1 to 64 characters, none of
+# them a control character. This one took any name, and a name with a line
+# break in it went into partners.json and into every list that showed it.
+PARTNER_NAME = re.compile(r"[^\x00-\x1f\x7f]{1,64}")
+
+CHANNEL_TTL_MIN = 30
+CHANNEL_TTL_MAX = 3600
+
+
+def check_partner(name, key):
+    """A partner's name and key as the three runtimes take them, before anything is opened or written."""
+    if not isinstance(name, str) or PARTNER_NAME.fullmatch(name) is None:
+        raise CodedValueError("invalid_name", "A partner's name is 1 to 64 characters, with no control characters.")
+    if not is_key(key):
+        raise CodedValueError("invalid_key", "not a base64url Ed25519 public key of 32 bytes")
+
+
+def check_channel_ttl(ttl):
+    """A channel's lifetime as the service takes it, checked here as in the Node runtime: a whole number of seconds from 30 to 3600.
+
+    600.0 is a whole number, as JSON and the Node runtime have it.
+    """
+    whole = (isinstance(ttl, int) and not isinstance(ttl, bool)) or (isinstance(ttl, float) and ttl.is_integer())
+    if not whole or not CHANNEL_TTL_MIN <= ttl <= CHANNEL_TTL_MAX:
+        raise CodedValueError("invalid_ttl", "a channel lives a whole number of seconds from %d to %d" % (CHANNEL_TTL_MIN, CHANNEL_TTL_MAX))
+
+
+def check_re(answers):
+    """re as send takes it: the sha256 of the message it answers, or nothing."""
+    if answers is not None and not is_message_hash(answers):
+        raise CodedValueError("invalid_re", "re is the sha256 of the message this answers: 64 lowercase hex characters, as read shows it")
+
+
+def check_scope_name(name):
+    """A scope's name as scope new, key, share and remove take it."""
+    if not isinstance(name, str) or Runtime.SCOPE_NAME.fullmatch(name) is None:
+        raise CodedValueError("invalid_scope", "a scope name is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit")
+
+
+def check_scope_add(name, key=None, address=None):
+    """What scope add was given, as far as it can be judged without the home: a name, and a key or an address that fit each other."""
+    check_scope_name(name)
+    if key is None and address is None:
+        raise CodedValueError("invalid_scope", "give the key, to read and post, or the address, to post only")
+    if key is not None and not is_scope_key(key):
+        raise CodedValueError("invalid_scope", "a scope key is 26 to 64 characters of a-z and 0-9. The 20 character address goes in address")
+    if address is not None and not is_scope_address(address):
+        raise CodedValueError("invalid_scope", "a scope address is the 20 characters of a-z and 2-7 that go on a post")
+    if key is not None and address is not None and scope_address(key) != address:
+        raise CodedValueError("invalid_scope", "that key does not give that address, so one of the two is wrong")
+
+
 def check_gate(gate):
     """The shape of a gate, refused here rather than a round trip later.
 
@@ -409,19 +467,19 @@ def check_gate(gate):
              'write that does not meet it; advise lets the write in and reports on it.')
 
     if not isinstance(gate, dict):
-        raise ValueError("a gate must be an object, not %s. %s" % (type(gate).__name__, shape))
+        raise CodedValueError("invalid_gate", "a gate must be an object, not %s. %s" % (type(gate).__name__, shape))
 
     unknown = [key for key in gate if key not in ("require", "advise")]
 
     if unknown:
-        raise ValueError("a gate has no field %s. %s" % (", ".join(sorted(unknown)), shape))
+        raise CodedValueError("invalid_gate", "a gate has no field %s. %s" % (", ".join(sorted(unknown)), shape))
 
     if not gate:
-        raise ValueError("an empty gate asks for nothing; leave the gate out instead. %s" % shape)
+        raise CodedValueError("invalid_gate", "an empty gate asks for nothing; leave the gate out instead. %s" % shape)
 
     for key in ("require", "advise"):
         if key in gate and not isinstance(gate[key], dict):
-            raise ValueError("gate.%s must be an object. %s" % (key, shape))
+            raise CodedValueError("invalid_gate", "gate.%s must be an object. %s" % (key, shape))
 
     return gate
 
@@ -437,9 +495,9 @@ def check_label(label):
     aamio-php's.
     """
     if not storage.is_safe_label(label):
-        raise ValueError("a channel's label is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit, and not a name the system keeps for a device: it names the channel's file in the archive")
+        raise CodedValueError("invalid_label", "a channel's label is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit, and not a name the system keeps for a device: it names the channel's file in the archive")
     if re.match(r"(?:inbox|board)", label, re.IGNORECASE):
-        raise ValueError("the label %s is the runtime's own: a label that starts with inbox or board names an inbox or a board inbox. Choose another" % label)
+        raise CodedValueError("invalid_label", "the label %s is the runtime's own: a label that starts with inbox or board names an inbox or a board inbox. Choose another" % label)
 
 
 def is_message_hash(value):
@@ -640,6 +698,8 @@ class AmbiguousPartner(ValueError):
     else (finding 1 of the review of 9 November 2026, found in the Node runtime
     first). Two such partners is an error now, never a guess.
     """
+
+    error_code = "ambiguous_partner"
 
 
 def _which_thread(thread):
@@ -1077,7 +1137,7 @@ class Runtime:
         real = os.path.realpath(self.home)
 
         if real in _LOCKED_HOMES:
-            raise RuntimeError("another aamio in this process is already using %s" % self.home)
+            raise CodedRuntimeError("home_in_use", "another aamio in this process is already using %s" % self.home)
 
         self._owner_fd = None
 
@@ -1089,7 +1149,7 @@ class Runtime:
             # two runtimes started at once could both take, and said so only
             # to a logger that does nothing unless the caller sets one (a
             # review, 30 September 2026).
-            raise RuntimeError(
+            raise CodedRuntimeError("lock_unavailable",
                 "cannot establish exclusive ownership of %s: %s could not be opened or locked (%s). Restore file access or "
                 "locking support, or use a different AAMIO_HOME on a local disk." % (self.home, self._path(OWNER_LOCK), error)
             ) from error
@@ -1099,7 +1159,7 @@ class Runtime:
             # The owner writes its pid just after it takes the lock, so a
             # moment may pass with none, or an old one, there to name.
             named = " (pid %s)" % held["pid"] if isinstance(held, dict) and isinstance(held.get("pid"), int) else ""
-            raise RuntimeError("another aamio%s is using %s. Stop it, or use a different AAMIO_HOME." % (named, self.home))
+            raise CodedRuntimeError("home_in_use", "another aamio%s is using %s. Stop it, or use a different AAMIO_HOME." % (named, self.home))
 
         try:
             self._check_older_owner()
@@ -1139,7 +1199,7 @@ class Runtime:
         if alive is None:
             # Not known to be gone is not gone: taking the lock here would
             # let two runtimes write one home.
-            raise RuntimeError(
+            raise CodedRuntimeError("home_in_use",
                 "could not determine whether aamio (pid %s) is still using %s; the lock is left untouched. Process inspection was "
                 "unavailable or inconclusive. Stop the other runtime or restore process inspection, or use a different AAMIO_HOME. "
                 "Do not remove the lock unless you have independently confirmed its owner has stopped." % (held["pid"], self.home)
@@ -1153,7 +1213,7 @@ class Runtime:
                 alive = False
 
         if alive:
-            raise RuntimeError(
+            raise CodedRuntimeError("home_in_use",
                 "another aamio (pid %s) is using %s. Stop it, or use a different AAMIO_HOME. If no aamio is running, "
                 "the one that took the lock stopped without letting go of it: delete %s and start again." % (held["pid"], self.home, self._path("lock"))
             )
@@ -1200,9 +1260,9 @@ class Runtime:
             if name not in self.KEPT_FILES:
                 return default
             why = "not UTF-8 JSON" if isinstance(error, ValueError) else error.__class__.__name__
-            raise RuntimeError(self._unreadable(name, why)) from None
+            raise CodedRuntimeError("state_unreadable", self._unreadable(name, why)) from None
         if name in self.KEPT_FILES and not isinstance(value, type(default)):
-            raise RuntimeError(self._unreadable(name, "not a JSON %s" % ("list" if isinstance(default, list) else "object")))
+            raise CodedRuntimeError("state_unreadable", self._unreadable(name, "not a JSON %s" % ("list" if isinstance(default, list) else "object")))
         return value
 
     def _unreadable(self, name, why):
@@ -1246,12 +1306,12 @@ class Runtime:
         except FileNotFoundError:
             text = ""
         except (OSError, ValueError) as error:
-            raise RuntimeError(self._unreadable("key", error.__class__.__name__)) from None
+            raise CodedRuntimeError("key_unreadable", self._unreadable("key", error.__class__.__name__)) from None
         if text:
             # A new key over it would be a new identity, and the old one gone
             # for good. Partners know this runtime by that key.
             if re.fullmatch(r"[0-9a-f]{64}", text) is None:
-                raise RuntimeError(self._unreadable("key", "not a 64 character hex seed"))
+                raise CodedRuntimeError("key_unreadable", self._unreadable("key", "not a 64 character hex seed"))
             return Keys(bytes.fromhex(text))
         keys = Keys.generate()
         with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as handle:
@@ -1330,8 +1390,7 @@ class Runtime:
         an inbox that does not name the key is replaced by one that does, and
         the answer says which address the partner can write to.
         """
-        if not is_key(key):
-            raise ValueError("not a base64url Ed25519 public key of 32 bytes")
+        check_partner(name, key)
         near = [p for p in self.partners if p["name"] != name and p["name"].lower() == str(name).lower() and p["key"] != key]
         if near:
             raise AmbiguousPartner(
@@ -1378,7 +1437,7 @@ class Runtime:
         try:
             self._save_json("partners.json", partners)
         except OSError as error:
-            raise RuntimeError("partners.json could not be written (%s), so the address book is as it was. Free the disk, or give this user write access to %s, then do it again."
+            raise CodedRuntimeError("not_saved", "partners.json could not be written (%s), so the address book is as it was. Free the disk, or give this user write access to %s, then do it again."
                                % (errno.errorcode.get(error.errno, error.__class__.__name__), self.home)) from None
         # Under the lock a read holds while it judges a message by the book, so
         # a message being applied as the partner goes sees one book or the other.
@@ -1533,7 +1592,7 @@ class Runtime:
     def _scope_named(self, name):
         entry = self._scope(name)
         if entry is None:
-            raise LookupError("no scope called %s here. The scope list shows the ones this runtime holds" % name)
+            raise CodedLookupError("unknown_scope", "no scope called %s here. The scope list shows the ones this runtime holds" % name)
         return entry
 
     @staticmethod
@@ -1542,14 +1601,14 @@ class Runtime:
 
     def _scope_name_ok(self, name):
         if not isinstance(name, str) or self.SCOPE_NAME.fullmatch(name) is None:
-            raise ValueError("a scope name is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit")
+            raise CodedValueError("invalid_scope", "a scope name is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit")
 
     def scope_new(self, name):
         """A new scope, its key from the system's secure generator. The key stays here."""
         self._scope_name_ok(name)
         with self.lock:
             if self._scope(name) is not None:
-                raise ValueError("there is a scope called %s already" % name)
+                raise CodedValueError("scope_exists", "there is a scope called %s already" % name)
             key = make_scope_key()
             entry = {"name": name, "key": key, "address": scope_address(key)}
             self._save_scopes(self.scopes + [entry])
@@ -1567,18 +1626,18 @@ class Runtime:
         """What scope_add would hold and the list it would keep, or None when nothing changes. Nothing is kept here."""
         self._scope_name_ok(name)
         if key is None and address is None:
-            raise ValueError("give the key, to read and post, or the address, to post only")
+            raise CodedValueError("invalid_scope", "give the key, to read and post, or the address, to post only")
         if key is not None and not is_scope_key(key):
-            raise ValueError("a scope key is 26 to 64 characters of a-z and 0-9. The 20 character address goes in address")
+            raise CodedValueError("invalid_scope", "a scope key is 26 to 64 characters of a-z and 0-9. The 20 character address goes in address")
         if address is not None and not is_scope_address(address):
-            raise ValueError("a scope address is the 20 characters of a-z and 2-7 that go on a post")
+            raise CodedValueError("invalid_scope", "a scope address is the 20 characters of a-z and 2-7 that go on a post")
         derived = scope_address(key) if key is not None else address
         if address is not None and derived != address:
-            raise ValueError("that key does not give that address, so one of the two is wrong")
+            raise CodedValueError("invalid_scope", "that key does not give that address, so one of the two is wrong")
         with self.lock:
             named = self._scope(name)
             if named is not None and named["address"] != derived:
-                raise ValueError("there is a scope called %s already, with another address. Remove it or choose another name" % name)
+                raise CodedValueError("scope_exists", "there is a scope called %s already, with another address. Remove it or choose another name" % name)
             held = named or next((s for s in self.scopes if s["address"] == derived), None)
             if held is None:
                 held = {"name": name, "key": key, "address": derived}
@@ -1618,7 +1677,7 @@ class Runtime:
         """The key itself, for a person to pass on by hand. The MCP server never calls this."""
         entry = self._scope_named(name)
         if not entry.get("key"):
-            raise ValueError("scope %s is held to post only, so there is no key here" % entry["name"])
+            raise CodedValueError("scope_write_only", "scope %s is held to post only, so there is no key here" % entry["name"])
         return {"name": entry["name"], "key": entry["key"], "address": entry["address"]}
 
     def scope_share(self, name, to, access):
@@ -1631,12 +1690,12 @@ class Runtime:
         """
         entry = self._scope_named(name)
         if access not in ("read", "write"):
-            raise ValueError("access is read, which gives the key to read and post, or write, which gives the address to post only")
+            raise CodedValueError("invalid_access", "access is read, which gives the key to read and post, or write, which gives the address to post only")
         if access == "read" and not entry.get("key"):
-            raise ValueError("scope %s is held to post only, so it can only be shared with access write" % entry["name"])
+            raise CodedValueError("scope_write_only", "scope %s is held to post only, so it can only be shared with access write" % entry["name"])
         partner = self.partner_by_key(to) if is_key(str(to)) else self.partner_by_name(to)
         if partner is None:
-            raise ValueError("a scope is shared only with a partner in your address book, by name. Never with an address, which can be anyone's")
+            raise CodedValueError("unknown_partner", "a scope is shared only with a partner in your address book, by name. Never with an address, which can be anyone's")
         share = {"name": entry["name"], "key": entry["key"]} if access == "read" else {"name": entry["name"], "address": entry["address"]}
         w, key = self.address_for(partner["name"])
         # The archive keeps what was shared and with whom, never the key.
@@ -1915,7 +1974,7 @@ class Runtime:
         if outcome["rotated"]:
             return self.channels["inbox"]
         if inbox is None or inbox.gone or inbox.expire_at <= time.time():
-            raise RuntimeError("could not open inbox: %s" % outcome["error"])
+            raise CodedRuntimeError("inbox_unavailable", "could not open inbox: %s" % outcome["error"])
         # The old one still holds; it is read on, and attention says why.
         return inbox
 
@@ -1966,17 +2025,18 @@ class Runtime:
         data binds nothing. Until 30 September 2026 only the command line could
         hand an address over, with aamio board channel.
         """
+        check_channel_ttl(ttl)
         check_label(label)
         taken = self._channel_called(label)
         if taken is not None:
-            raise ValueError("there is a channel called %s already. Close it or choose another label" % taken.label)
+            raise CodedValueError("channel_exists", "there is a channel called %s already. Close it or choose another label" % taken.label)
         if note is not None and to is None:
-            raise ValueError("note travels with the address to whoever to names, so without to there is nothing to carry it")
+            raise CodedValueError("invalid_note", "note travels with the address to whoever to names, so without to there is nothing to carry it")
         keys = []
         for name in allow_names or []:
             partner = self.partner_by_name(name)
             if partner is None:
-                raise ValueError("unknown partner: " + str(name))
+                raise CodedValueError("unknown_partner", "unknown partner: " + str(name))
             keys.append(partner["key"])
 
         if gate is not None:
@@ -1998,7 +2058,7 @@ class Runtime:
 
         status, data, read_key, w = self.client.open_thread(int(ttl), keys or None, gate)
         if status != 201:
-            raise RuntimeError("could not open channel: %s %s" % (status, data))
+            raise CodedRuntimeError("channel_unavailable", "could not open channel: %s %s" % (status, data))
         channel = Channel(label, read_key, w, data["expire_at"], keys)
         with self.lock:
             self.channels[label] = channel
@@ -2071,7 +2131,7 @@ class Runtime:
         size = len(self.keys.seal(key, json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).encode("utf-8"))
 
         if size > MESSAGE_MAX_BYTES:
-            raise ValueError(
+            raise CodedValueError("too_large",
                 "with this note the message carrying the address would be %d bytes, and a message is at most %d, so no channel was opened. "
                 "Shorten the note, and send the rest on the channel once it is open." % (size, MESSAGE_MAX_BYTES)
             )
@@ -2135,7 +2195,7 @@ class Runtime:
         """
         channel = self.channels.get(label)
         if channel is None:
-            raise ValueError("no such channel: " + label)
+            raise CodedValueError("unknown_channel", "no such channel: " + label)
         status, data = self.client.delete(channel.w, channel.read_key)
         if status not in (200, 404, 410):
             return {
@@ -2150,7 +2210,7 @@ class Runtime:
         except OSError as error:
             with self.lock:
                 self.channels[label] = channel
-            raise RuntimeError(
+            raise CodedRuntimeError("not_saved",
                 "%s, and state.json could not be written (%s), so this home still lists %s. Close it again once the disk takes writes."
                 % ("the thread is deleted at the service" if status == 200 else "there is no thread at the service any more", errno.errorcode.get(error.errno, error.__class__.__name__), label)
             ) from None
@@ -2182,7 +2242,7 @@ class Runtime:
         ttl = min(INBOX_TTL, max(int(seconds) + 60, 900))
         status, data, read_key, w = self.client.open_thread(ttl, ["*"])
         if status != 201:
-            raise RuntimeError("could not open the board inbox: %s %s" % (status, data))
+            raise CodedRuntimeError("board_inbox_unavailable", "could not open the board inbox: %s %s" % (status, data))
         channel = Channel("board", read_key, w, data["expire_at"], ["*"])
         with self.lock:
             before = dict(self.channels)
@@ -2198,7 +2258,7 @@ class Runtime:
                 self.channels = before
                 if held is not None:
                     held.label = label
-            raise RuntimeError("the board inbox could not be written down (%s), so nothing was posted or sent: an answer would come where this home cannot read after a restart" % errno.errorcode.get(error.errno, error.__class__.__name__)) from None
+            raise CodedRuntimeError("not_saved", "the board inbox could not be written down (%s), so nothing was posted or sent: an answer would come where this home cannot read after a restart" % errno.errorcode.get(error.errno, error.__class__.__name__)) from None
         self.log("board inbox %s until %d (any key, signed only)" % (w, channel.expire_at))
         if self.listener is not None:
             self._start_poller(channel)
@@ -2241,7 +2301,7 @@ class Runtime:
         work = solve_board(self.keys.public, body, bits) if bits else None
         status, data = self.client.board_post(body, self.keys.public, self.keys.sign(board_signing_input(self.keys.public, body)), work)
         if status not in (200, 201):
-            raise RuntimeError("board post failed: %s %s" % (status, data))
+            raise CodedRuntimeError(_board_code(status), "board post failed: %s %s" % (status, data))
         archive_error = self._archive_done("board", {"kind": "posted", "at": time.time(), "post": data}, "the post %s" % (data.get("id") if isinstance(data, dict) else ""))
         # Where the answers go, and how to read them, in the answer itself. An
         # agent took board replies for the whole inbox, got nothing back, and
@@ -2280,7 +2340,7 @@ class Runtime:
         """
         held = self._scope_named(scope) if scope is not None else None
         if held is not None and not held.get("key"):
-            raise ValueError("scope %s is held to post only. Reading it takes the key, which a partner can share with access read" % held["name"])
+            raise CodedValueError("scope_write_only", "scope %s is held to post only. Reading it takes the key, which a partner can share with access read" % held["name"])
         body = {"after": int(after)}
         if kind:
             body["kind"] = kind
@@ -2300,11 +2360,11 @@ class Runtime:
             body["scope_key"] = held["key"]
         status, data = self.client.board_find(body, int(wait or 0))
         if status != 200:
-            raise RuntimeError("board find failed: %s %s" % (status, data))
+            raise CodedRuntimeError(_board_code(status), "board find failed: %s %s" % (status, data))
         if held is not None:
             # The answer names the scope it read. Without that it did not read this one.
             if data.get("scope") != held["address"]:
-                raise RuntimeError("the board did not say it read scope %s, so these posts are not shown" % held["name"])
+                raise CodedRuntimeError("board_failed", "the board did not say it read scope %s, so these posts are not shown" % held["name"])
             data["scope_name"] = held["name"]
         for post in data.get("posts", []):
             if post.get("w") and post.get("key"):
@@ -2325,19 +2385,19 @@ class Runtime:
             return data
         if status in (404, 410):
             return None
-        raise RuntimeError("the board answered %s for post %s, so whether that post is live is unknown. Ask again rather than treating it as gone" % (status, post_id))
+        raise CodedRuntimeError("board_failed", "the board answered %s for post %s, so whether that post is live is unknown. Ask again rather than treating it as gone" % (status, post_id))
 
     def board_tags(self):
         status, data = self.client.board_tags()
         if status != 200:
-            raise RuntimeError("board tags failed: %s %s" % (status, data))
+            raise CodedRuntimeError(_board_code(status), "board tags failed: %s %s" % (status, data))
         return data
 
     def board_withdraw(self, post_id):
         body = json.dumps({"at": int(time.time())}, separators=(",", ":"))
         status, data = self.client.board_withdraw(post_id, body, self.keys.sign(board_delete_signing_input(post_id, body)))
         if status != 200:
-            raise RuntimeError("withdraw failed: %s %s" % (status, data))
+            raise CodedRuntimeError(_board_code(status), "withdraw failed: %s %s" % (status, data))
         archive_error = self._archive_done("board", {"kind": "withdrawn", "at": time.time(), "id": post_id}, "the withdrawal of post %s" % post_id)
         return dict(data, archive_error=archive_error) if archive_error is not None and isinstance(data, dict) else data
 
@@ -2361,7 +2421,7 @@ class Runtime:
                     break
                 after = int(page["next"])
             if post is None:
-                raise LookupError("no live post with that id" + (" in scope %s" % scope if scope is not None else ". A post in a scope is found with the scope's name"))
+                raise CodedLookupError("unknown_post", "no live post with that id" + (" in scope %s" % scope if scope is not None else ". A post in a scope is found with the scope's name"))
         # The address on this answer has to outlive the post it answers.
         #
         # It did not. ensure_board_inbox() defaults to 900, which opens a
@@ -2671,10 +2731,11 @@ class Runtime:
         This is how a conversation leaves the open board inbox: one answer
         there, then everything else in a thread nobody else can write to.
         """
+        check_channel_ttl(ttl)
         if not is_key(str(key)):
             partner = self.partner_by_name(str(key))
             if partner is None:
-                raise ValueError("not a key and not a known partner: " + str(key))
+                raise CodedValueError("unknown_partner", "not a key and not a known partner: " + str(key))
             key = partner["key"]
         if label:
             # A label the caller chose is a file's name too, as in open_channel.
@@ -2693,7 +2754,7 @@ class Runtime:
             self._handover_fits(key, int(ttl), note)
         status, data, read_key, w = self.client.open_thread(int(ttl), [key])
         if status != 201:
-            raise RuntimeError("could not open channel: %s %s" % (status, data))
+            raise CodedRuntimeError("channel_unavailable", "could not open channel: %s %s" % (status, data))
         channel = Channel(label, read_key, w, data["expire_at"], [key])
         with self.lock:
             self.channels[label] = channel
@@ -2762,12 +2823,12 @@ class Runtime:
         """
         partner = name if isinstance(name, dict) else self.partner_by_name(name)
         if partner is None:
-            raise ValueError("unknown partner: " + str(name))
+            raise CodedValueError("unknown_partner", "unknown partner: " + str(name))
         result = self.lookup([partner["name"]])
         for entry in result["online"]:
             if entry["name"] == partner["name"]:
                 return entry["w"], partner["key"]
-        raise LookupError("%s is not online right now" % partner["name"])
+        raise CodedLookupError("partner_offline", "%s is not online right now" % partner["name"])
 
     # ------------------------------------------------------------- send --
 
@@ -2778,8 +2839,7 @@ class Runtime:
         It goes in the sealed body as re, so the other side can tell which of its
         messages this is about.
         """
-        if answers is not None and not is_message_hash(answers):
-            raise ValueError("re is the sha256 of the message this answers: 64 lowercase hex characters, as read shows it")
+        check_re(answers)
         w, key, partner = self._recipient(to)
         return self._send(w, key, partner, text, data, reply_to, answers=answers)
 
@@ -2796,7 +2856,7 @@ class Runtime:
             # looked up again, it could become another partner of that name.
             partner = self.partner_by_key(to)
             if partner is None:
-                raise ValueError("key is not in partners")
+                raise CodedValueError("unknown_partner", "key is not in partners")
             w, key = self.address_for(partner)
             return w, key, partner["name"]
         if isinstance(to, str) and re.fullmatch(r"[a-z2-7]{20}", to):
@@ -2806,7 +2866,7 @@ class Runtime:
                 # text or data is the dead end an agent on MCP walks into: the
                 # tool that opens a channel returns an address, and nothing here
                 # learns whose it is from reading it (item 5 of the round-2 list).
-                raise LookupError(
+                raise CodedLookupError("unknown_address",
                     "no key known for address %s. A runtime learns whose an address is from presence, or from reply_to or channel in a "
                     "verified message; one pasted into text or data binds nothing. Send to the partner by name, answer a message at its "
                     "reply_to, or ask the owner to hand the address over: aamio_open_channel with to, or aamio board channel KEY --reply-to ADDRESS "
@@ -2815,7 +2875,7 @@ class Runtime:
             return to, key, None
         partner = self.partner_by_name(to)
         if partner is None:
-            raise ValueError("unknown partner: " + str(to))
+            raise CodedValueError("unknown_partner", "unknown partner: " + str(to))
         w, key = self.address_for(partner)
         # The book's own spelling, so asking presence again after a 404 or a
         # 410 asks for this partner and no other.
@@ -2951,7 +3011,7 @@ class Runtime:
         # that could never go looking as if it might have (a health check of 30
         # September 2026); here it went out and came back 413.
         if size > MESSAGE_MAX_BYTES:
-            raise ValueError("this message is %d bytes sealed, and a message is at most %d, so nothing was stored or sent. Send a URL and a hash instead." % (size, MESSAGE_MAX_BYTES))
+            raise CodedValueError("too_large", "this message is %d bytes sealed, and a message is at most %d, so nothing was stored or sent. Send a URL and a hash instead." % (size, MESSAGE_MAX_BYTES))
 
         entry = {
             "id": "m-" + sha256hex("%s|%s|%s" % (self.keys.public, w, envelope))[:16],
@@ -4219,7 +4279,7 @@ class Runtime:
         book = traces.get(key) if key else None
 
         if not isinstance(book, dict):
-            raise LookupError("nothing sent to or received from %s is recorded here" % who)
+            raise CodedLookupError("no_trace", "nothing sent to or received from %s is recorded here" % who)
 
         view = trace_view(book, limit)
 
@@ -4316,9 +4376,21 @@ class Runtime:
                 )
             self.stop.wait(2)
 
-    def start(self):
+    def start(self, require_inbox=True):
+        """The listener, which keeps the inbox open and presence fresh, and reads every channel.
+
+        With require_inbox False an inbox that cannot be opened now does not
+        stop the start: the listener tries again every two seconds, and says
+        meanwhile that it could not, as serve wants it when the service is not
+        there yet, the way the Node runtime's server starts.
+        """
         if self.listener is None:
-            self.ensure_inbox()
+            try:
+                self.ensure_inbox()
+            except RuntimeError as error:
+                if require_inbox:
+                    raise
+                self.log("the inbox could not be opened yet: %s. The listener tries again, and a call that needs the inbox says so." % error)
             self.listener = threading.Thread(target=self._listen, daemon=True)
             self.listener.start()
         return self
@@ -4520,17 +4592,17 @@ class Runtime:
     def receipt(self, label="inbox", anchor=False):
         channel = self.channels.get(label)
         if channel is None:
-            raise ValueError("no such channel: " + label)
+            raise CodedValueError("unknown_channel", "no such channel: " + label)
         status, data = self.client.receipt(channel.w, channel.read_key)
         if status != 200:
-            raise RuntimeError("receipt failed: %s %s" % (status, data))
+            raise CodedRuntimeError("receipt_failed", "receipt failed: %s %s" % (status, data))
         # Checked as a receipt for this channel before anything is compared,
         # signed or anchored: one for another address, and one that counted
         # seven messages and listed one, were signed with root_adds_up true (a
         # review of 10 November 2026).
         fault = receipt_fault(data, channel.w)
         if fault is not None:
-            raise RuntimeError("receipt failed: the service's answer is not a receipt for this channel: %s. Nothing was compared, signed or anchored." % fault)
+            raise CodedRuntimeError("receipt_failed", "receipt failed: the service's answer is not a receipt for this channel: %s. Nothing was compared, signed or anchored." % fault)
         # Two different checks, and they used to be reported as one.
         #
         # The receipt's own arithmetic can always be checked: hash the lines it

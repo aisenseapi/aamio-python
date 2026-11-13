@@ -31,7 +31,9 @@ import sys
 
 from . import __version__, addons, compat, storage
 from .gate import GateStop
-from .runtime import Runtime, SendFailed, send_advice, BOARD_TTL, SEND_TRY_LATER, handover_unsettled
+from .errors import code_of
+from .runtime import (Runtime, SendFailed, send_advice, BOARD_TTL, SEND_TRY_LATER, handover_unsettled, check_channel_ttl, check_gate, check_label,
+                      check_partner, check_re, check_scope_add, check_scope_name)
 
 
 def out(value):
@@ -190,6 +192,138 @@ def _given_back(value):
     return value
 
 
+class Usage(Exception):
+    """What can be seen to be wrong from the command line alone: said on standard error with 2, before the home is opened or made."""
+
+
+def _whole(value, name, low, high=None):
+    """A whole number as the Node runtime and aamio-php take one on the command line: digits only, within its bounds."""
+    if value is None or isinstance(value, int):
+        return value
+    if re.fullmatch(r"[0-9]{1,15}", value) is None or int(value) < low or (high is not None and int(value) > high):
+        raise Usage("%s is a whole number, %d or more." % (name, low) if high is None else "%s is a whole number from %d to %d." % (name, low, high))
+    return int(value)
+
+
+def _as_usage(check, *given):
+    """A check of the runtime's, said as a usage error: a capital first and a full stop last, as the Node runtime says it."""
+    try:
+        check(*given)
+    except ValueError as error:
+        text = str(error)
+        raise Usage(text[:1].upper() + text[1:] + ("" if text.endswith(".") else ".")) from None
+
+
+def _not_json(name):
+    raise ValueError("%s is not JSON" % name)
+
+
+def _json(value, wrong):
+    """A JSON value given on the command line, or the usage error that says it is none. NaN and Infinity are none."""
+    if value is None:
+        return None
+    try:
+        return json.loads(value, parse_constant=_not_json)
+    except ValueError:
+        raise Usage(wrong) from None
+
+
+def check_usage(args):
+    """What the command line was given that can be seen to be wrong without the home.
+
+    Checked before the home is opened or made, as in the Node runtime and
+    aamio-php: a usage error raises Usage. A partner's name or key and --re
+    raise the runtime's own error, which is the command's answer, as JSON
+    with 1. A number that was no number, out of its bounds, or JSON that was
+    no JSON went to the service or into the home first, and came back as an
+    error of the runtime's (a check of 13 November 2026).
+    """
+    command = args.command
+    if command == "init":
+        if args.archive is not None:
+            _as_usage(storage.parse_policy, args.archive)
+    elif command == "archive":
+        policy = args.policy or "status"
+        size = args.max_mb
+        if size is not None and (re.fullmatch(r"[0-9]{1,9}(?:\.[0-9]{1,6})?", size) is None or not float(size) > 0):
+            raise Usage("--max-mb is a size in megabytes above zero.")
+        if policy in ("status", "prune"):
+            if size is not None:
+                raise Usage("--max-mb goes with a choice: archive keep, archive off or archive days:N.")
+            if args.all and policy != "prune":
+                raise Usage("--all goes with archive prune, and removes the whole archive.")
+        else:
+            if args.all:
+                raise Usage("--all goes with archive prune, and removes the whole archive.")
+            _as_usage(storage.parse_policy, policy, None if size is None else float(size))
+        args.max_mb = None if size is None else float(size)
+    elif command == "partner" and args.action == "add":
+        check_partner(args.name, args.key)
+    elif command == "lookup":
+        args.wait = _whole(args.wait, "--wait", 0, 25)
+    elif command == "send":
+        check_re(args.re)
+        _json(args.data, "--data is not JSON. Give a JSON value, quoted for the shell.")
+    elif command == "trace":
+        args.limit = _whole(args.limit, "--limit", 1, 50)
+    elif command == "read":
+        args.wait = _whole(args.wait, "--wait", 0, 25)
+        args.limit = _whole(args.limit, "--limit", 1, 200)
+        args.max_bytes = _whole(args.max_bytes, "--max-bytes", 512)
+    elif command == "receipt":
+        if not args.channel:
+            raise Usage("--channel names a channel, as a message's channel field does: inbox, board or an older generation.")
+    elif command == "outbox":
+        if args.outbox_command == "retry" and args.id is not None and not args.id:
+            raise Usage("--id names one message, as outbox pending shows it.")
+        if args.outbox_command == "forget" and not args.id:
+            raise Usage("outbox forget takes the id of one message, as outbox pending shows it.")
+    elif command == "channel":
+        if args.action == "open":
+            _as_usage(check_label, args.label)
+            args.ttl = _whole(args.ttl, "--ttl", 30, 3600)
+            _as_usage(check_channel_ttl, args.ttl)
+            if args.gate is not None:
+                gate = _json(args.gate, "--gate is not JSON. Quote it as one argument, as in --gate '{\"require\": {\"pow\": {\"bits\": 20}}}'.")
+                _as_usage(check_gate, gate)
+        elif args.action == "close" and not args.label:
+            raise Usage("channel close takes the label of one channel, as channel list shows it.")
+    elif command == "board":
+        sub = args.board_command
+        if sub == "post":
+            args.ttl = _whole(args.ttl, "--ttl", 60, 3600)
+            if args.scope is not None:
+                _as_usage(check_scope_name, args.scope)
+        elif sub == "find":
+            args.after = _whole(args.after, "--after", 0, 999999)
+            args.wait = _whole(args.wait, "--wait", 0, 25)
+            args.min_work_bits = _whole(args.min_work_bits, "--min-work-bits", 0, 16)
+            if args.scope is not None:
+                _as_usage(check_scope_name, args.scope)
+        elif sub == "answer":
+            _json(args.data, "--data is not JSON. Give a JSON value, quoted for the shell.")
+            if args.scope is not None:
+                _as_usage(check_scope_name, args.scope)
+        elif sub == "replies":
+            args.wait = _whole(args.wait, "--wait", 0, 25)
+            if args.post is not None and not args.post:
+                raise Usage("--post names one post by its id, as board post answered it.")
+        elif sub == "channel":
+            args.ttl = _whole(args.ttl, "--ttl", 30, 3600)
+            if args.reply_to is not None and re.fullmatch(r"[a-z2-7]{20}", args.reply_to) is None:
+                raise Usage("--reply-to is a write address: 20 characters of a-z and 2-7, as a verified answer gives it in reply_to.")
+            if args.note is not None and args.reply_to is None:
+                raise Usage("--note travels with the address to the inbox --reply-to names, so without --reply-to there is nothing to carry it.")
+            if not args.key:
+                raise Usage("board channel takes a key, or a partner's name.")
+    elif command == "scope":
+        sub = args.scope_command
+        if sub in ("new", "key", "share", "remove"):
+            _as_usage(check_scope_name, args.name)
+        elif sub == "add":
+            _as_usage(check_scope_add, args.name, args.key, args.address)
+
+
 def main(argv=None):
     # The answers are JSON, and JSON is UTF-8. A pipe on Windows was written in
     # the locale's code page: a name outside ASCII came out as bytes no reader
@@ -237,7 +371,7 @@ def main(argv=None):
     p.add_argument("--archive", default=None, help="keep, off or days:N: what happens to decrypted messages on this machine")
     p = sub.add_parser("archive", help="what is kept on this machine, and for how long")
     p.add_argument("policy", nargs="?", default="status", help="status (default), keep, off, days:N, or prune")
-    p.add_argument("--max-mb", type=float, default=None, help="a ceiling on the archive's size, oldest first out")
+    p.add_argument("--max-mb", default=None, help="a ceiling on the archive's size, oldest first out")
     p.add_argument("--all", action="store_true", help="with prune: remove the whole archive")
     sub.add_parser("doctor", help="does this client fit the service, who can read the home, what is kept")
     sub.add_parser("whoami")
@@ -251,7 +385,7 @@ def main(argv=None):
     pr.add_argument("name")
     p = sub.add_parser("lookup")
     p.add_argument("names", nargs="*")
-    p.add_argument("--wait", type=int, default=0)
+    p.add_argument("--wait", default=0)
     p = sub.add_parser("send")
     p.add_argument("to")
     p.add_argument("text")
@@ -259,11 +393,11 @@ def main(argv=None):
     p.add_argument("--re", default=None, help="the sha256 of the message this answers, as read shows it")
     p = sub.add_parser("trace", help="what was sent to one counterpart and what came back, as hashes: for when a message did not arrive, or arrived empty")
     p.add_argument("who", nargs="?", default=None, help="a partner name, a key or a write address; leave out for everyone")
-    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--limit", default=20)
     p = sub.add_parser("read")
-    p.add_argument("--wait", type=int, default=0)
-    p.add_argument("--limit", type=int, default=None, help="at most this many messages")
-    p.add_argument("--max-bytes", type=int, default=None, dest="max_bytes",
+    p.add_argument("--wait", default=0)
+    p.add_argument("--limit", default=None, help="at most this many messages")
+    p.add_argument("--max-bytes", default=None, dest="max_bytes",
                    help="bytes of messages to hand over, per channel; whole messages only, and one larger than the budget still comes")
     p = sub.add_parser("receipt")
     p.add_argument("--channel", default="inbox")
@@ -272,7 +406,7 @@ def main(argv=None):
     cs = p.add_subparsers(dest="action", required=True)
     co = cs.add_parser("open")
     co.add_argument("label")
-    co.add_argument("--ttl", type=int, default=600)
+    co.add_argument("--ttl", default=600)
     co.add_argument("--allow", default=None, help="comma separated partner names")
     co.add_argument("--gate", default=None,
                     help='conditions for whoever writes, as JSON: \'{"require": {"pow": {"bits": 20}, "per_key": 5}}\'. Set once and never changed.')
@@ -286,7 +420,7 @@ def main(argv=None):
     bp.add_argument("title")
     bp.add_argument("text")
     bp.add_argument("--tags", default="")
-    bp.add_argument("--ttl", type=int, default=BOARD_TTL)
+    bp.add_argument("--ttl", default=BOARD_TTL)
     bp.add_argument("--lang")
     bp.add_argument("--deadline")
     bp.add_argument("--scope", help="the name of one of your scopes: the post is then unlisted, and unlisted is not private")
@@ -294,9 +428,9 @@ def main(argv=None):
     bf.add_argument("--kind", choices=["need", "offer"])
     bf.add_argument("--tags", default="")
     bf.add_argument("--lang")
-    bf.add_argument("--after", type=int, default=0)
-    bf.add_argument("--wait", type=int, default=0)
-    bf.add_argument("--min-work-bits", type=int, default=0, help="keep only posts whose work_bits is at least this; 1 means any work, 16 is what the board advises")
+    bf.add_argument("--after", default=0)
+    bf.add_argument("--wait", default=0)
+    bf.add_argument("--min-work-bits", default=0, help="keep only posts whose work_bits is at least this; 1 means any work, 16 is what the board advises")
     bf.add_argument("--scope", help="the name of a scope you hold with its key: read that scope instead of the public board")
     bs.add_parser("tags")
     ba = bs.add_parser("answer")
@@ -306,12 +440,12 @@ def main(argv=None):
     ba.add_argument("--scope", help="the name of the scope the post is in")
     br = bs.add_parser("replies", help="answers to your posts. This filters. read shows everything on the inbox, including messages that name no post and bodies that could not be opened")
     br.add_argument("--post")
-    br.add_argument("--wait", type=int, default=0)
+    br.add_argument("--wait", default=0)
     bw = bs.add_parser("withdraw")
     bw.add_argument("post")
     bc = bs.add_parser("channel")
     bc.add_argument("key")
-    bc.add_argument("--ttl", type=int, default=900)
+    bc.add_argument("--ttl", default=900)
     bc.add_argument("--reply-to")
     bc.add_argument("--note")
 
@@ -390,6 +524,16 @@ def main(argv=None):
         code = addons.by_name(args.addon).early(args)
         if code is not None:
             return code
+    try:
+        check_usage(args)
+    except Usage as wrong:
+        print("aamio: %s" % wrong, file=sys.stderr)
+        return 2
+    except ValueError as error:
+        # A partner's name or key, or --re: the command's answer, as JSON with
+        # 1, as the other two answer it, and no home is made for it.
+        out({"error": str(error), "error_code": code_of(error)})
+        return 1
     tags = runtime_tags(args)
     try:
         runtime = Runtime(home=args.home, host=args.host, tags=tags, archive=False if args.no_archive else None, log=lambda line: print(line, file=sys.stderr))
@@ -413,7 +557,7 @@ def main(argv=None):
             return 1
         # One command is one process, and what it could not do is the answer,
         # as JSON like every other answer here. It used to be a traceback.
-        out({"error": str(error), "error_code": error.__class__.__name__})
+        out({"error": str(error), "error_code": code_of(error)})
         return 1
     finally:
         # One command, one process: the lock goes with it, as in aamio-php.
