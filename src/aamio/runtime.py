@@ -196,6 +196,66 @@ def _not_json(name):
     raise ValueError("%s is not JSON" % name)
 
 
+# What a body may be and still be read as JSON, in all three runtimes: every
+# number finite and nested at most this deep, the outermost array or object
+# counted as one. Anything else is handed over as text. A body nested 5 000
+# deep stopped every read of its thread in the Node runtime, and a number such
+# as 1e999, which JSON can write and nothing that reads it can hold, came out
+# here as Infinity, an answer no strict reader could take, after the cursor had
+# moved past it (a security review of 13 November 2026).
+BODY_MAX_DEPTH = 64
+_FLOAT_MAX = 1.7976931348623157e308
+
+
+def unfit_json(value, limit=BODY_MAX_DEPTH):
+    """(path, what) for the first part of value no reader can hold, in document order, or None.
+
+    what is "not finite" for a number such as 1e999, or an integer beyond what
+    a double holds, which the other two runtimes read as infinite, and "too
+    deep" for arrays and objects nested deeper than limit. The path names keys
+    and indices with dots, and is "" for value itself.
+    """
+    stack = [(value, "", 0)]
+    while stack:
+        node, path, level = stack.pop()
+        if isinstance(node, bool) or node is None or isinstance(node, str):
+            continue
+        if isinstance(node, float):
+            if node != node or node in (float("inf"), float("-inf")):
+                return path, "not finite"
+            continue
+        if isinstance(node, int):
+            if abs(node) > _FLOAT_MAX:
+                return path, "not finite"
+            continue
+        if isinstance(node, (dict, list)):
+            if level + 1 > limit:
+                return path, "too deep"
+            items = list(node.items()) if isinstance(node, dict) else list(enumerate(node))
+            for key, child in reversed(items):
+                stack.append((child, "%s.%s" % (path, key) if path else str(key), level + 1))
+    return None
+
+
+def unfit_text(path, what):
+    """What is wrong with an argument unfit_json found, as all three runtimes say it."""
+    where = path or "arguments"
+    if what == "not finite":
+        return "%s is a number that is not finite, as 1e999 is: JSON can write it, and nothing that reads it can hold it" % where
+    return "%s is nested deeper than %d: a reader hands a message nested that deep over as text" % (where, BODY_MAX_DEPTH)
+
+
+def body_json(text):
+    """A body's JSON, or ValueError when it is to be read as text: not JSON, a number that is not finite, or too deep."""
+    try:
+        parsed = json.loads(text, parse_constant=_not_json)
+    except RecursionError:
+        raise ValueError("nested deeper than the decoder goes") from None
+    if unfit_json(parsed) is not None:
+        raise ValueError("a number that is not finite, or nested deeper than %d" % BODY_MAX_DEPTH)
+    return parsed
+
+
 def send_advice(outcome, status):
     """(retryable, fix) for one send outcome. retryable is about the same
     stored bytes, and is never a permission to repeat something automatically.
@@ -3549,7 +3609,7 @@ class Runtime:
 
         if not is_envelope(raw):
             try:
-                parsed = json.loads(raw, parse_constant=_not_json)
+                parsed = body_json(raw)
             except ValueError:
                 return {"text": raw}, {"signed": True, "encrypted": False, "format": "text"}
 
@@ -3579,7 +3639,7 @@ class Runtime:
             return {"text": None}, {"signed": True, "encrypted": True, "format": "unreadable", "error": error.__class__.__name__}
 
         try:
-            parsed = json.loads(text, parse_constant=_not_json)
+            parsed = body_json(text)
         except ValueError:
             return {"text": text}, {"signed": True, "encrypted": True, "format": "text"}
 

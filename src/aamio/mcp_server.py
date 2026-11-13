@@ -22,7 +22,7 @@ from . import __version__, addons
 from .crypto import is_key
 from .gate import GateStop
 from .errors import code_of
-from .runtime import Runtime, SendFailed, send_advice, outbox_outcome, OUTBOX_NOTES, BOARD_TTL, SEND_TRY_LATER, check_gate, handover_unsettled
+from .runtime import Runtime, SendFailed, send_advice, outbox_outcome, OUTBOX_NOTES, BOARD_TTL, SEND_TRY_LATER, check_gate, handover_unsettled, unfit_json, unfit_text, _not_json
 
 SUPPORTED = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"]
 
@@ -876,6 +876,16 @@ def handle(runtime: Runtime, message, session=None):
         if "arguments" in params and not isinstance(params["arguments"], dict):
             return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": "arguments must be an object"}}
         arguments = params.get("arguments") or {}
+        # A number that is not finite, as 1e999 is, or nesting deeper than a
+        # reader reads as JSON, is refused before any tool runs, an add-on's
+        # included, as in the other two runtimes. It went on here as Infinity,
+        # which no strict reader takes; in aamio-php the arguments vanished
+        # and an add-on ran with its defaults (a security review of 13
+        # November 2026).
+        unreadable = unfit_json(arguments)
+        if unreadable is not None:
+            refused = {"error": unfit_text(*unreadable), "error_code": "invalid_arguments", "fix": ARGUMENTS_FIX}
+            return {"jsonrpc": "2.0", "id": rid, "result": shaped(result_of(refused, True), modern)}
         # Arguments that do not fit the tool's schema are the call's answer, as
         # the Node runtime and aamio-php give it: a model reads what is wrong
         # and can call again with what fits. aamio_partner_add answers its own,
@@ -1046,8 +1056,13 @@ def serve(runtime: Runtime):
         if not line:
             continue
         try:
-            message = json.loads(line)
-        except ValueError:
+            message = json.loads(line, parse_constant=_not_json)
+        except (ValueError, RecursionError):
+            # Nested deeper than the decoder goes is a line it cannot read, as
+            # in the other two runtimes, and so is NaN or Infinity, which are no
+            # JSON. The first ended the server, and the second was taken as a
+            # number no other runtime takes (a security review of 13 November
+            # 2026).
             reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
         else:
             # One at a time and asked about just before, since serving one call

@@ -32,7 +32,7 @@ import sys
 from . import __version__, addons, compat, storage
 from .gate import GateStop
 from .errors import code_of
-from .runtime import (Runtime, SendFailed, send_advice, BOARD_TTL, SEND_TRY_LATER, handover_unsettled, check_channel_ttl, check_gate, check_label,
+from .runtime import (BODY_MAX_DEPTH, unfit_json, Runtime, SendFailed, send_advice, BOARD_TTL, SEND_TRY_LATER, handover_unsettled, check_channel_ttl, check_gate, check_label,
                       check_partner, check_re, check_scope_add, check_scope_name)
 
 
@@ -244,14 +244,28 @@ def _not_json(name):
     raise ValueError("%s is not JSON" % name)
 
 
-def _json(value, wrong):
-    """A JSON value given on the command line, or the usage error that says it is none. NaN and Infinity are none."""
+def _json(value, wrong, option="--data"):
+    """A JSON value given on the command line, or the usage error that says it is none. NaN and Infinity are none.
+
+    A number that is not finite, as 1e999 is, is refused too, and --data
+    nested so deep that the message around it passes BODY_MAX_DEPTH: a reader
+    would hand it over as text. The three runtimes refuse both alike (a
+    security review of 13 November 2026).
+    """
     if value is None:
         return None
     try:
-        return json.loads(value, parse_constant=_not_json)
+        parsed = json.loads(value, parse_constant=_not_json)
+    except RecursionError:
+        raise Usage("%s is nested too deep: with the message around it, it is deeper than %d, and a reader hands such a message over as text." % (option, BODY_MAX_DEPTH)) from None
     except ValueError:
         raise Usage(wrong) from None
+    unreadable = unfit_json(parsed, BODY_MAX_DEPTH - 1 if option == "--data" else 1000000)
+    if unreadable is not None and unreadable[1] == "not finite":
+        raise Usage("%s holds a number that is not finite, as 1e999 is: JSON can write it, and nothing that reads it can hold it." % option)
+    if unreadable is not None:
+        raise Usage("%s is nested too deep: with the message around it, it is deeper than %d, and a reader hands such a message over as text." % (option, BODY_MAX_DEPTH))
+    return parsed
 
 
 def check_usage(args):
@@ -310,7 +324,7 @@ def check_usage(args):
             args.ttl = _whole(args.ttl, "--ttl", 30, 3600)
             _as_usage(check_channel_ttl, args.ttl)
             if args.gate is not None:
-                gate = _json(args.gate, "--gate is not JSON. Quote it as one argument, as in --gate '{\"require\": {\"pow\": {\"bits\": 20}}}'.")
+                gate = _json(args.gate, "--gate is not JSON. Quote it as one argument, as in --gate '{\"require\": {\"pow\": {\"bits\": 20}}}'.", "--gate")
                 _as_usage(check_gate, gate)
         elif args.action == "close" and not args.label:
             raise Usage("channel close takes the label of one channel, as channel list shows it.")
