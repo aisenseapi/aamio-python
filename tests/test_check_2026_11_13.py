@@ -112,17 +112,64 @@ def test_an_error_without_a_shared_code_is_said_by_its_class():
     assert code_of(ValueError("x")) == "ValueError"
 
 
+def called(runtime, session, name, arguments, rid=2):
+    return mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": rid, "method": "tools/call", "params": {"name": name, "arguments": arguments}}, session)
+
+
+def opened(runtime):
+    """A session in which initialize settled on 2025-06-18, as a client opens one."""
+    session = {}
+    mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}, session)
+    return session
+
+
 def test_over_mcp_a_failure_carries_the_code_the_command_line_says(tmp_path):
     runtime = Runtime(home=str(tmp_path / "home"), host="http://127.0.0.1:9", archive=False)
     try:
         session = {}
         mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}, session)
-        closed = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "aamio_close_channel", "arguments": {"label": "nope"}}}, session)
+        closed = called(runtime, session, "aamio_close_channel", {"label": "nope"})
         said = closed["result"]["structuredContent"]
         assert closed["result"]["isError"] is True and said["error_code"] == "unknown_channel", said
-        opened = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "aamio_open_channel", "arguments": {"label": "room", "ttl": 5}}}, session)
-        assert opened["result"]["structuredContent"]["error_code"] == "invalid_ttl", opened
-        gate = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "aamio_open_channel", "arguments": {"label": "room", "gate": []}}}, session)
-        assert gate["result"]["structuredContent"]["error_code"] == "invalid_gate", gate
+        # What the schema takes and the runtime does not is the runtime's to name.
+        labelled = called(runtime, session, "aamio_open_channel", {"label": "../x", "ttl": 600})
+        assert labelled["result"]["structuredContent"]["error_code"] == "invalid_label", labelled
+    finally:
+        runtime.release()
+
+
+@pytest.mark.parametrize("name, arguments, said", [
+    ("aamio_send", {"to": "b", "txt": "typo"}, "aamio_send takes no argument called txt"),
+    ("aamio_close_channel", {}, "aamio_close_channel needs label"),
+    ("aamio_open_channel", {"label": "room", "ttl": 5}, "ttl is not what aamio_open_channel takes: "),
+    ("aamio_open_channel", {"label": "room", "ttl": "600"}, "ttl is not what aamio_open_channel takes: "),
+    ("aamio_open_channel", {"label": "room", "ttl": 600, "gate": [1]}, "gate is not what aamio_open_channel takes: "),
+    ("aamio_open_channel", {"label": "", "ttl": 600}, "label is not what aamio_open_channel takes: "),
+    ("aamio_send", {"to": "b", "re": "a" * 64 + "\n"}, "re is not what aamio_send takes: "),
+    ("aamio_read", {"limit": 999}, "limit is not what aamio_read takes: "),
+    ("aamio_receipt", {"anchor": "yes"}, "anchor is not what aamio_receipt takes: "),
+    ("aamio_outbox_forget", {"id": ""}, "id is not what aamio_outbox_forget takes: "),
+])
+def test_over_mcp_arguments_that_do_not_fit_the_schema_are_the_calls_answer(tmp_path, name, arguments, said):
+    """As the Node runtime and aamio-php answer them, where a model reads what is wrong. A name spelt wrong was passed over here, and a value of another type went on to the runtime."""
+    runtime = Runtime(home=str(tmp_path / "home"), host="http://127.0.0.1:9", archive=False)
+    try:
+        answered = called(runtime, opened(runtime), name, arguments)
+        result = answered["result"]
+        assert result["isError"] is True and result["structuredContent"]["error_code"] == "invalid_arguments", answered
+        assert result["structuredContent"]["error"].startswith(said) and "inputSchema" in result["structuredContent"]["fix"]
+    finally:
+        runtime.release()
+
+
+def test_over_mcp_arguments_that_are_no_object_are_a_request_that_cannot_be_read(tmp_path):
+    runtime = Runtime(home=str(tmp_path / "home"), host="http://127.0.0.1:9", archive=False)
+    try:
+        session = opened(runtime)
+        answered = called(runtime, session, "aamio_send", ["b", "x"])
+        assert answered["error"] == {"code": -32602, "message": "arguments must be an object"} and "result" not in answered
+        # A whole number written as 600.0 is a whole number, as JSON and the Node runtime have it: it passes the schema.
+        passed = called(runtime, session, "aamio_open_channel", {"label": "room", "ttl": 600.0})
+        assert passed["result"]["structuredContent"].get("error_code") != "invalid_arguments", passed
     finally:
         runtime.release()
