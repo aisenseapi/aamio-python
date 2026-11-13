@@ -3785,7 +3785,32 @@ class Runtime:
         what the service returned beyond it is fetched again by the next poll.
         It used to be the caller that cut the list, after the cursor had moved
         past everything: the messages over the limit were gone for good.
+
+        A read that raises leaves nothing of itself in memory: the cursor, the
+        thread it was on, the hashes, what board replies keep and the bindings
+        are as they were, and the messages wait at the service for the next
+        read, which hands them over. One that raised halfway through its
+        messages kept the hashes of the ones it had taken, the next channel's
+        save wrote them down, and the next read handed those messages over
+        marked replay, never having handed them over at all (the release check
+        of 13 November 2026).
         """
+        before = (channel.after, channel.created_at, channel.expire_at, channel.instance, channel.gone,
+                  set(channel.seen), set(channel.seen_from), len(channel.received))
+        with self.lock:
+            peers = dict(self.peers)
+        try:
+            return self._poll_channel(channel, wait, limit, max_bytes)
+        except Exception:
+            (channel.after, channel.created_at, channel.expire_at, channel.instance, channel.gone,
+             channel.seen, channel.seen_from, received) = before
+            del channel.received[received:]
+            with self.lock:
+                self.peers = peers
+            raise
+
+    def _poll_channel(self, channel, wait, limit, max_bytes):
+        """One read of one channel, as poll describes it."""
         channel.left_waiting = 0
         channel.more_at_service = False
         channel.more_at_limit = False

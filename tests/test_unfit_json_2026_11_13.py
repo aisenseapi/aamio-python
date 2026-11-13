@@ -108,6 +108,38 @@ def test_a_poisoned_message_between_two_ordinary_ones_is_text_and_both_arrive(he
     assert mcp_server.dispatch(runtime, "aamio_read", {})["structuredContent"]["messages"] == [], "the cursor is past all four"
 
 
+def test_a_channel_that_throws_on_its_second_message_keeps_none_of_what_it_took(held, monkeypatch):
+    """The release check of 13 November 2026.
+
+    A channel that threw halfway through its messages kept the hashes of the
+    ones it had taken before it threw, the next channel's save wrote them down,
+    and the next read handed those messages over marked replay, never having
+    handed them over at all.
+    """
+    runtime, service = held
+    runtime.ensure_inbox()
+    side = runtime.open_channel("side", 600)
+    sender = Keys.generate()
+    service.write(side["w"], json.dumps({"text": "first on the side"}), sender)
+    service.write(side["w"], json.dumps({"text": "second on the side"}), sender)
+    real = runtime._read_entry
+
+    def failing(channel, raw):
+        if channel.label == "side" and isinstance(raw, dict) and raw.get("seq") == 2:
+            raise RuntimeError("the test made the second message fail")
+        return real(channel, raw)
+
+    monkeypatch.setattr(runtime, "_read_entry", failing)
+    first = mcp_server.dispatch(runtime, "aamio_read", {})["structuredContent"]
+    assert first["messages"] == [], "nothing from the side is handed over"
+    assert any(note.get("channel") == "side" and note.get("state") == "unread" for note in first.get("attention") or []), first
+    monkeypatch.setattr(runtime, "_read_entry", real)
+    # The inbox is read first and written down, with whatever the side holds in memory.
+    again = mcp_server.dispatch(runtime, "aamio_read", {})["structuredContent"]["messages"]
+    assert [(m["body"]["text"], m["replay"]) for m in again] == [("first on the side", False), ("second on the side", False)], \
+        "neither is marked a copy: neither was handed over before"
+
+
 def called(runtime, name, arguments):
     session = {}
     mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}, session)

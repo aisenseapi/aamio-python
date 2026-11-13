@@ -22,6 +22,13 @@ not what moved in the source.
 - A line nested deeper than the decoder goes, or holding `NaN` or `Infinity`,
   which are no JSON, is a parse error, as in the other two runtimes. The first
   ended the server.
+- A channel whose read raises leaves nothing of that read in memory, as in the
+  other two runtimes: its cursor, the hashes of what it took, what board
+  replies keep and the addresses it bound are as they were, and the next read
+  hands its messages over. One that raised halfway through kept the hashes of
+  the messages it had taken, the next channel's save wrote them down, and the
+  next read handed those messages over marked `replay`, though they had never
+  been handed over.
 
 ## 0.6.34 - 2026-11-13
 
