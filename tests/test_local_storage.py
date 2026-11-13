@@ -187,7 +187,8 @@ def test_doctor_says_it_all_in_one_answer(home):
     printed = []
     original, cli.out = cli.out, printed.append
     runtime = Runtime(home=home)
-    runtime.client.health = lambda: (200, {"status": "ok", "version": "0.7.1", "revision": "abc"})
+    # As the service answers /health: doctor calls only aamio's own answer healthy.
+    runtime.client.health = lambda: (200, {"status": "ok", "service": "aamio", "version": "0.7.1", "revision": "abc"})
     runtime.client.descriptor = lambda: (200, {"version": "0.7.1", "protocol": {"version": 1, "capabilities": ["threads", "signing", "long-poll"]}})
 
     try:

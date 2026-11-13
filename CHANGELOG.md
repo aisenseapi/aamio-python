@@ -16,11 +16,17 @@ not what moved in the source.
   gate has, or a `pow` without `bits` is the gate's refusal, `invalid_gate`,
   with what is wrong by its path, as `gate.require.pow.bits`, and the gate's
   fix. They went on to the service. `data` declares no fields, and takes any.
+- A gate whose numbers are written as `5.0` goes on as `5`, on the command
+  line and over MCP, as in the Node runtime. The service wants whole numbers
+  and refused it, and the channel did not open: `channel_unavailable`.
 - `doctor` says whether the service answered, whether it is healthy and
   whether this client fits it, each apart: `service.reachable`,
-  `service.healthy` and `service.status`, beside `compatibility`. A 503 from
-  `/health` was said as no answer, beside a fit read from the descriptor,
-  which had answered.
+  `service.healthy` and `service.status`, beside `compatibility`. Healthy is
+  aamio's own health answer, an object with `"service": "aamio"` and
+  `"status": "ok"`: a 200 from a page in front of the host, such as a proxy
+  or a login page, is reachable and not healthy, and `problem` says what came.
+  A 503 from `/health` was said as no answer, beside a fit read from the
+  descriptor, which had answered.
 
 ## 0.6.33 - 2026-11-13
 

@@ -67,7 +67,7 @@ def test_data_takes_any_field_and_names_is_a_list(runtime):
 
 
 def doctor_with(runtime, status):
-    runtime.client.health = lambda: (status, {"status": "ok", "version": "0.7.44", "revision": "abc"} if status == 200 else {"error": "down"} if status else None)
+    runtime.client.health = lambda: (status, {"status": "ok", "service": "aamio", "version": "0.7.44", "revision": "abc"} if status == 200 else {"error": "down"} if status else None)
     runtime.client.descriptor = lambda: (200, {"version": "0.7.44", "protocol": {"version": 1, "capabilities": ["threads", "signing", "long-poll"]}})
     return cli.doctor(runtime)
 
@@ -82,6 +82,29 @@ def test_doctor_says_health_and_fit_apart(runtime):
     gone = doctor_with(runtime, 0)["service"]
     assert [gone["reachable"], gone["healthy"], gone["status"]] == [False, False, 0]
     assert gone["problem"] == "no answer from /health, so the service's version and health were not read"
+
+
+@pytest.mark.parametrize("body, what", [
+    ("<!doctype html><title>Sign in</title>", "a body that is not JSON"),
+    (None, "an empty body"),
+    ([], "JSON that is not aamio's health answer"),
+    ({"status": "ok"}, "JSON that is not aamio's health answer"),
+])
+def test_what_answers_200_at_health_and_is_not_aamio_is_not_healthy(runtime, body, what):
+    """As the other two say it. A 200 from a proxy or a login page was said as healthy, beside "answered 200 and not 200"."""
+    runtime.client.health = lambda: (200, body)
+    runtime.client.descriptor = lambda: (200, {"version": "0.7.44", "protocol": {"version": 1, "capabilities": ["threads", "signing", "long-poll"]}})
+    service = cli.doctor(runtime)["service"]
+    assert [service["reachable"], service["healthy"], service["status"], "version" in service] == [True, False, 200, False]
+    assert service["problem"] == "/health answered 200 with %s, so the service's version and health were not read: check that --host names the aamio service and not a page in front of it" % what
+
+
+def test_a_gate_whose_numbers_are_written_5_0_goes_on_with_whole_numbers():
+    """As JSON Schema and the Node runtime have it. 5.0 went on as 5.0, which the service refuses, and the channel did not open."""
+    import json
+    from aamio.runtime import check_gate
+    gate = check_gate({"require": {"pow": {"bits": 5.0}, "per_key": 2.0}, "advise": {"pow": {"bits": 3}}})
+    assert json.dumps(gate) == '{"require": {"pow": {"bits": 5}, "per_key": 2}, "advise": {"pow": {"bits": 3}}}'
 
 
 def test_a_line_that_is_no_call_is_answered_once_and_a_list_that_holds_something_is_a_batch(tmp_path):

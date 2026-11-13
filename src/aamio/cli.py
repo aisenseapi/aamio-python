@@ -62,6 +62,23 @@ def set_archive(runtime, policy):
     runtime._prune()
 
 
+def not_health(body):
+    """What /health said when it is not aamio's health answer, and None when it is.
+
+    aamio's answer is an object with "service": "aamio" and "status": "ok", as
+    the service gives it. A 200 from a proxy or a login page in front of the
+    host was said as healthy, beside "answered 200 and not 200" (a check of 13
+    November 2026). As the Node runtime and aamio-php say it.
+    """
+    if body is None or body == "":
+        return "an empty body"
+    if isinstance(body, str):
+        return "a body that is not JSON"
+    if not isinstance(body, dict) or body.get("service") != "aamio" or body.get("status") != "ok":
+        return "JSON that is not aamio's health answer"
+    return None
+
+
 def doctor(runtime):
     """One answer to three questions: does this client fit the service, who can read the home, what is kept.
 
@@ -73,13 +90,16 @@ def doctor(runtime):
     # both apart from whether this client fits it. A 503 from /health was said
     # as no answer, beside a fit read from the descriptor, which had answered
     # (a check of 13 November 2026). As the Node runtime and aamio-php say it.
-    service = {"host": runtime.host, "reachable": status > 0, "healthy": status == 200, "status": status}
-    if status == 200 and isinstance(health, dict):
+    unlike = not_health(health) if status == 200 else None
+    service = {"host": runtime.host, "reachable": status > 0, "healthy": status == 200 and unlike is None, "status": status}
+    if service["healthy"]:
         service.update(version=health.get("version"), revision=health.get("revision"))
     elif status == 0:
         service["problem"] = "no answer from /health, so the service's version and health were not read"
-    else:
+    elif status != 200:
         service["problem"] = "/health answered %s and not 200: the service is reachable and not healthy, and its version was not read" % status
+    else:
+        service["problem"] = "/health answered 200 with %s, so the service's version and health were not read: check that --host names the aamio service and not a page in front of it" % unlike
     status, descriptor = runtime.client.descriptor()
     fits = compat.check(descriptor if status == 200 else None)
     if status != 200:

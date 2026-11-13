@@ -450,8 +450,25 @@ def check_scope_add(name, key=None, address=None):
         raise CodedValueError("invalid_scope", "that key does not give that address, so one of the two is wrong")
 
 
+def _whole_numbers(value):
+    """value with every whole number written as 5.0 made 5, through objects and lists.
+
+    JSON has one kind of number, and JSON Schema and the Node runtime take 5.0
+    for the integer 5. Sent on as 5.0, a gate's bits were refused by the
+    service, which wants integers, and the channel did not open (a check of
+    13 November 2026). For a gate only: data goes on as it was written.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {key: _whole_numbers(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_whole_numbers(item) for item in value]
+    return value
+
+
 def check_gate(gate):
-    """The shape of a gate, refused here rather than a round trip later.
+    """The shape of a gate, refused here rather than a round trip later, with its whole numbers as integers.
 
     Only the shape. What the numbers may be is the service's to decide, it decides
     that in one place, and its refusal carries the detail. Duplicating the whole
@@ -481,7 +498,7 @@ def check_gate(gate):
         if key in gate and not isinstance(gate[key], dict):
             raise CodedValueError("invalid_gate", "gate.%s must be an object. %s" % (key, shape))
 
-    return gate
+    return _whole_numbers(gate)
 
 
 def check_label(label):
