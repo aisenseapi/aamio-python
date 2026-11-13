@@ -74,6 +74,9 @@ not what moved in the source.
   written, and change nothing. A full disk was a traceback, after the probe
   had run, and when it was the rename at the end that failed, a file of the
   command's own was left in the home.
+- `doctor` and `init` ask whoami, icacls and PowerShell by their place in
+  System32. In Git Bash another whoami.exe came first on the path, and the
+  second way of reading who can read the home read nothing.
 - A message body with `NaN`, `Infinity` or `-Infinity` is read as text, as
   the Node runtime and aamio-php read it. They are not JSON: the body was JSON
   here and text there, and an answer that carried it on was no JSON.

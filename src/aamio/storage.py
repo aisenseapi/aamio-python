@@ -257,6 +257,18 @@ def tighten(home):
 # ------------------------------------------------------- who can read it --
 
 
+def _system_tool(*parts):
+    """A Windows tool by its place in System32, so another one earlier on the path is not the one asked.
+
+    Git Bash puts its own whoami.exe first, which answers /user with a usage
+    error, and the second way of reading the access list read nothing (a check
+    of 13 November 2026). The Node runtime and aamio-php ask them so too.
+    """
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or "C:\\Windows"
+    path = os.path.join(root, "System32", *parts)
+    return path if os.path.isfile(path) else parts[-1]
+
+
 def windows_acl_findings(lines, me):
     """Findings from `sid|rights|type` lines, one per access rule. me is the current user's SID."""
     findings = []
@@ -289,7 +301,7 @@ def _windows_rules(path):
         "$sid = try { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $_.IdentityReference.Value }; "
         "'{0}|{1}|{2}' -f $sid, $_.FileSystemRights, $_.AccessControlType }" % quoted
     )
-    run = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=30)
+    run = subprocess.run([_system_tool("WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=30)
 
     if run.returncode != 0:
         raise OSError((run.stderr or run.stdout or "powershell failed").strip()[:200])
@@ -306,7 +318,7 @@ def _windows_rules_icacls(path):
     Returns what `_windows_rules` returns, so the same parser reads both and a
     finding from here says what a finding from there says.
     """
-    who = subprocess.run(["whoami.exe", "/user", "/fo", "csv", "/nh"],
+    who = subprocess.run([_system_tool("whoami.exe"), "/user", "/fo", "csv", "/nh"],
                          capture_output=True, text=True, timeout=30)
 
     if who.returncode != 0:
@@ -324,7 +336,7 @@ def _windows_rules_icacls(path):
     path = os.path.abspath(path)
     with tempfile.TemporaryDirectory(prefix="aamio-acl-") as folder:
         saved = os.path.join(folder, "acl.txt")
-        run = subprocess.run(["icacls", path, "/save", saved],
+        run = subprocess.run([_system_tool("icacls.exe"), path, "/save", saved],
                              capture_output=True, text=True, timeout=30)
 
         if run.returncode != 0:

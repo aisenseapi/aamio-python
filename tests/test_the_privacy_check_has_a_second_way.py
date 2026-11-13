@@ -108,9 +108,11 @@ def simulated_export(monkeypatch, exporter):
     monkeypatch.setattr(storage, "_windows_rules", get_acl_is_gone)
 
     def run(args, **kwargs):
-        if args[0] == "whoami.exe":
+        # The tools are asked by their place in System32, so the command is a whole path.
+        tool = os.path.basename(args[0]).lower()
+        if tool == "whoami.exe":
             return subprocess.CompletedProcess(args, 0, '"tester","S-1-5-21-123"\n', "")
-        assert args[0] == "icacls"
+        assert tool == "icacls.exe", args[0]
         return exporter(args, Path(args[3]))
 
     monkeypatch.setattr(storage.subprocess, "run", run)
@@ -241,3 +243,12 @@ def test_real_export_accepts_absolute_relative_and_root_targets(tmp_path, monkey
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+@windows_only
+def test_the_windows_tools_are_asked_by_their_place_in_system32():
+    """Git Bash puts its own whoami.exe first on the path, and it answers /user with a usage error."""
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or "C:\\Windows"
+    for parts in (("whoami.exe",), ("icacls.exe",), ("WindowsPowerShell", "v1.0", "powershell.exe")):
+        assert os.path.normcase(storage._system_tool(*parts)) == os.path.normcase(os.path.join(root, "System32", *parts))
+    assert storage._system_tool("no-such-tool-here.exe") == "no-such-tool-here.exe", "a tool System32 does not have is asked by name"
