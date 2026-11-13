@@ -26,6 +26,7 @@ and AAMIO_VERIFYUM over the hosts at the top of aamio/client.py.
 
 import argparse
 import json
+import re
 import sys
 
 from . import __version__, addons, compat, storage
@@ -167,7 +168,41 @@ def addon_change(verb, name):
     return 0
 
 
+# A key is 43 characters of base64url, and one in 64 begins with a dash, which
+# argparse takes for an option: `partner add bob -quTO...` stopped with "the
+# following arguments are required: key", and so did send, lookup and every
+# command that takes a key (a check of 13 November 2026). Such a word is marked
+# before the parsing and given back after it. No option here looks like one,
+# and an argument from the system cannot hold the mark.
+KEY_WORD = re.compile(r"-[A-Za-z0-9_-]{42}")
+KEY_MARK = "\x00"
+
+
+def _marked(argv):
+    return [KEY_MARK + word if isinstance(word, str) and KEY_WORD.fullmatch(word) else word for word in argv]
+
+
+def _given_back(value):
+    if isinstance(value, str) and value.startswith(KEY_MARK):
+        return value[len(KEY_MARK):]
+    if isinstance(value, list):
+        return [_given_back(item) for item in value]
+    return value
+
+
 def main(argv=None):
+    # The answers are JSON, and JSON is UTF-8. A pipe on Windows was written in
+    # the locale's code page: a name outside ASCII came out as bytes no reader
+    # takes for UTF-8, and one outside the code page stopped the answer after
+    # the command had done its work, a partner added or messages read off the
+    # service, with an encoding error said instead (a check of 12 November
+    # 2026). backslashreplace writes a lone surrogate as the escape JSON has
+    # for it. aamio serve sets its own streams, as before.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
     # The home before the parser is built: which add-ons run here is kept in
     # it, and the parser has a command for each. And `addon disable` before
     # the add-ons are loaded, so that a broken one can be taken out again.
@@ -175,7 +210,9 @@ def main(argv=None):
     probe.add_argument("--home", default=None)
     probe.add_argument("--host", default=None)
     probe.add_argument("--no-archive", action="store_true")
+    argv = _marked(sys.argv[1:] if argv is None else list(argv))
     known, rest = probe.parse_known_args(argv)
+    known.home, known.host = _given_back(known.home), _given_back(known.host)
     # An empty value is not the default. `--home=` or `--home ""`, from a
     # script whose variable was never set, would otherwise act in the default
     # home; the option left out still means the default.
@@ -336,6 +373,8 @@ def main(argv=None):
             asub.add_parser(row["name"], help="installed, not enabled").add_argument("rest", nargs=argparse.REMAINDER)
 
     args = parser.parse_args(argv)
+    for field, value in vars(args).items():
+        setattr(args, field, _given_back(value))
     # Before the runtime: creating one takes the home's lock and tidies the home.
     # Listing the add-ons reads nothing, and an add-on may have commands of its
     # own that need no home, as a check of a local file beside a running server.

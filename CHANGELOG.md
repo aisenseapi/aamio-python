@@ -80,6 +80,16 @@ not what moved in the source.
   writes there is not, and a read says how many in `removed_key`. The whole
   inbox was read no more, so a partner that had not yet learned the new
   address wrote where nobody read, and nothing said so.
+- The command line takes a key that begins with a dash, as one key in 64 does.
+  `partner add bob -quTO...` stopped with "the following arguments are
+  required: key", and so did `send`, `lookup` and every command that takes a
+  key, unless `--` was written before it. The Node runtime and aamio-php took
+  such a key as it is.
+- The command line answers in UTF-8 wherever it runs. In a pipe on Windows it
+  wrote the locale's code page: a name like `Åse` came out as bytes that are not
+  UTF-8, and a Greek or Chinese name, or a message in such letters, stopped the
+  answer after the command had done its work. The partner was added, or the
+  messages read off the service, and the answer was an encoding error.
 - A post asked for as long as an inbox lives, `--ttl 3600`, is taken by the
   board. Its lifetime left the inbox no time for the work the board advises,
   which is done after the lifetime is set, since the work covers it, and the

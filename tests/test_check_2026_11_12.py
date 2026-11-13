@@ -796,6 +796,28 @@ def test_a_post_asked_for_as_long_as_an_inbox_lives_leaves_it_room(world):
     assert usual["post"]["ttl"] == 1200, "a post well inside its inbox keeps the lifetime it asked for"
 
 
+def test_the_command_line_answers_in_utf8_whatever_the_code_page(tmp_path):
+    """A pipe on Windows is written in the locale's code page, here cp1252 as on the machine it was found on."""
+    import subprocess
+
+    source =os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+    env = dict(os.environ, PYTHONIOENCODING="cp1252", PYTHONPATH=source, AAMIO_HOST="http://127.0.0.1:9")
+    env.pop("PYTHONUTF8", None)
+
+    def cli(*words):
+        done = subprocess.run([sys.executable, "-m", "aamio", "--home", str(tmp_path / "home")] + list(words), capture_output=True, env=env, timeout=60)
+        return done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8")
+
+    greek = "\u039f\u03b4\u03c5\u03c3\u03c3\u03ad\u03b1\u03c2"
+    code, out, err = cli("partner", "add", greek, "w" * 42 + "A")
+    assert code == 0, (out, err)
+    assert json.loads(out)["partner"] == greek
+    code, out, err = cli("partner", "add", "\u00c5se", "v" * 42 + "A")
+    assert code == 0 and json.loads(out)["partner"] == "\u00c5se", "a name cp1252 can write came out in cp1252, which is not UTF-8"
+    code, out, err = cli("partner", "list")
+    assert code == 0 and [row["name"] for row in json.loads(out)["partners"]] == [greek, "\u00c5se"]
+
+
 def test_the_inbox_that_named_a_removed_key_is_read_on_for_the_partners_still_in_the_book(world):
     """Read no more, the old inbox lost what a partner wrote there before it had the new address."""
     service, runtime, base = world
@@ -823,3 +845,26 @@ def test_the_inbox_that_named_a_removed_key_is_read_on_for_the_partners_still_in
     a.partner_add("c", c.keys.public)
     written(c, a, old.w, "back in the book")
     assert [(m["sender"], m["body"]["text"]) for m in a.read(wait=0)] == [("c", "back in the book")]
+
+
+def test_a_key_that_begins_with_a_dash_is_a_key_on_the_command_line(tmp_path):
+    """One key in 64 begins with a dash, and argparse took it for an option. A test that drew its key at random met one."""
+    import subprocess
+
+    source = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+    env = dict(os.environ, PYTHONPATH=source, AAMIO_HOST="http://127.0.0.1:9", PYTHONIOENCODING="utf-8")
+    dash = "-quTOlboFbY5fE4MUK250BFd-GoD0alTVpRSwbPs3pI"
+
+    def cli(*words):
+        done = subprocess.run([sys.executable, "-m", "aamio", "--home", str(tmp_path / "home")] + list(words), capture_output=True, env=env, timeout=60)
+        return done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8")
+
+    code, out, err = cli("partner", "add", "bob", dash)
+    assert code == 0 and json.loads(out)["key"] == dash, (out, err)
+    code, out, err = cli("partner", "list")
+    assert [row["key"] for row in json.loads(out)["partners"]] == [dash]
+    code, out, err = cli("partner", "remove", dash)
+    assert code == 0 and json.loads(out)["partner"] == "bob" and json.loads(out)["known"] is True, (out, err)
+    # An option still reads as one, and a word that only looks like a key in length does not change.
+    code, out, err = cli("partner", "add", "--help")
+    assert code == 0 and "usage" in out
