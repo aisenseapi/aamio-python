@@ -403,6 +403,14 @@ def main(argv=None):
     except SendFailed as failed:
         return send_failed(failed, args.command)
     except (RuntimeError, LookupError, ValueError, OSError) as error:
+        # serve's standard output is the protocol's alone: a server that cannot
+        # start, as with no service to open its inbox at, says why on standard
+        # error, where the host keeps its log. As JSON on standard output it was
+        # a line the host could not read as a message (a check of 13 November
+        # 2026), as aamio-php and the Node runtime say it.
+        if args.command == "serve":
+            print("aamio: %s" % error, file=sys.stderr)
+            return 1
         # One command is one process, and what it could not do is the answer,
         # as JSON like every other answer here. It used to be a traceback.
         out({"error": str(error), "error_code": error.__class__.__name__})

@@ -77,6 +77,10 @@ not what moved in the source.
 - `doctor` and `init` ask whoami, icacls and PowerShell by their place in
   System32. In Git Bash another whoami.exe came first on the path, and the
   second way of reading who can read the home read nothing.
+- `serve` that cannot start, as with no service to open its inbox at, says why
+  on standard error, where the host keeps its log. It wrote it as JSON on
+  standard output, which is the protocol's alone, and the host read a line it
+  could not take as a message. Every other command answers so, as before.
 - A message body with `NaN`, `Infinity` or `-Infinity` is read as text, as
   the Node runtime and aamio-php read it. They are not JSON: the body was JSON
   here and text there, and an answer that carried it on was no JSON.
