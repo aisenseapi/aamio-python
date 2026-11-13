@@ -74,6 +74,9 @@ not what moved in the source.
   written, and change nothing. A full disk was a traceback, after the probe
   had run, and when it was the rename at the end that failed, a file of the
   command's own was left in the home.
+- A message body with `NaN`, `Infinity` or `-Infinity` is read as text, as
+  the Node runtime and aamio-php read it. They are not JSON: the body was JSON
+  here and text there, and an answer that carried it on was no JSON.
 - After `partner remove`, the inbox that named the removed key is read until it
   expires, as in aamio-php and the Node runtime from the same release. What the
   partners still in the book write there is handed over; what the removed key

@@ -187,6 +187,14 @@ SEND_TRY_LATER = (429, 503)
 SEND_NOT_STORED = SEND_DETERMINISTIC + (429,)
 
 
+def _not_json(name):
+    """NaN, Infinity and -Infinity are not JSON. json.loads takes them, and the
+    Node runtime and aamio-php do not, so a body with one was JSON here and text
+    there, and an answer that carried it on was no JSON at all (a check of 12
+    November 2026). Raised as a ValueError, it is read as text, as there."""
+    raise ValueError("%s is not JSON" % name)
+
+
 def send_advice(outcome, status):
     """(retryable, fix) for one send outcome. retryable is about the same
     stored bytes, and is never a permission to repeat something automatically.
@@ -3464,7 +3472,7 @@ class Runtime:
 
         if not is_envelope(raw):
             try:
-                parsed = json.loads(raw)
+                parsed = json.loads(raw, parse_constant=_not_json)
             except ValueError:
                 return {"text": raw}, {"signed": True, "encrypted": False, "format": "text"}
 
@@ -3494,7 +3502,7 @@ class Runtime:
             return {"text": None}, {"signed": True, "encrypted": True, "format": "unreadable", "error": error.__class__.__name__}
 
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(text, parse_constant=_not_json)
         except ValueError:
             return {"text": text}, {"signed": True, "encrypted": True, "format": "text"}
 

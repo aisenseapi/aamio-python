@@ -6,6 +6,8 @@ for somebody using it.
 
 ## 0.1.2 - 2026-11-12
 
+- An unknown call says something that is not a name as JSON, as the editions
+  for PHP and Node say it. It was written in Python's own form.
 - A card whose time is far ahead is read on Windows. A card takes a time of
   up to eleven digits, and the answer says until when it is good. Past the
   year 3000 Windows could not write that date, so `read`, `scan` and `show`

@@ -801,3 +801,10 @@ def test_the_local_engine_through_the_core_needs_no_network(real_addon, tmp_path
     heard = json.loads(said)
     assert code == 0 and heard["status"] == "heard" and heard["engine"] == "local" and heard["card"]["name"] == "rom-42" and heard["card"]["expires_at"] == made["expires_at"]
 
+
+def test_an_unknown_call_is_said_as_the_other_two_editions_say_it():
+    """A name as it is, and anything else as JSON, as aamio-php and the Node runtime say it."""
+    tail = ". aamio addon earshot --help lists its commands, and aamio addon list its tools."
+    assert run(request("command", "shout"))["result"]["fix"] == "The add-on earshot has no command called shout" + tail
+    odd = dict(request("command", "shout"), name={"not": "a name"})
+    assert run(odd)["result"]["fix"] == 'The add-on earshot has no command called {"not":"a name"}' + tail

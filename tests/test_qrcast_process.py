@@ -838,3 +838,11 @@ def test_live_a_code_made_at_aisense_reads_back_here_and_there(tmp_path):
     blank.write_bytes(symbol.png(symbol.Symbol(1, 0, [[False] * 21 for _ in range(21)]), scale=8))
     said = process.handle(request("tool", "aamio_addon_qrcast_read", file=str(blank), engine="aisense"))
     assert said["exit_code"] == 3 and said["result"]["status"] == "nothing_seen" and said["result"]["engine"] == "aisense"
+
+
+def test_an_unknown_call_is_said_as_the_other_two_editions_say_it():
+    """A name as it is, and anything else as JSON, as aamio-php and the Node runtime say it."""
+    tail = ". aamio addon qrcast --help lists its commands, and aamio addon list its tools."
+    assert run(request("command", "nope"))["result"]["fix"] == "The add-on qrcast has no command called nope" + tail
+    odd = dict(request("command", "nope"), name={"not": "a name"})
+    assert run(odd)["result"]["fix"] == 'The add-on qrcast has no command called {"not":"a name"}' + tail

@@ -868,3 +868,18 @@ def test_a_key_that_begins_with_a_dash_is_a_key_on_the_command_line(tmp_path):
     # An option still reads as one, and a word that only looks like a key in length does not change.
     code, out, err = cli("partner", "add", "--help")
     assert code == 0 and "usage" in out
+
+
+def test_a_body_with_nan_or_infinity_is_text_as_in_the_other_two_runtimes(world):
+    """json.loads takes NaN and Infinity, and Node and PHP do not: the same body was JSON here and text there."""
+    service, runtime, base = world
+    a, b = partners(runtime)
+    w = a.channels["inbox"].w
+    plain = '{"x": NaN}'
+    assert b.client.post(w, plain, b.keys.public, b.keys.sign(thread_signing_input(w, plain)))[0] == 201
+    envelope = b.keys.seal(a.keys.public, b'{"y": Infinity}')
+    assert b.client.post(w, envelope, b.keys.public, b.keys.sign(thread_signing_input(w, envelope)))[0] == 201
+    got = a.read(wait=0)
+    assert [(m["format"], m["body"]) for m in got] == [("text", {"text": plain}), ("text", {"text": '{"y": Infinity}'})], got
+    # And what is handed over is JSON any reader takes: allow_nan=False raises on a NaN.
+    json.dumps(got, allow_nan=False)

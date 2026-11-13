@@ -65,6 +65,11 @@ def answer(result):
     return {"result": result, "exit_code": EXIT_CODES[result["status"]], "is_error": "fix" in result}
 
 
+def said(value):
+    """A name as it is, and anything else as JSON, as the editions for PHP and Node say it."""
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
 def refused(reason, fix, **known):
     return dict({"status": "invalid", "reason": reason, "fix": fix}, **known)
 
@@ -420,7 +425,7 @@ def handle(request, encode=None, decode=None, read_local=None, display=None, fra
         return answer(read_file(arguments, kind, decode, read_local, clock))
     if short == "scan":
         return answer(scan(arguments, kind, frames, read_frame, clock))
-    return answer(refused("unknown_call", "The add-on %s has no %s called %s. aamio addon %s --help lists its commands, and aamio addon list its tools." % (NAME, kind, name, NAME)))
+    return answer(refused("unknown_call", "The add-on %s has no %s called %s. aamio addon %s --help lists its commands, and aamio addon list its tools." % (NAME, said(kind), said(name), NAME)))
 
 
 def main():
