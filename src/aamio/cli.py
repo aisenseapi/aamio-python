@@ -69,11 +69,17 @@ def doctor(runtime):
     says so, and is never called fine.
     """
     status, health = runtime.client.health()
-    service = {"host": runtime.host, "reachable": status == 200}
+    # Whether the service answered and whether it is well are two things, and
+    # both apart from whether this client fits it. A 503 from /health was said
+    # as no answer, beside a fit read from the descriptor, which had answered
+    # (a check of 13 November 2026). As the Node runtime and aamio-php say it.
+    service = {"host": runtime.host, "reachable": status > 0, "healthy": status == 200, "status": status}
     if status == 200 and isinstance(health, dict):
         service.update(version=health.get("version"), revision=health.get("revision"))
+    elif status == 0:
+        service["problem"] = "no answer from /health, so the service's version and health were not read"
     else:
-        service["problem"] = "no answer from /health (%s), so nothing below about the service was checked" % status
+        service["problem"] = "/health answered %s and not 200: the service is reachable and not healthy, and its version was not read" % status
     status, descriptor = runtime.client.descriptor()
     fits = compat.check(descriptor if status == 200 else None)
     if status != 200:

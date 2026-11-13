@@ -143,7 +143,6 @@ def test_over_mcp_a_failure_carries_the_code_the_command_line_says(tmp_path):
     ("aamio_close_channel", {}, "aamio_close_channel needs label"),
     ("aamio_open_channel", {"label": "room", "ttl": 5}, "ttl is not what aamio_open_channel takes: "),
     ("aamio_open_channel", {"label": "room", "ttl": "600"}, "ttl is not what aamio_open_channel takes: "),
-    ("aamio_open_channel", {"label": "room", "ttl": 600, "gate": [1]}, "gate is not what aamio_open_channel takes: "),
     ("aamio_open_channel", {"label": "", "ttl": 600}, "label is not what aamio_open_channel takes: "),
     ("aamio_send", {"to": "b", "re": "a" * 64 + "\n"}, "re is not what aamio_send takes: "),
     ("aamio_read", {"limit": 999}, "limit is not what aamio_read takes: "),

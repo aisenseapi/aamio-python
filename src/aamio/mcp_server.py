@@ -476,6 +476,8 @@ def add_partner(runtime, arguments, ask):
 
 
 ARGUMENTS_FIX = "Check each argument against the tool's inputSchema and call again."
+# And one whose gate does not fit: there is no changing a gate once the channel is open.
+GATE_FIX = "Send a gate with require, advise or both, as in {\"require\": {\"pow\": {\"bits\": 20}, \"per_key\": 5}}, or leave gate out to take writes from anyone on the allowlist."
 
 
 def _pattern_found(pattern, value):
@@ -494,7 +496,7 @@ def wrong_arguments(tool, arguments):
     """Arguments as the tool's schema says, checked as the Node runtime and aamio-php check them.
 
     An object of known names, each of its type, with what is required there.
-    A sentence naming what is wrong, or None. Nothing checked them here: a
+    (where, sentence) naming what is wrong, or None. Nothing checked them here: a
     name spelt wrong was passed over, and a value of another type went on to
     the runtime (a check of 13 November 2026).
     """
@@ -502,27 +504,61 @@ def wrong_arguments(tool, arguments):
     for name, value in arguments.items():
         want = properties.get(name)
         if want is None:
-            return "%s takes no argument called %s" % (tool["name"], name)
-        kind = want.get("type")
-        if kind == "string":
-            fits = (isinstance(value, str) and (not want.get("pattern") or _pattern_found(want["pattern"], value))
-                    and want.get("minLength", 0) <= len(value) <= want.get("maxLength", float("inf")) and (not want.get("enum") or value in want["enum"]))
-        elif kind == "integer":
-            fits = _whole(value) and want.get("minimum", float("-inf")) <= value <= want.get("maximum", float("inf"))
-        elif kind == "boolean":
-            fits = isinstance(value, bool)
-        elif kind == "object":
-            fits = isinstance(value, dict)
-        elif kind == "array":
-            fits = isinstance(value, list) and all(isinstance(item, str) for item in value) and len(value) <= want.get("maxItems", float("inf"))
-        else:
-            fits = False
-        if not fits:
-            return "%s is not what %s takes: %s" % (name, tool["name"], json.dumps(want, ensure_ascii=False, separators=(",", ":")))
+            return name, "%s takes no argument called %s" % (tool["name"], name)
+        wrong = _wrong_value(tool, name, want, value)
+        if wrong is not None:
+            return wrong
     for name in tool["inputSchema"].get("required", []):
         if name not in arguments:
-            return "%s needs %s" % (tool["name"], name)
+            return name, "%s needs %s" % (tool["name"], name)
     return None
+
+
+def _wrong_value(tool, path, want, value):
+    """What is wrong with one value against its schema, as (path, sentence); or None.
+
+    An object whose fields the schema declares, as a gate's, is checked field by
+    field: a pow of "5" bits went on to the service, and a field no gate has
+    was passed over (a check of 13 November 2026). One that declares none, as
+    data, takes any field.
+    """
+    kind = want.get("type")
+    if kind == "string":
+        fits = (isinstance(value, str) and (not want.get("pattern") or _pattern_found(want["pattern"], value))
+                and want.get("minLength", 0) <= len(value) <= want.get("maxLength", float("inf")) and (not want.get("enum") or value in want["enum"]))
+    elif kind == "integer":
+        fits = _whole(value) and want.get("minimum", float("-inf")) <= value <= want.get("maximum", float("inf"))
+    elif kind == "boolean":
+        fits = isinstance(value, bool)
+    elif kind == "object":
+        fits = isinstance(value, dict)
+    elif kind == "array":
+        fits = isinstance(value, list) and all(isinstance(item, str) for item in value) and len(value) <= want.get("maxItems", float("inf"))
+    else:
+        fits = False
+    if not fits:
+        return path, "%s is not what %s takes: %s" % (path, tool["name"], json.dumps(want, ensure_ascii=False, separators=(",", ":")))
+    if kind == "object" and isinstance(want.get("properties"), dict):
+        for key, inner in value.items():
+            if key not in want["properties"]:
+                if want.get("additionalProperties") is False:
+                    return "%s.%s" % (path, key), "%s has no field called %s" % (path, key)
+                continue
+            wrong = _wrong_value(tool, "%s.%s" % (path, key), want["properties"][key], inner)
+            if wrong is not None:
+                return wrong
+        for key in want.get("required", []):
+            if key not in value:
+                return "%s.%s" % (path, key), "%s needs %s" % (path, key)
+    return None
+
+
+def _unfit(tool, wrong, arguments):
+    """What does not fit, as the call's answer: inside a gate it is the gate's refusal, with its fix; anything else is invalid_arguments."""
+    path, said = wrong
+    if tool["name"] == "aamio_open_channel" and (path == "gate" or path.startswith("gate.")):
+        return {"error": said, "error_code": "invalid_gate", "fix": GATE_FIX, "given": arguments.get("gate")}
+    return {"error": said, "error_code": "invalid_arguments", "fix": ARGUMENTS_FIX}
 
 
 def dispatch(runtime: Runtime, name: str, arguments: dict, ask=None):
@@ -603,7 +639,7 @@ def dispatch(runtime: Runtime, name: str, arguments: dict, ask=None):
                     return result_of({
                         "error": str(wrong),
                         "error_code": code_of(wrong),
-                        "fix": "Send a gate with require, advise or both, as in {\"require\": {\"pow\": {\"bits\": 20}, \"per_key\": 5}}, or leave gate out to take writes from anyone on the allowlist.",
+                        "fix": GATE_FIX,
                         "given": arguments.get("gate"),
                     }, is_error=True)
 
@@ -834,8 +870,10 @@ def handle(runtime: Runtime, message, session=None):
     if method == "tools/call":
         name = params.get("name")
         # An object, or nothing. Anything else is a request this server cannot
-        # read, as in the other two runtimes: it was read as no arguments.
-        if params.get("arguments") is not None and not isinstance(params.get("arguments"), dict):
+        # read, as in the other two runtimes: it was read as no arguments, and so
+        # was an explicit null, which the Node runtime refuses (a check of 13
+        # November 2026).
+        if "arguments" in params and not isinstance(params["arguments"], dict):
             return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": "arguments must be an object"}}
         arguments = params.get("arguments") or {}
         # Arguments that do not fit the tool's schema are the call's answer, as
@@ -846,7 +884,7 @@ def handle(runtime: Runtime, message, session=None):
         if listed is not None and name != "aamio_partner_add":
             wrong = wrong_arguments(listed, arguments)
             if wrong is not None:
-                return {"jsonrpc": "2.0", "id": rid, "result": shaped(result_of({"error": wrong, "error_code": "invalid_arguments", "fix": ARGUMENTS_FIX}, True), modern)}
+                return {"jsonrpc": "2.0", "id": rid, "result": shaped(result_of(_unfit(listed, wrong, arguments), True), modern)}
             integers = [field for field, want in listed["inputSchema"].get("properties", {}).items() if want.get("type") == "integer"]
             arguments = {field: int(value) if field in integers and isinstance(value, float) else value for field, value in arguments.items()}
         try:
@@ -1015,10 +1053,15 @@ def serve(runtime: Runtime):
             # One at a time and asked about just before, since serving one call
             # can wait on the user, and a later call in the same batch can be
             # cancelled meanwhile.
-            replies = [safely(runtime, m, session) for m in (message if isinstance(message, list) else [message]) if not wire.skips(m)]
+            # A batch is a list that holds something. The empty list is a
+            # request that cannot be read, answered once, as JSON-RPC and the
+            # other two runtimes have it: it went unanswered (a check of 13
+            # November 2026).
+            batch = isinstance(message, list) and len(message) > 0
+            replies = [safely(runtime, m, session) for m in (message if batch else [message]) if not wire.skips(m)]
             replies = [r for r in replies if r is not None]
             if not replies:
                 continue
-            reply = replies if isinstance(message, list) else replies[0]
+            reply = replies if batch else replies[0]
         wire.send(reply)
     runtime.close()

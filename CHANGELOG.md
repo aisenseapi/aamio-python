@@ -4,6 +4,24 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.34 - 2026-11-13
+
+- Over MCP arguments that are `null` are a request the server cannot read, as
+  in the Node runtime and aamio-php: they were read as no arguments.
+- A line that is the empty list, `[]`, is a request the server cannot read,
+  answered once with `-32600` as JSON-RPC and the other two runtimes have it.
+  It went unanswered.
+- Over MCP a tool's schema is checked into the fields it declares, as in the
+  other two runtimes: a gate whose `pow` has `"5"` bits, one with a field no
+  gate has, or a `pow` without `bits` is the gate's refusal, `invalid_gate`,
+  with what is wrong by its path, as `gate.require.pow.bits`, and the gate's
+  fix. They went on to the service. `data` declares no fields, and takes any.
+- `doctor` says whether the service answered, whether it is healthy and
+  whether this client fits it, each apart: `service.reachable`,
+  `service.healthy` and `service.status`, beside `compatibility`. A 503 from
+  `/health` was said as no answer, beside a fit read from the descriptor,
+  which had answered.
+
 ## 0.6.33 - 2026-11-13
 
 - `board replies` lists an answer as it was first written down. One read again
