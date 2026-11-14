@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from aamio import mcp_server
+from aamio import mcp_server, storage
 from aamio.crypto import Keys, sha256hex, thread_signing_input
 from aamio.runtime import Runtime, unfit_json, unfit_text
 
@@ -738,6 +738,115 @@ def test_a_message_the_listener_queued_keeps_its_mark_when_a_tidying_leaves_its_
         assert rows_of(home, "inbox") == [1] and runtime.pruned_at > 0.0
     finally:
         done()
+
+
+def a_later_file(home):
+    """A small record in a second archive file, newer than the inbox's: the tidying keeps it and writes the file again."""
+    with open(os.path.join(home, "archive", "zz-locked.jsonl"), "wb") as handle:
+        handle.write(json.dumps({"kind": "sent", "at": time.time() + 1000, "w": "z" * 20, "body": {"text": "later"}}).encode("utf-8") + b"\n")
+
+
+def refusing(name, monkeypatch):
+    """Replacing the file of this name fails, as a file open elsewhere without sharing delete does on Windows."""
+    real = os.replace
+
+    def replace(src, dst, *args, **kwargs):
+        if os.path.basename(str(dst)) == name:
+            raise PermissionError(13, "The process cannot access the file because it is being used by another process", str(dst))
+        return real(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+
+def test_a_tidying_that_stopped_part_way_says_what_did_go_on_the_message_waiting(tmp_path, monkeypatch):
+    """The seventh release check of 14 November 2026, item 1: the inbox's file was written again without the row, the
+    next file could not be replaced, the tidying stopped there, and the waiting message was handed over saying archived."""
+    home, runtime, done = listening(tmp_path, ["x" * 2000])
+    try:
+        a_later_file(home)
+        refusing("zz-locked.jsonl", monkeypatch)
+        runtime.pruned_at = 0.0
+        read = runtime.read(0, 50)
+        assert [(m["seq"], m["archived"], m.get("archive_tidied")) for m in read] == [(1, False, True)]
+        assert rows_of(home, "inbox") == [], "the row went, and is not written back"
+        assert any(note["state"] == "unpruned" for note in runtime.attention_taken()), "and the tidying that stopped is said"
+        assert runtime.read(0, 50) == [], "handed over once"
+    finally:
+        done()
+
+
+def test_a_tidying_that_could_not_replace_the_first_file_leaves_the_mark_as_it_was(tmp_path, monkeypatch):
+    """Item 1: the inbox's file could not be replaced, its row stayed, and so did the message's mark."""
+    home, runtime, done = listening(tmp_path, ["x" * 2000])
+    try:
+        a_later_file(home)
+        refusing("inbox.jsonl", monkeypatch)
+        runtime.pruned_at = 0.0
+        read = runtime.read(0, 50)
+        assert [(m["seq"], m["archived"], m.get("archive_tidied")) for m in read] == [(1, True, None)]
+        assert rows_of(home, "inbox") == [1], "the row is there, as the message says"
+    finally:
+        done()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="a lock that keeps a file from being replaced is the Windows one")
+def test_a_tidying_stopped_by_a_real_windows_lock_says_what_did_go(tmp_path):
+    """Item 1 with the lock itself: the later file held open with reading and writing shared, and deleting not."""
+    import ctypes
+    from ctypes import wintypes
+
+    home, runtime, done = listening(tmp_path, ["x" * 2000])
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = None
+    try:
+        a_later_file(home)
+        handle = kernel32.CreateFileW(os.path.join(home, "archive", "zz-locked.jsonl"), 0x80000000, 0x1 | 0x2, None, 3, 0, None)
+        assert handle not in (None, wintypes.HANDLE(-1).value), "the lock is taken"
+        runtime.pruned_at = 0.0
+        read = runtime.read(0, 50)
+        assert [(m["seq"], m["archived"], m.get("archive_tidied")) for m in read] == [(1, False, True)]
+        assert rows_of(home, "inbox") == []
+    finally:
+        if handle not in (None, wintypes.HANDLE(-1).value):
+            kernel32.CloseHandle(handle)
+        done()
+
+
+def test_only_records_of_files_written_again_or_removed_are_said_to_have_gone(tmp_path, monkeypatch):
+    """Item 1, in the archive itself: a file chosen for tidying and never changed gives nothing to taken, with a
+    lifetime, with a size, and when the whole archive goes."""
+    def home_with(rows):
+        home = tmp_path / ("home-%d" % len(list(tmp_path.iterdir())))
+        os.makedirs(home / "archive")
+        for name, at, seq in rows:
+            with open(home / "archive" / name, "ab") as handle:
+                handle.write(json.dumps({"kind": "received", "channel": name[:-6], "w": name[0] * 20, "seq": seq, "sha256": "%064x" % seq, "at": at}).encode("utf-8") + b"\n")
+        return str(home)
+
+    now = time.time()
+    refusing("b.jsonl", monkeypatch)
+    for policy in ({"mode": "days", "days": 1, "max_mb": None}, {"mode": "keep", "days": None, "max_mb": 1e-9}):
+        home = home_with([("a.jsonl", now - 5 * 86400, 1), ("b.jsonl", now - 5 * 86400, 2)])
+        taken = set()
+        with pytest.raises(PermissionError):
+            storage.prune(home, policy, now=now, taken=taken)
+        assert taken == {("a" * 20, 1, "%064x" % 1)}, (policy, taken)
+    home = home_with([("a.jsonl", now, 1), ("b.jsonl", now, 2)])
+    real_remove = os.remove
+
+    def remove(path, *args, **kwargs):
+        if os.path.basename(str(path)) == "b.jsonl":
+            raise PermissionError(13, "in use", str(path))
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "remove", remove)
+    taken = set()
+    with pytest.raises(PermissionError):
+        storage.prune(home, storage.DEFAULT_POLICY, everything=True, taken=taken)
+    assert taken == {("a" * 20, 1, "%064x" % 1)}, taken
 
 
 class Walking(set):

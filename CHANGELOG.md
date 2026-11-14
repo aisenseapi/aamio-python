@@ -73,7 +73,9 @@ not what moved in the source.
   description says when `max_mb` holds: each time it is tidied. A message the
   listener took in and held until a read handed it over says `archived:
   false` and `archive_tidied: true` when a tidying took its record in the
-  meantime; it said `archived: true` with no record behind it.
+  meantime; it said `archived: true` with no record behind it. A tidying that
+  stops part way, a file that cannot be replaced, says on the messages what
+  did go: only the records of files written again or removed.
 
 ## 0.6.34 - 2026-11-13
 

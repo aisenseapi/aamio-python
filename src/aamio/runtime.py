@@ -1189,14 +1189,22 @@ class Runtime:
         taken = set()
         try:
             with self.archive_lock:
-                gone = storage.prune(self.home, policy, taken=taken)
-                # What the end of each file held may be gone with it, and with
-                # it a row this process wrote at a read whose cursor was not
-                # written: the next read looks in the file again (the third
-                # release check of 14 November 2026).
-                self.__dict__.pop("archive_before", None)
-                self.__dict__.get("written_down", {}).clear()
+                try:
+                    gone = storage.prune(self.home, policy, taken=taken)
+                finally:
+                    # What the end of each file held may be gone with it, and
+                    # with it a row this process wrote at a read whose cursor
+                    # was not written: the next read looks in the file again
+                    # (the third release check of 14 November 2026). So also
+                    # when the tidying stopped part way.
+                    self.__dict__.pop("archive_before", None)
+                    self.__dict__.get("written_down", {}).clear()
         except (OSError, ValueError) as error:
+            # What went before it stopped went: said on the messages waiting
+            # for a read, as a tidying that went through says it (the seventh
+            # release check of 14 November 2026). Taken holds only the records
+            # of files written again or removed.
+            self._receipts_taken(taken)
             # The archive keeps growing, in plain text, and the policy that was
             # meant to bound it did not run. Worth hearing about once per reason.
             self._note_trouble(

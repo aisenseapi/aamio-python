@@ -586,12 +586,22 @@ def prune(home, policy, now=None, everything=False, taken=None):
     crash in the middle leaves the old file whole. A set given as taken gets
     the delivery of each received record that went, so a runtime can say so on
     a message it still holds (the sixth release check of 14 November 2026).
+    A record goes into it once its file is written again without it, or
+    removed: a file that could not be replaced keeps its records, and a
+    tidying that stopped part way has said what did go (the seventh release
+    check of 14 November 2026).
     """
-    def went(line):
+    # The deliveries each file is to lose, given to taken once it has lost them.
+    planned = {}
+
+    def went(name, line):
+        key = _row_key(line)
+        if key is not None:
+            planned.setdefault(name, set()).add(key)
+
+    def done(name):
         if taken is not None:
-            key = _row_key(line)
-            if key is not None:
-                taken.add(key)
+            taken.update(planned.get(name, ()))
 
     folder = os.path.join(home, "archive")
     now = time.time() if now is None else now
@@ -606,8 +616,9 @@ def prune(home, policy, now=None, everything=False, taken=None):
         for name in names:
             for _, line in _records(os.path.join(folder, name)):
                 removed += 1
-                went(line)
+                went(name, line)
             os.remove(os.path.join(folder, name))
+            done(name)
 
         sync_dir(folder)
         return {"removed": removed, "bytes": 0}
@@ -621,7 +632,7 @@ def prune(home, policy, now=None, everything=False, taken=None):
         for at, line in _records(os.path.join(folder, name)):
             if horizon is not None and at is not None and at < horizon:
                 removed += 1
-                went(line)
+                went(name, line)
             else:
                 kept[name].append((at, line))
 
@@ -639,7 +650,7 @@ def prune(home, policy, now=None, everything=False, taken=None):
             total -= len(kept[name][index][1])
             gone.add((name, index))
             removed += 1
-            went(kept[name][index][1])
+            went(name, kept[name][index][1])
 
         for name in kept:
             kept[name] = [record for index, record in enumerate(kept[name]) if (name, index) not in gone]
@@ -661,6 +672,7 @@ def prune(home, policy, now=None, everything=False, taken=None):
             os.fsync(handle.fileno())
 
         os.replace(path + ".tmp", path)
+        done(name)
 
     if removed:
         sync_dir(folder)
