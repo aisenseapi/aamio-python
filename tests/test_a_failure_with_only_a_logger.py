@@ -106,7 +106,7 @@ def test_an_archive_that_was_not_pruned_reaches_the_caller(monkeypatch):
     runtime.archive_policy = {"days": 30}
     runtime.archive_lock = threading.Lock()
 
-    def refuse(home, policy):
+    def refuse(home, policy, **_):
         raise OSError("permission denied")
 
     monkeypatch.setattr(storage, "prune", refuse)

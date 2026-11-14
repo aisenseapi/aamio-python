@@ -1186,9 +1186,10 @@ class Runtime:
         if not self.archive_enabled or not (policy.get("days") or policy.get("max_mb")):
             return
         self.pruned_at = time.time()
+        taken = set()
         try:
             with self.archive_lock:
-                gone = storage.prune(self.home, policy)
+                gone = storage.prune(self.home, policy, taken=taken)
                 # What the end of each file held may be gone with it, and with
                 # it a row this process wrote at a read whose cursor was not
                 # written: the next read looks in the file again (the third
@@ -1205,8 +1206,50 @@ class Runtime:
                 % (error.__class__.__name__, error),
             )
             return
+        self._receipts_taken(taken)
         if gone["removed"]:
             self.log("archive: %d record(s) past their lifetime removed" % gone["removed"])
+
+    # A message the listener has taken in and said is archived waits in the
+    # queue, or in held_back, until a read hands it over. A tidying in the
+    # meantime may take its row by the archive's own rules: the message then
+    # says so, archived false and archive_tidied true, and the row is not
+    # written back. Handed over saying archived, it had no row behind it (the
+    # sixth release check of 14 November 2026).
+
+    @staticmethod
+    def _receipt_key(entry):
+        return (entry.get("w"), entry.get("seq"), entry.get("sha256"))
+
+    def _hold_receipts(self, entries):
+        """Messages the listener has in hand and has said are archived, kept in mind until they are handed over."""
+        with self.lock:
+            waiting = self.__dict__.setdefault("waiting_receipts", {})
+            for entry in entries:
+                if isinstance(entry, dict) and entry.get("archived") is True:
+                    waiting.setdefault(self._receipt_key(entry), []).append(entry)
+
+    def _release_receipt(self, entry):
+        """A message handed over, or not handed over at all: it is no longer waiting."""
+        with self.lock:
+            waiting = self.__dict__.get("waiting_receipts") or {}
+            key = self._receipt_key(entry)
+            held = [e for e in waiting.get(key, []) if e is not entry]
+            if held:
+                waiting[key] = held
+            else:
+                waiting.pop(key, None)
+
+    def _receipts_taken(self, taken):
+        """What a tidying took of the rows that messages waiting to be handed over say are there, said on them."""
+        if not taken:
+            return
+        with self.lock:
+            waiting = self.__dict__.get("waiting_receipts") or {}
+            for key in taken:
+                for entry in waiting.pop(key, []):
+                    entry["archived"] = False
+                    entry["archive_tidied"] = True
 
     def _load(self, tags):
         self.keys = self._load_or_create_keys()
@@ -4804,28 +4847,37 @@ class Runtime:
         # server uses as by the command line.
         while not self.stop.is_set() and not channel.closed and channel.expire_at > time.time():
             entries = []
+            pause = 0
 
-            try:
-                state, entries = self.poll(channel, 20)
-                if state == "expired":
-                    break
-                if state in ("error", "gone"):
-                    time.sleep(2)
-            except Exception as error:
-                # Whatever went wrong, anything poll had already decoded is on this
-                # machine and is handed over below. Losing it here is how a full disk
-                # turned two messages into an empty inbox with nothing said.
-                self._note_trouble(
-                    "poller %s" % channel.label,
-                    "unread",
-                    "reading this channel stopped part way: %s: %s. Anything already read is handed over; the rest arrives on the next read."
-                    % (error.__class__.__name__, error),
-                )
-                self.log("poller %s: %s" % (channel.label, error))
-                time.sleep(3)
+            # One read for the archive with the queueing: what the poll says of
+            # each message holds until the message waits where a tidying sees
+            # it (the sixth release check of 14 November 2026).
+            with self._outer_read():
+                try:
+                    state, entries = self.poll(channel, 20)
+                    if state == "expired":
+                        break
+                    if state in ("error", "gone"):
+                        pause = 2
+                except Exception as error:
+                    # Whatever went wrong, anything poll had already decoded is on this
+                    # machine and is handed over below. Losing it here is how a full disk
+                    # turned two messages into an empty inbox with nothing said.
+                    self._note_trouble(
+                        "poller %s" % channel.label,
+                        "unread",
+                        "reading this channel stopped part way: %s: %s. Anything already read is handed over; the rest arrives on the next read."
+                        % (error.__class__.__name__, error),
+                    )
+                    self.log("poller %s: %s" % (channel.label, error))
+                    pause = 3
 
-            for entry in entries:
-                self.inbound.put(entry)
+                self._hold_receipts(entries)
+                for entry in entries:
+                    self.inbound.put(entry)
+
+            if pause:
+                time.sleep(pause)
         channel.poller = None
 
     def _start_poller(self, channel):
@@ -5014,6 +5066,13 @@ class Runtime:
         # four messages read with a small budget came back 1, then 3, 2, 4: the one
         # that did not fit had been put behind two nobody had looked at yet. Once a
         # message is on this machine its order is the only order the caller sees.
+        #
+        # From here until this returns no tidying runs, so what each message
+        # says of the archive as it is weighed and handed over is so when it is:
+        # this read tidied before it began, and what that took is said on the
+        # messages that were waiting (the sixth release check of 14 November
+        # 2026).
+        self._giving_receipts()
         with self.lock:
             waiting = list(getattr(self, "held_back", []))
             self.held_back = []
@@ -5037,6 +5096,7 @@ class Runtime:
             # sat in the queue before the partner was removed is not either,
             # and that is said.
             if self._withheld_since(entry):
+                self._release_receipt(entry)
                 continue
 
             if max_bytes is not None:
@@ -5072,6 +5132,7 @@ class Runtime:
                 used[where] = used.get(where, 0) + weight
                 taken[where] = taken.get(where, 0) + 1
 
+            self._release_receipt(entry)
             collected.append(entry)
 
         if held or waiting:

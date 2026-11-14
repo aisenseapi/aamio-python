@@ -565,13 +565,34 @@ def _records(path):
         yield (float(at) if isinstance(at, (int, float)) else None), raw + b"\n"
 
 
-def prune(home, policy, now=None, everything=False):
+def _row_key(raw):
+    """The delivery a received record names, as (w, seq, sha256), or None for any other line."""
+    try:
+        row = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+    if not isinstance(row, dict) or row.get("kind") != "received" or not isinstance(row.get("w"), str) or type(row.get("seq")) is not int:
+        return None
+
+    return (row["w"], row["seq"], row["sha256"] if isinstance(row.get("sha256"), str) else None)
+
+
+def prune(home, policy, now=None, everything=False, taken=None):
     """Removes what the policy no longer keeps. Returns how many records went, and how many bytes are left.
 
     A record this cannot date is kept: what cannot be told old is not thrown
     away as old. Each file is rewritten beside itself and renamed over, so a
-    crash in the middle leaves the old file whole.
+    crash in the middle leaves the old file whole. A set given as taken gets
+    the delivery of each received record that went, so a runtime can say so on
+    a message it still holds (the sixth release check of 14 November 2026).
     """
+    def went(line):
+        if taken is not None:
+            key = _row_key(line)
+            if key is not None:
+                taken.add(key)
+
     folder = os.path.join(home, "archive")
     now = time.time() if now is None else now
     removed = 0
@@ -583,7 +604,9 @@ def prune(home, policy, now=None, everything=False):
 
     if everything:
         for name in names:
-            removed += sum(1 for _ in _records(os.path.join(folder, name)))
+            for _, line in _records(os.path.join(folder, name)):
+                removed += 1
+                went(line)
             os.remove(os.path.join(folder, name))
 
         sync_dir(folder)
@@ -598,6 +621,7 @@ def prune(home, policy, now=None, everything=False):
         for at, line in _records(os.path.join(folder, name)):
             if horizon is not None and at is not None and at < horizon:
                 removed += 1
+                went(line)
             else:
                 kept[name].append((at, line))
 
@@ -615,6 +639,7 @@ def prune(home, policy, now=None, everything=False):
             total -= len(kept[name][index][1])
             gone.add((name, index))
             removed += 1
+            went(kept[name][index][1])
 
         for name in kept:
             kept[name] = [record for index, record in enumerate(kept[name]) if (name, index) not in gone]

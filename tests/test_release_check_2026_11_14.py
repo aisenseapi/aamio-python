@@ -661,6 +661,85 @@ def test_a_read_in_another_thread_does_not_tidy_while_this_one_gives_receipts(tm
         again.release()
 
 
+def listening(tmp_path, texts):
+    """A runtime with its listener running and these messages on the inbox, taken in and queued, the next poll held."""
+    service = Service()
+    home = tmp_path / "home"
+    runtime = archived_runtime(home, service)
+    inbox = runtime.ensure_inbox()
+    sender = Keys.generate()
+    for text in texts:
+        service.write(inbox.w, json.dumps({"text": text}), sender)
+    runtime.archive_policy = {"mode": "keep", "days": None, "max_mb": 0.001}
+    real = runtime.client.http
+    quiet = threading.Event()
+
+    def held(method, url, *args, **kwargs):
+        # The poll after the one that took the messages in waits, as a long poll does.
+        if method == "GET" and ("/" + inbox.w + "/after/" + str(len(texts))) in url:
+            quiet.wait(10)
+        return real(method, url, *args, **kwargs)
+
+    runtime.client.http = held
+    runtime.start()
+    deadline = time.time() + 10
+    while runtime.inbound.qsize() < len(texts) and time.time() < deadline:
+        time.sleep(0.05)
+    assert runtime.inbound.qsize() == len(texts) and rows_of(home, "inbox") == list(range(1, len(texts) + 1)), "taken in, archived and queued"
+
+    def done():
+        runtime.stop.set()
+        quiet.set()
+        runtime.client.http = real
+        runtime.release()
+
+    return home, runtime, done
+
+
+def test_a_message_the_listener_queued_says_what_a_tidying_did_to_its_row(tmp_path):
+    """The sixth release check of 14 November 2026, item 1: the listener archived and queued a message, the next read
+    tidied by the archive's own rules, and handed the message over saying archived, with no row behind it."""
+    home, runtime, done = listening(tmp_path, ["x" * 2000])
+    try:
+        runtime.pruned_at = 0.0
+        read = runtime.read(0, 50)
+        assert [(m["seq"], m["archived"], m.get("archive_tidied")) for m in read] == [(1, False, True)]
+        assert rows_of(home, "inbox") == [], "the row went by the archive's rules, and is not written back"
+        assert runtime.pruned_at > 0.0, "the read tidied"
+        assert runtime.read(0, 50) == [], "handed over once"
+    finally:
+        done()
+
+
+def test_a_message_held_back_by_a_byte_budget_says_what_a_tidying_did_to_its_row(tmp_path):
+    """Item 1, held back: a read with a byte budget took the first message and held the second; the next read tidied
+    first, and the second came saying the archive's rules had taken its row."""
+    home, runtime, done = listening(tmp_path, ["small", "x" * 2000])
+    try:
+        first = runtime.read(0, 50, max_bytes=1000)
+        assert [(m["seq"], m["archived"], m.get("archive_tidied")) for m in first] == [(1, True, None)]
+        assert rows_of(home, "inbox") == [1, 2]
+        runtime.pruned_at = 0.0
+        second = runtime.read(0, 50, max_bytes=1000)
+        assert [(m["seq"], m["archived"], m.get("archive_tidied")) for m in second] == [(2, False, True)]
+        assert rows_of(home, "inbox") == [], "the tidying went by its rules"
+    finally:
+        done()
+
+
+def test_a_message_the_listener_queued_keeps_its_mark_when_a_tidying_leaves_its_row(tmp_path):
+    """Item 1: a tidying that takes nothing of a waiting message's row leaves its mark as it was."""
+    home, runtime, done = listening(tmp_path, ["kept"])
+    try:
+        runtime.archive_policy = {"mode": "keep", "days": None, "max_mb": 50}
+        runtime.pruned_at = 0.0
+        read = runtime.read(0, 50)
+        assert [(m["seq"], m["archived"], m.get("archive_tidied")) for m in read] == [(1, True, None)]
+        assert rows_of(home, "inbox") == [1] and runtime.pruned_at > 0.0
+    finally:
+        done()
+
+
 class Walking(set):
     """A set its reader is adding to at this moment: whoever walks it meets a change of size halfway."""
 

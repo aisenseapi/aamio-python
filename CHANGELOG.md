@@ -70,7 +70,10 @@ not what moved in the source.
   row a read had just written, also one written for an earlier channel of the
   same read, and the read still said `archived`. Nor does a read in another
   thread tidy while one is saying what the archive holds. The archive's own
-  description says when `max_mb` holds: each time it is tidied.
+  description says when `max_mb` holds: each time it is tidied. A message the
+  listener took in and held until a read handed it over says `archived:
+  false` and `archive_tidied: true` when a tidying took its record in the
+  meantime; it said `archived: true` with no record behind it.
 
 ## 0.6.34 - 2026-11-13
 
