@@ -40,7 +40,9 @@ not what moved in the source.
   post that names an address binds it on its own. Of a channel under a read,
   the read's own fields are written as it last finished, and its name, mute
   and list as they stand: a rotation of the inbox during a read wrote the old
-  inbox back as inbox, unmuted.
+  inbox back as inbox, unmuted. Nothing of the read's is walked by such a
+  save: the reader adds to the hashes as it goes, in a thread of its own, and
+  a save for another channel could meet a change of size halfway and fail.
 - A logger that fails costs the log line, never the read: a note made after
   the cursor was written down threw out of the read, which then handed over
   nothing of what it had passed.
@@ -63,7 +65,10 @@ not what moved in the source.
   is read again once a prune has replaced it: a row a prune had removed was
   still taken as there. What this process wrote at a read whose cursor was not
   written is looked for in the file again after a prune too, so `archived` is
-  the row that is there.
+  the row that is there. Tidying that is due runs before a read weighs its
+  first message and before a row is written, never after: under a ceiling
+  smaller than one row, the tidying took the row the read had just written,
+  and the read still said `archived`.
 
 ## 0.6.34 - 2026-11-13
 

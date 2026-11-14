@@ -1110,6 +1110,11 @@ class Runtime:
                 )
         self._prune()
 
+    def _prune_when_due(self):
+        """Tidies the archive when an hour has passed since it was tidied last."""
+        if time.time() - getattr(self, "pruned_at", 0.0) > 3600:
+            self._prune()
+
     def _prune(self):
         policy = getattr(self, "archive_policy", None) or storage.DEFAULT_POLICY
         if not self.archive_enabled or not (policy.get("days") or policy.get("max_mb")):
@@ -1485,14 +1490,24 @@ class Runtime:
     # release check of 14 November 2026).
     READ_FIELDS = ("after", "created_at", "expire_at", "instance", "gone", "seen", "seen_from")
 
+    # And what is the channel's own: its name, its secret, its address, its
+    # list and whether it is muted.
+    OWN_FIELDS = ("label", "read_key", "w", "allow", "muted")
+
     def _saved_channel(self, channel):
-        """A channel as state.json gets it: with a read under way, that read's fields as it last finished."""
-        live = channel.to_state()
+        """A channel as state.json gets it: with a read under way, that read's fields as it last finished.
+
+        Of a channel under a read, nothing of the read's is walked. Its reader
+        adds to the hashes as it goes, in a thread of its own, and a save for
+        another channel that walked them could meet a change of size halfway
+        and fail (the fourth release check of 14 November 2026). The read's
+        fields come from the copy the read last wrote itself down as, and the
+        channel's own from the channel.
+        """
         held = getattr(channel, "committed", None)
         if held is None:
-            return live
-        live.update({field: held[field] for field in self.READ_FIELDS if field in held})
-        return live
+            return channel.to_state()
+        return {field: getattr(channel, field) if field in self.OWN_FIELDS else value for field, value in held.items()}
 
     def save_outbox(self):
         with self.lock:
@@ -1590,6 +1605,10 @@ class Runtime:
         """
         if not self.archive_enabled or getattr(self, "home_released", False) is True:
             return False
+        # Before the row, never after it: a ceiling under one row took the row
+        # just written, and the read said archived (the fourth release check of
+        # 14 November 2026). A read tidies before it weighs its first message.
+        self._prune_when_due()
         # ensure_ascii=False so ordinary non-English text stays readable in the
         # file. Some text cannot be written that way at all: JSON can carry a
         # lone surrogate, Python will happily parse it into a str, and UTF-8
@@ -1621,8 +1640,6 @@ class Runtime:
                 handle.write(("\n" if torn else "") + line + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-        if time.time() - getattr(self, "pruned_at", 0.0) > 3600:
-            self._prune()
 
         return True
 
@@ -4191,6 +4208,14 @@ class Runtime:
         used = 0
         oversized = None
         fetched = data.get("messages", [])
+        # Tidying that is due runs before any message of this read is weighed
+        # for the archive, and never after one is written: what the read says
+        # of the archive is so as it returns. A ceiling under one row took the
+        # row a read had just written, and a row an earlier process wrote, and
+        # the read said archived of both (the fourth release check of 14
+        # November 2026).
+        if fetched and getattr(self, "archive_enabled", False) and getattr(self, "home_released", False) is not True:
+            self._prune_when_due()
         for index, raw in enumerate(fetched):
             if limit is not None and len(entries) >= limit:
                 channel.left_waiting = len(fetched) - index

@@ -546,6 +546,92 @@ def test_after_a_cursor_that_could_not_be_written_and_a_prune_the_mark_is_the_ro
         runtime.release()
 
 
+def test_tidying_that_is_due_runs_before_a_read_weighs_its_messages(tmp_path):
+    """The fourth release check of 14 November 2026, item 1: with tidying due and a ceiling under one row, a read
+    used the row an earlier process wrote and wrote the next, the tidying took both, and each message said archived."""
+    service, home, rows = crafted(tmp_path, ["first", "second"])
+    with open(os.path.join(home, "archive", "side.jsonl"), "wb") as handle:
+        handle.write(rows[0] + b"\n")
+    again = archived_runtime(home, service)
+    try:
+        again.archive_policy = {"mode": "keep", "days": None, "max_mb": 0.0001}
+        again.pruned_at = 0.0
+        assert len(rows[0]) > 0.0001 * 1024 * 1024, "the ceiling is under one row"
+        assert [(m["body"]["text"], m["archived"]) for m in again.read(0, 50)] == [("first", True), ("second", True)]
+        assert written(home) == ([1, 2], 2), "the archive has what the messages say, after the tidying of the same read"
+        assert again.pruned_at > 0.0, "the tidying ran"
+    finally:
+        again.release()
+
+
+def test_tidying_between_two_reads_still_takes_rows_and_the_next_read_writes_its_own(tmp_path):
+    """Item 1: what a tidying that was due takes of what was there before, it takes; the read's own row stays."""
+    service, home, rows = crafted(tmp_path, ["first"])
+    again = archived_runtime(home, service)
+    try:
+        assert [(m["body"]["text"], m["archived"]) for m in again.read(0, 50)] == [("first", True)]
+        assert written(home) == ([1], 1)
+        side = [c for c in again.channels.values() if c.label == "side"][0]
+        service.write(side.w, json.dumps({"text": "second"}), Keys.generate())
+        again.archive_policy = {"mode": "keep", "days": None, "max_mb": 0.0001}
+        again.pruned_at = 0.0
+        assert [(m["body"]["text"], m["archived"]) for m in again.read(0, 50)] == [("second", True)]
+        assert written(home) == ([2], 1), "the first went with the tidying, which ran first; the second is there"
+    finally:
+        again.release()
+
+
+class Walking(set):
+    """A set its reader is adding to at this moment: whoever walks it meets a change of size halfway."""
+
+    adding = False
+
+    def __iter__(self):
+        if self.adding:
+            raise RuntimeError("Set changed size during iteration")
+        return super().__iter__()
+
+
+def test_a_save_while_a_reader_adds_to_its_hashes_walks_none_of_them(tmp_path, monkeypatch):
+    """Item 2: a save for another channel took the hashes of a channel under a read from the live sets, which its
+    reader adds to in a thread of its own, and failed when it met a change of size halfway."""
+    service = Service()
+    home = tmp_path / "home"
+    runtime = opened(home, service)
+    inbox = runtime.ensure_inbox()
+    side = runtime.open_channel("side", 600)
+    sender = Keys.generate()
+    service.write(side["w"], json.dumps({"text": "first on the side"}), sender)
+    service.write(side["w"], json.dumps({"text": "second on the side"}), sender)
+    service.write(inbox.w, json.dumps({"text": "on the inbox"}), sender)
+    channels = {c.label: c for c in runtime.channels.values()}
+    channels["side"].seen = Walking(channels["side"].seen)
+    channels["side"].seen_from = Walking(channels["side"].seen_from)
+    real = runtime._read_entry
+    during = {}
+
+    def interleaved(channel, raw):
+        if channel.label == "side" and isinstance(raw, dict) and raw.get("seq") == 2:
+            channel.seen.adding = channel.seen_from.adding = True
+            try:
+                assert [m["body"]["text"] for m in runtime.poll(channels["inbox"])[1]] == ["on the inbox"]
+                with open(home / "state.json", encoding="utf-8") as handle:
+                    during.update({c["label"]: c for c in json.load(handle)["channels"]})
+            finally:
+                channel.seen.adding = channel.seen_from.adding = False
+        return real(channel, raw)
+
+    monkeypatch.setattr(runtime, "_read_entry", interleaved)
+    try:
+        assert [m["body"]["text"] for m in runtime.poll(channels["side"])[1]] == ["first on the side", "second on the side"]
+        assert during["inbox"]["after"] == 1 and len(during["inbox"]["seen"]) == 1, "the inbox's save went through while the side's reader was adding"
+        assert (during["side"]["after"], during["side"]["seen"], during["side"]["label"], during["side"]["w"]) == (0, [], "side", side["w"]), "the side as its read found it, with its own fields as they stand"
+        assert sorted(during["side"]) == sorted(channels["side"].to_state()), "and every field of a channel"
+    finally:
+        monkeypatch.setattr(runtime, "_read_entry", real)
+        runtime.release()
+
+
 def test_half_a_surrogate_pair_is_named_where_it_stands():
     assert unfit_json(json.loads('{"a": {"\\ud800": 1}}')) == ("a.\\ud800", "half a pair")
     assert unfit_json(json.loads('{"a": 1e999, "b": "\\udfff"}')) == ("a", "not finite"), "the first in the document is named"
