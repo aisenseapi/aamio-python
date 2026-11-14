@@ -37,7 +37,8 @@ not what moved in the source.
   book as the example, or how to add one first. The service's advice for such
   a gate, `allow: ["*"]`, is a list of keys, and here `allow` takes partner
   names: the star was answered `unknown_partner`. The example is written as
-  JSON, and as a command line only for a name no shell changes.
+  JSON, and as a command line, `--allow=NAME`, only for a name no shell
+  changes and no parser takes for an option.
 - A message nested 5 000 deep is text on Python 3.10 and 3.11, as on 3.12 and
   later, where it came out unreadable.
 

@@ -141,7 +141,7 @@ def test_per_key_without_allow_is_answered_here_with_a_name_from_the_address_boo
     runtime.partner_add("bob", Keys.generate().public)
     with pytest.raises(CodedValueError) as named:
         runtime.open_channel("deal", 600, [], {"require": {"per_key": 5}})
-    assert 'allow: ["bob"] over MCP, or --allow bob on the command line' in str(named.value)
+    assert 'allow: ["bob"] over MCP, or --allow=bob on the command line' in str(named.value)
     with pytest.raises(CodedValueError) as star:
         runtime.open_channel("deal", 600, ["*"], {"require": {"per_key": 5}})
     assert star.value.error_code == "unknown_partner", "and the star the service would have given is no partner here"
@@ -157,6 +157,26 @@ def test_the_per_key_advice_keeps_a_name_whole(name):
     said = per_key_fix([name])
     assert json.loads(said.split("allow: ", 1)[1].split(" over MCP", 1)[0]) == [name], said
     if name == "bob":
-        assert "--allow bob on the command line" in said
+        assert "--allow=bob on the command line" in said
     else:
         assert "--allow %s" % name not in said, "no command that a shell would take apart"
+
+
+@pytest.mark.parametrize("name", ["-anne", "--bob", "--home", "bob"])
+def test_the_command_line_in_the_per_key_advice_is_one_the_parser_takes(tmp_path, name):
+    """A name that starts with a hyphen was read as an option: --allow -anne answered "expected one argument" (a review of 14 November 2026). As --allow=NAME the parser takes it whole, and the partner is looked up."""
+    import json
+    import subprocess
+
+    from aamio.runtime import per_key_fix
+
+    assert "--allow=%s on the command line" % name in per_key_fix([name])
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
+    env = dict(os.environ, PYTHONPATH=src, PYTHONDONTWRITEBYTECODE="1")
+    home = str(tmp_path / "home")
+    base = [sys.executable, "-m", "aamio", "--home", home, "--host", "http://127.0.0.1:9"]
+    # init makes the key, and its inbox cannot open with no service here, which changes nothing for the parser.
+    subprocess.run(base + ["init"], capture_output=True, text=True, env=env, timeout=120)
+    assert os.path.isdir(home)
+    ran = subprocess.run(base + ["channel", "open", "deal", "--allow=" + name, "--gate", '{"require": {"per_key": 5}}'], capture_output=True, text=True, env=env, timeout=120)
+    assert json.loads(ran.stdout) == {"error": "unknown partner: " + name, "error_code": "unknown_partner"}, (ran.stdout, ran.stderr)
