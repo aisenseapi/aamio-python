@@ -13,6 +13,7 @@ opens a new one and republishes presence, so partners keep finding it.
 """
 
 import collections
+import contextlib
 import copy
 import errno
 import json
@@ -1111,9 +1112,74 @@ class Runtime:
         self._prune()
 
     def _prune_when_due(self):
-        """Tidies the archive when an hour has passed since it was tidied last."""
-        if time.time() - getattr(self, "pruned_at", 0.0) > 3600:
+        """Tidies the archive when an hour has passed since it was tidied last, and no read is giving receipts.
+
+        Never within a read, and never while a read in another thread is
+        between its first word on the archive and its return: one read() over
+        two channels tidied between them, took the first channel's row and
+        still said archived of it (the fifth release check of 14 November
+        2026). A tidying that has to wait waits for the next chance. No lock is
+        held while it runs, so what it says when it fails can take the
+        runtime's own.
+        """
+        if time.time() - getattr(self, "pruned_at", 0.0) <= 3600:
+            return
+        book = self._tidy_book()
+        if getattr(book["here"], "depth", 0) > 0:
+            return
+        with book["turn"]:
+            if book["open"] > 0 or book["tidying"]:
+                return
+            book["tidying"] = True
+        try:
             self._prune()
+        finally:
+            with book["turn"]:
+                book["tidying"] = False
+                book["turn"].notify_all()
+
+    def _tidy_book(self):
+        """How deep this thread is in reads, and how many reads are giving receipts, made at first use."""
+        book = self.__dict__.get("tidy_book")
+        if book is None:
+            book = self.__dict__.setdefault("tidy_book", {"turn": threading.Condition(threading.Lock()), "open": 0, "tidying": False, "here": threading.local()})
+        return book
+
+    @contextlib.contextmanager
+    def _outer_read(self):
+        """A read as its caller asked for it: it tidies first, when that is due, and nothing within it tidies.
+
+        The channels it reads one by one, the reads within it and the rows it
+        writes are one read for the archive, so what it says of each message
+        is so when it returns.
+        """
+        book = self._tidy_book()
+        here = book["here"]
+        depth = getattr(here, "depth", 0)
+        if depth == 0 and getattr(self, "archive_enabled", False) and getattr(self, "home_released", False) is not True:
+            self._prune_when_due()
+        here.depth = depth + 1
+        try:
+            yield
+        finally:
+            here.depth = depth
+            if depth == 0 and getattr(here, "receipts", False):
+                here.receipts = False
+                with book["turn"]:
+                    book["open"] -= 1
+                    book["turn"].notify_all()
+
+    def _giving_receipts(self):
+        """From here until the outer read returns, what it says of the archive is to stay so: tidying waits."""
+        book = self._tidy_book()
+        here = book["here"]
+        if getattr(here, "depth", 0) == 0 or getattr(here, "receipts", False):
+            return
+        with book["turn"]:
+            while book["tidying"]:
+                book["turn"].wait()
+            book["open"] += 1
+        here.receipts = True
 
     def _prune(self):
         policy = getattr(self, "archive_policy", None) or storage.DEFAULT_POLICY
@@ -1607,7 +1673,8 @@ class Runtime:
             return False
         # Before the row, never after it: a ceiling under one row took the row
         # just written, and the read said archived (the fourth release check of
-        # 14 November 2026). A read tidies before it weighs its first message.
+        # 14 November 2026). Within a read, never: the outer read tidies before
+        # it begins.
         self._prune_when_due()
         # ensure_ascii=False so ordinary non-English text stays readable in the
         # file. Some text cannot be written that way at all: JSON can carry a
@@ -2761,6 +2828,11 @@ class Runtime:
         """
         if self.listener is not None:
             return []
+        with self._outer_read():
+            return self._board_poll_held(wait)
+
+    def _board_poll_held(self, wait):
+        """board_poll, as one read for the archive."""
         collected = []
         waited = False
         for channel in [c for c in list(self.channels.values()) if c.label == "board" or c.label.startswith("board-")]:
@@ -4000,6 +4072,8 @@ class Runtime:
 
         The cursor then stops at the last message this call dealt with, and
         what the service returned beyond it is fetched again by the next poll.
+        A read that holds this one, and the reads within it, are one read for
+        the archive: see _outer_read.
         It used to be the caller that cut the list, after the cursor had moved
         past everything: the messages over the limit were gone for good.
 
@@ -4012,6 +4086,11 @@ class Runtime:
         marked replay, never having handed them over at all (the release check
         of 13 November 2026).
         """
+        with self._outer_read():
+            return self._poll_held(channel, wait, limit, max_bytes)
+
+    def _poll_held(self, channel, wait, limit, max_bytes):
+        """One poll, inside the read it belongs to."""
         before = (channel.after, channel.created_at, channel.expire_at, channel.instance, channel.gone,
                   set(channel.seen), set(channel.seen_from), len(channel.received))
         # Of the bindings, only the ones this read made are taken back. The
@@ -4208,14 +4287,14 @@ class Runtime:
         used = 0
         oversized = None
         fetched = data.get("messages", [])
-        # Tidying that is due runs before any message of this read is weighed
-        # for the archive, and never after one is written: what the read says
-        # of the archive is so as it returns. A ceiling under one row took the
-        # row a read had just written, and a row an earlier process wrote, and
-        # the read said archived of both (the fourth release check of 14
-        # November 2026).
+        # The outer read tidied before it began, and from the first message
+        # weighed for the archive nothing tidies until it returns, in this
+        # thread or another: what it says of the archive is so as it returns.
+        # Tidied here, channel by channel, a ceiling under one row took the
+        # first channel's row when the hour passed before the second (the
+        # fifth release check of 14 November 2026).
         if fetched and getattr(self, "archive_enabled", False) and getattr(self, "home_released", False) is not True:
-            self._prune_when_due()
+            self._giving_receipts()
         for index, raw in enumerate(fetched):
             if limit is not None and len(entries) >= limit:
                 channel.left_waiting = len(fetched) - index
@@ -4805,7 +4884,16 @@ class Runtime:
         return self
 
     def read(self, wait=0, limit=50, max_bytes=None):
-        """Messages the listener has received and nobody has read yet."""
+        """Messages the listener has received and nobody has read yet.
+
+        The channels it reads one by one are one read for the archive: it is
+        tidied before the first, and not again until this returns.
+        """
+        with self._outer_read():
+            return self._read_held(wait, limit, max_bytes)
+
+    def _read_held(self, wait, limit, max_bytes):
+        """read, as one read for the archive."""
         if self.listener is None:
             # No background listener: poll directly.
             self.ensure_inbox()

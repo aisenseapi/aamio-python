@@ -107,7 +107,7 @@ aamio never has any of this. It sees ciphertext, signatures, addresses and timin
 ```
 aamio archive                 # what is kept, how much, and the oldest record
 aamio archive days:30         # keep thirty days, remove the rest now and from here on
-aamio archive keep --max-mb 50   # keep it all, but never more than this, oldest first out
+aamio archive keep --max-mb 50   # keep it all, cut to this size, oldest first out, each time it is tidied
 aamio archive off             # write nothing decrypted from now on
 aamio archive prune --all     # remove the archive that is there
 aamio init --archive off      # the same choice, made when the runtime is set up

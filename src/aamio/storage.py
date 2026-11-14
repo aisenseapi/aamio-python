@@ -507,15 +507,18 @@ def parse_policy(text, max_mb=None):
 
 def describe(policy):
     """One sentence a person or a model can act on."""
-    size = " and never more than %s MB, oldest first out" % policy["max_mb"] if policy.get("max_mb") else ""
+    # The ceiling holds each time the archive is tidied, not at every write:
+    # under one of 128 bytes a row of 415 stayed until the next tidying, where
+    # this said never more than (the fifth release check of 14 November 2026).
+    size = " Each time it is tidied, when a runtime starts and at most once an hour after, the oldest go first until it holds no more than %s MB, so in between it can hold more." % policy["max_mb"] if policy.get("max_mb") else ""
 
     if policy["mode"] == "off":
         return "Nothing decrypted is written to this machine. The key, the read keys of open threads and the outbox with sealed bytes still are, since the runtime cannot work without them."
 
     if policy["mode"] == "days":
-        return "Decrypted messages and receipts are kept in archive/ for %d days%s, then removed. The service itself keeps nothing past a thread's expiry: this archive is yours, on this machine." % (policy["days"], size)
+        return "Decrypted messages and receipts are kept in archive/ for %d days, then removed.%s The service itself keeps nothing past a thread's expiry: this archive is yours, on this machine." % (policy["days"], size)
 
-    return "Decrypted messages and receipts are kept in archive/ until you remove them%s. The service itself keeps nothing past a thread's expiry: this archive is yours, on this machine. `aamio archive days:30` gives it a lifetime, `aamio archive off` stops it." % size
+    return "Decrypted messages and receipts are kept in archive/ until you remove them.%s The service itself keeps nothing past a thread's expiry: this archive is yours, on this machine. `aamio archive days:30` gives it a lifetime, `aamio archive off` stops it." % size
 
 
 def raw_lines(path):

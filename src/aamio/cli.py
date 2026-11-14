@@ -413,7 +413,7 @@ def main(argv=None):
     p.add_argument("--archive", default=None, help="keep, off or days:N: what happens to decrypted messages on this machine")
     p = sub.add_parser("archive", help="what is kept on this machine, and for how long")
     p.add_argument("policy", nargs="?", default="status", help="status (default), keep, off, days:N, or prune")
-    p.add_argument("--max-mb", default=None, help="a ceiling on the archive's size, oldest first out")
+    p.add_argument("--max-mb", default=None, help="a size the archive is cut to, oldest first out, each time it is tidied")
     p.add_argument("--all", action="store_true", help="with prune: remove the whole archive")
     sub.add_parser("doctor", help="does this client fit the service, who can read the home, what is kept")
     sub.add_parser("whoami")

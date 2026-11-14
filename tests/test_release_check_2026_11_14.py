@@ -581,6 +581,86 @@ def test_tidying_between_two_reads_still_takes_rows_and_the_next_read_writes_its
         again.release()
 
 
+def two_channels_due_between(tmp_path):
+    """A home with a message on the side channel and one on a second, read by nobody yet, under a ceiling under one row."""
+    service = Service()
+    home = tmp_path / "home"
+    runtime = archived_runtime(home, service)
+    runtime.ensure_inbox()
+    sides = [runtime.open_channel(label, 600) for label in ("side", "other")]
+    sender = Keys.generate()
+    for label, side in zip(("side", "other"), sides):
+        service.write(side["w"], json.dumps({"text": "on " + label}), sender)
+    runtime.release()
+    again = archived_runtime(home, service)
+    again.archive_policy = {"mode": "keep", "days": None, "max_mb": 0.0001}
+    return service, home, again, sides
+
+
+def rows_of(home, label):
+    path = os.path.join(home, "archive", label + ".jsonl")
+    if not os.path.exists(path):
+        return []
+    with open(path, "rb") as handle:
+        return [json.loads(line)["seq"] for line in handle.read().split(b"\n") if line]
+
+
+def test_one_read_over_two_channels_says_archived_of_rows_that_are_there_when_the_hour_passes_between_them(tmp_path):
+    """The fifth release check of 14 November 2026, item 1: the hour passed between the two channels of one read, the
+    second tidied, and took the first channel's row, which its message had been told was archived."""
+    service, home, again, sides = two_channels_due_between(tmp_path)
+    real = again.client.http
+
+    def the_hour_passes(method, url, *args, **kwargs):
+        if method == "GET" and ("/" + sides[1]["w"]) in url:
+            again.pruned_at = 0.0
+        return real(method, url, *args, **kwargs)
+
+    again.client.http = the_hour_passes
+    try:
+        read = again.read(0, 50)
+        assert sorted((m["body"]["text"], m["archived"]) for m in read) == [("on other", True), ("on side", True)]
+        assert (rows_of(home, "side"), rows_of(home, "other")) == ([1], [1]), "each message's row is there when the read returns"
+        assert again.pruned_at == 0.0, "nothing tidied within the read"
+        again.client.http = real
+        again.read(0, 50)
+        assert again.pruned_at > 0.0, "the next read tidies"
+    finally:
+        again.client.http = real
+        again.release()
+
+
+def test_a_read_in_another_thread_does_not_tidy_while_this_one_gives_receipts(tmp_path, monkeypatch):
+    """Item 1, across the listener's threads: one channel's read is between its first receipt and its return while
+    another thread's read finds the hour has passed. That one leaves the tidying for later."""
+    service, home, again, sides = two_channels_due_between(tmp_path)
+    service.write(sides[0]["w"], json.dumps({"text": "second on side"}), Keys.generate())
+    channels = {c.label: c for c in again.channels.values()}
+    real = again._read_entry
+    other = {}
+
+    def meanwhile(channel, raw):
+        if channel.label == "side" and isinstance(raw, dict) and raw.get("seq") == 2:
+            again.pruned_at = 0.0
+            reader = threading.Thread(target=lambda: other.update(read=again.poll(channels["other"])[1]))
+            reader.start()
+            reader.join(10)
+        return real(channel, raw)
+
+    monkeypatch.setattr(again, "_read_entry", meanwhile)
+    try:
+        read = again.poll(channels["side"])[1]
+        assert [(m["body"]["text"], m["archived"]) for m in read] == [("on side", True), ("second on side", True)]
+        assert [(m["body"]["text"], m["archived"]) for m in other["read"]] == [("on other", True)]
+        assert (rows_of(home, "side"), rows_of(home, "other")) == ([1, 2], [1]), "every row a receipt names is there"
+        assert again.pruned_at == 0.0, "the other thread left the tidying for later"
+        monkeypatch.setattr(again, "_read_entry", real)
+        again.read(0, 50)
+        assert again.pruned_at > 0.0, "and the next read tidies"
+    finally:
+        again.release()
+
+
 class Walking(set):
     """A set its reader is adding to at this moment: whoever walks it meets a change of size halfway."""
 
