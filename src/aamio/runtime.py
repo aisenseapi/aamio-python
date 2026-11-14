@@ -204,21 +204,47 @@ def _not_json(name):
 # here as Infinity, an answer no strict reader could take, after the cursor had
 # moved past it (a security review of 13 November 2026).
 BODY_MAX_DEPTH = 64
+# How far back from the end of a channel's archive a read looks for a delivery
+# an earlier process wrote down and did not get past with its cursor.
+ARCHIVE_TAIL_BYTES = 16 * 1024 * 1024
 _FLOAT_MAX = 1.7976931348623157e308
+
+
+def _half_pair(text):
+    """Whether a string holds half of a UTF-16 surrogate pair, which UTF-8 cannot carry."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return True
+    return False
+
+
+def _segment(key):
+    """One step of a path: a member name with half a pair in it is written escaped, so the path can be printed."""
+    key = str(key)
+    return json.dumps(key)[1:-1] if _half_pair(key) else key
 
 
 def unfit_json(value, limit=BODY_MAX_DEPTH):
     """(path, what) for the first part of value no reader can hold, in document order, or None.
 
     what is "not finite" for a number such as 1e999, or an integer beyond what
-    a double holds, which the other two runtimes read as infinite, and "too
-    deep" for arrays and objects nested deeper than limit. The path names keys
-    and indices with dots, and is "" for value itself.
+    a double holds, which the other two runtimes read as infinite, "too deep"
+    for arrays and objects nested deeper than limit, and "half a pair" for a
+    string or member name with half of a UTF-16 surrogate pair in it, as
+    "\\ud800" decodes to: JSON can write it, UTF-8 cannot carry it, and a byte
+    budget that measured it stopped the read (the release check of 14 November
+    2026). The path names keys and indices with dots, and is "" for value
+    itself.
     """
     stack = [(value, "", 0)]
     while stack:
         node, path, level = stack.pop()
-        if isinstance(node, bool) or node is None or isinstance(node, str):
+        if isinstance(node, str):
+            if _half_pair(node):
+                return path, "half a pair"
+            continue
+        if isinstance(node, bool) or node is None:
             continue
         if isinstance(node, float):
             if node != node or node in (float("inf"), float("-inf")):
@@ -233,7 +259,11 @@ def unfit_json(value, limit=BODY_MAX_DEPTH):
                 return path, "too deep"
             items = list(node.items()) if isinstance(node, dict) else list(enumerate(node))
             for key, child in reversed(items):
-                stack.append((child, "%s.%s" % (path, key) if path else str(key), level + 1))
+                where = "%s.%s" % (path, _segment(key)) if path else _segment(key)
+                stack.append((child, where, level + 1))
+                if isinstance(node, dict):
+                    # The member name, where it stands: before its value.
+                    stack.append((str(key), where, level + 1))
     return None
 
 
@@ -242,6 +272,8 @@ def unfit_text(path, what):
     where = path or "arguments"
     if what == "not finite":
         return "%s is a number that is not finite, as 1e999 is: JSON can write it, and nothing that reads it can hold it" % where
+    if what == "half a pair":
+        return "%s holds half of a UTF-16 surrogate pair, as \"\\ud800\" is: JSON can write it, and UTF-8 cannot carry it" % where
     return "%s is nested deeper than %d: a reader hands a message nested that deep over as text" % (where, BODY_MAX_DEPTH)
 
 
@@ -252,8 +284,23 @@ def body_json(text):
     except RecursionError:
         raise ValueError("nested deeper than the decoder goes") from None
     if unfit_json(parsed) is not None:
-        raise ValueError("a number that is not finite, or nested deeper than %d" % BODY_MAX_DEPTH)
+        raise ValueError("a number that is not finite, half a surrogate pair, or nested deeper than %d" % BODY_MAX_DEPTH)
     return parsed
+
+
+def _quietly(log):
+    """The caller's logger, as one whose failure costs the log line and nothing else.
+
+    A note made after the cursor was written down called a logger that
+    failed, and the failure threw out of the read, which then handed over
+    nothing of what it had passed (the release check of 14 November 2026).
+    """
+    def logged(line):
+        try:
+            log(line)
+        except Exception:
+            pass
+    return logged
 
 
 def send_advice(outcome, status):
@@ -943,6 +990,8 @@ class Channel:
         # Whether the last poll stopped at its byte budget, as messages are
         # handed over, and left the rest at the service.
         self.stopped_at_budget = False
+        # The addresses the read under way bound, which it takes back if it fails.
+        self.bound_here = None
         self.lock = threading.Lock()
         self.poller = None
         self.closed = False
@@ -1000,10 +1049,19 @@ class Runtime:
         self.home = home or home_dir()
         self.host = host or os.environ.get("AAMIO_HOST") or DEFAULT_HOST
         self.client = AamioClient(self.host)
-        self.log = log or (lambda line: None)
+        self.log = _quietly(log) if log else (lambda line: None)
         self.closed = False
         self.home_released = False
         self.archive_lock = threading.Lock()
+        # Deliveries this process wrote to the archive at a read that has not
+        # written its cursor past them: a read that failed, or one whose cursor
+        # could not be saved, reads them again, and they were written down a
+        # second time (the release check of 14 November 2026). As in the Node
+        # runtime.
+        self.written_down = set()
+        # How often a delivery was handed over here with a row an earlier
+        # process had written: copies held here that wrote none.
+        self.rows_reused = collections.Counter()
         storage.make_private_dir(self.home)
         storage.make_private_dir(os.path.join(self.home, "archive"))
         # The archive is the home's own choice, kept in config.json: keep, off,
@@ -1406,6 +1464,43 @@ class Runtime:
     def save_effects(self):
         with self.lock:
             self._save_json("effects.json", self.effects)
+
+    def _archive_book(self):
+        """The lock, the deliveries written down at reads not yet past them, and the rows used again: made when first wanted."""
+        held = self.__dict__
+        return held.setdefault("archive_lock", threading.Lock()), held.setdefault("written_down", set()), held.setdefault("rows_reused", collections.Counter())
+
+    def _archived_before(self, label):
+        """What earlier processes wrote to this channel's archive, from the end of the file: (w, instance, seq) -> sha256.
+
+        Read once a process. The end is enough: what an earlier process wrote
+        and did not get past with its cursor was written last, and a read
+        takes at most a thread's megabyte of messages.
+        """
+        cache = self.__dict__.setdefault("archive_before", {})
+        if label in cache:
+            return cache[label]
+        found = {}
+        try:
+            path = os.path.join(self.home, "archive", "%s.jsonl" % storage.archive_name(label))
+            with open(path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                start = max(0, handle.tell() - ARCHIVE_TAIL_BYTES)
+                handle.seek(start)
+                lines = handle.read().split(b"\n")
+            for line in lines[1:] if start > 0 else lines:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and row.get("kind") == "received" and isinstance(row.get("w"), str) and isinstance(row.get("instance"), str) \
+                        and type(row.get("seq")) is int:
+                    found[(row["w"], row["instance"], row["seq"])] = row.get("sha256")
+        except Exception:
+            # No archive for it yet, or one that cannot be read: there is no row to use again.
+            pass
+        cache[label] = found
+        return found
 
     def archive(self, label, record):
         """Writes one record, and says whether it wrote one.
@@ -2662,6 +2757,11 @@ class Runtime:
         # copy, and the copies held here are later readings of it.
         stored = collections.Counter(delivery for delivery in map(one, rows) if delivery is not None)
         written = collections.Counter(one(entry) for entry in held if one(entry) is not None and entry.get("archived") is not False)
+        # A copy held here whose row an earlier process wrote wrote none: it is
+        # a later reading of that row (the release check of 14 November 2026).
+        for delivery, times in getattr(self, "rows_reused", {}).items():
+            if written[delivery]:
+                written[delivery] = max(0, written[delivery] - times)
         earlier = {delivery for delivery, count in stored.items() if count > written[delivery]}
 
         named = set()
@@ -3755,6 +3855,11 @@ class Runtime:
 
         if not self._save_quietly(channel, was):
             channel.after = was
+            return
+        # What the cursor is now past is never read again here.
+        book_lock, written_down, _ = self._archive_book()
+        with book_lock:
+            written_down.difference_update({d for d in written_down if d[0] == channel.w and isinstance(d[2], int) and d[2] <= to_seq})
 
     def _save_quietly(self, channel, was=None):
         """Write the state; a failure is said in attention and never raised.
@@ -3797,8 +3902,12 @@ class Runtime:
         """
         before = (channel.after, channel.created_at, channel.expire_at, channel.instance, channel.gone,
                   set(channel.seen), set(channel.seen_from), len(channel.received))
-        with self.lock:
-            peers = dict(self.peers)
+        # Of the bindings, only the ones this read made are taken back. The
+        # listener reads each channel in a thread of its own, and a copy of the
+        # whole book put back took a binding another channel had made in the
+        # meantime with it (the release check of 14 November 2026).
+        outer = getattr(channel, "bound_here", None)
+        channel.bound_here = []
         try:
             return self._poll_channel(channel, wait, limit, max_bytes)
         except Exception:
@@ -3806,8 +3915,12 @@ class Runtime:
              channel.seen, channel.seen_from, received) = before
             del channel.received[received:]
             with self.lock:
-                self.peers = peers
+                for address, key in channel.bound_here:
+                    if self.peers.get(address) == key:
+                        del self.peers[address]
             raise
+        finally:
+            channel.bound_here = outer
 
     def _poll_channel(self, channel, wait, limit, max_bytes):
         """One read of one channel, as poll describes it."""
@@ -4045,16 +4158,40 @@ class Runtime:
                 # address in the same second gives a message the same seq and
                 # the same time as one of the old thread, and board replies had
                 # nothing else to tell the two by (a review of 11 November 2026).
-                row = dict(entry, kind="received")
-                if isinstance(channel.instance, str):
-                    row["instance"] = channel.instance
-                wrote = self.archive(channel.label, row)
-                entry["archived"] = wrote is not False
+                delivery = (channel.w, channel.instance, entry["seq"])
+                book_lock, written_down, rows_reused = self._archive_book()
+                with book_lock:
+                    already = isinstance(channel.instance, str) and delivery in written_down
+                if not already and getattr(self, "archive_enabled", False) and isinstance(channel.instance, str):
+                    # Written down by an earlier process that stopped before
+                    # its cursor: the row is used again if it holds the same
+                    # message (the release check of 14 November 2026). A row
+                    # without the thread's instance, from a version before it
+                    # was kept, could be another delivery, so both are kept.
+                    earlier = self._archived_before(channel.label).get(delivery)
+                    already = earlier is not None and earlier == entry.get("sha256")
+                    if already:
+                        with book_lock:
+                            written_down.add(delivery)
+                            rows_reused[delivery] += 1
+                if already:
+                    # Written down by this process at a read that did not get
+                    # as far as its cursor: once is what the archive keeps.
+                    entry["archived"] = True
+                else:
+                    row = dict(entry, kind="received")
+                    if isinstance(channel.instance, str):
+                        row["instance"] = channel.instance
+                    wrote = self.archive(channel.label, row)
+                    entry["archived"] = wrote is not False
 
-                if wrote is False:
-                    # Nothing went wrong and nothing was written: this folder keeps
-                    # nothing decrypted. Said, so the caller does not go looking.
-                    entry["archive_off"] = True
+                    if wrote is False:
+                        # Nothing went wrong and nothing was written: this folder keeps
+                        # nothing decrypted. Said, so the caller does not go looking.
+                        entry["archive_off"] = True
+                    elif isinstance(channel.instance, str):
+                        with book_lock:
+                            written_down.add(delivery)
             except Exception as error:
                 # Said in attention, not on the message: a message has to be the
                 # size it was weighed at, and an error of any length added after
@@ -4142,6 +4279,8 @@ class Runtime:
             bound = self.peers.get(address)
             if bound is None:
                 self.peers[address] = sender_key
+                if isinstance(getattr(channel, "bound_here", None), list):
+                    channel.bound_here.append((address, sender_key))
                 return
         if bound == sender_key:
             return

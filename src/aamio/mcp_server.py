@@ -22,7 +22,7 @@ from . import __version__, addons
 from .crypto import is_key
 from .gate import GateStop
 from .errors import code_of
-from .runtime import Runtime, SendFailed, send_advice, outbox_outcome, OUTBOX_NOTES, BOARD_TTL, SEND_TRY_LATER, check_gate, handover_unsettled, unfit_json, unfit_text, _not_json
+from .runtime import Runtime, SendFailed, send_advice, outbox_outcome, OUTBOX_NOTES, BOARD_TTL, SEND_TRY_LATER, check_gate, handover_unsettled, unfit_json, unfit_text, _not_json, _quietly
 
 SUPPORTED = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"]
 
@@ -821,6 +821,22 @@ def discover_result():
     }
 
 
+_SAFE_INTEGER = 2 ** 53 - 1
+
+
+def _id_fits(rid):
+    """Whether a request id can be answered as it came: a string, or a whole number a double holds exactly."""
+    if isinstance(rid, str):
+        return unfit_json(rid) is None
+    if isinstance(rid, bool):
+        return False
+    if isinstance(rid, int):
+        return abs(rid) <= _SAFE_INTEGER
+    if isinstance(rid, float):
+        return rid == rid and rid.is_integer() and abs(rid) <= _SAFE_INTEGER
+    return False
+
+
 def handle(runtime: Runtime, message, session=None):
     """One request in, one reply out.
 
@@ -833,6 +849,11 @@ def handle(runtime: Runtime, message, session=None):
         # the call was cancelled under. Nothing to answer, and an error sent back
         # would be a reply to the client's own reply.
         return None
+    if isinstance(message, dict) and "id" in message and not _id_fits(message["id"]):
+        # An id is a string or a whole number a double holds exactly, as in
+        # the Node runtime. 1e999 was copied into the answer as Infinity, a
+        # line no strict reader takes (the release check of 14 November 2026).
+        return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid request id"}}
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or not isinstance(message.get("method"), str):
         return {"jsonrpc": "2.0", "id": message.get("id") if isinstance(message, dict) else None, "error": {"code": -32600, "message": "Invalid Request"}}
     method = message["method"]
@@ -1030,7 +1051,7 @@ def serve(runtime: Runtime):
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
         pass
-    runtime.log = lambda line: print("[aamio %s] %s" % (time.strftime("%H:%M:%S"), line), file=sys.stderr, flush=True)
+    runtime.log = _quietly(lambda line: print("[aamio %s] %s" % (time.strftime("%H:%M:%S"), line), file=sys.stderr, flush=True))
     # A host cuts a tool call after a minute or so. Work longer than this goes
     # to the background rather than into a call that times out with nobody
     # knowing whether the message went.

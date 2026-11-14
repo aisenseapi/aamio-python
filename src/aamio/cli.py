@@ -263,6 +263,8 @@ def _json(value, wrong, option="--data"):
     unreadable = unfit_json(parsed, BODY_MAX_DEPTH - 1 if option == "--data" else 1000000)
     if unreadable is not None and unreadable[1] == "not finite":
         raise Usage("%s holds a number that is not finite, as 1e999 is: JSON can write it, and nothing that reads it can hold it." % option)
+    if unreadable is not None and unreadable[1] == "half a pair":
+        raise Usage("%s holds half of a UTF-16 surrogate pair, as \"\\ud800\" is: JSON can write it, and UTF-8 cannot carry it." % option)
     if unreadable is not None:
         raise Usage("%s is nested too deep: with the message around it, it is deeper than %d, and a reader hands such a message over as text." % (option, BODY_MAX_DEPTH))
     return parsed

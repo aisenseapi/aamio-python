@@ -28,7 +28,26 @@ not what moved in the source.
   hands its messages over. One that raised halfway through kept the hashes of
   the messages it had taken, the next channel's save wrote them down, and the
   next read handed those messages over marked `replay`, though they had never
-  been handed over.
+  been handed over. Of the address bindings it takes back only its own: the
+  listener reads each channel in a thread of its own, and a copy of the whole
+  book put back took a binding another channel had made in the meantime.
+- A logger that fails costs the log line, never the read: a note made after
+  the cursor was written down threw out of the read, which then handed over
+  nothing of what it had passed.
+- Half of a UTF-16 surrogate pair, as `"\ud800"` decodes to, makes a body text,
+  as aamio-php reads it, and is refused in MCP arguments and in `--data` and
+  `--gate`. UTF-8 cannot carry it, and a byte budget that measured such a body
+  stopped the read, in both ways of reading.
+- Over MCP a request id that is not a string or a whole number a double holds
+  exactly, such as `1e999`, is refused with `-32600` and id null, as in the
+  Node runtime. `1e999` was copied into the answer as `Infinity`.
+- A delivery is written to the archive once. One read again after a read that
+  failed, or after a cursor that could not be written, uses the row that is
+  there, in the next process too when the row is among the last 16 MiB of its
+  channel's archive and holds the same message. A row written without the
+  thread's instance, by a version before it was kept, is not taken for it, so
+  such a delivery can stand there twice. Board replies lists a row used again
+  as it was first written down.
 
 ## 0.6.34 - 2026-11-13
 
