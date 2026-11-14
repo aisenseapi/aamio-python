@@ -202,6 +202,7 @@ def test_a_retry_stopped_before_it_posts_leaves_an_unknown_unknown(monkeypatch):
 
     assert posted == [] and open_one["status"] == "unknown" and open_one["ever_open"] is True and open_one["envelope"] == envelope and runtime.outbox[open_one["id"]] is open_one
     assert rows == [{"id": open_one["id"], "w": open_one["w"], "status": "unknown", "http": 0, "stopped": rows[0]["stopped"], "fix": rows[0]["fix"]}] and "not started" in rows[0]["stopped"]
+    assert rows[0]["fix"] == "Message %s is kept as it was, with the same bytes: aamio outbox retry --id %s on the command line sends them again, with the work done there." % (open_one["id"], open_one["id"]), "the advice of a retry names the message it kept"
 
 
 def test_low_or_no_work_is_delivered_as_before_within_a_budget(monkeypatch):
@@ -236,3 +237,76 @@ def test_an_inbox_that_closes_too_soon_stops_the_send_before_anything_is_stored(
         runtime._send("q" * 20, Keys.generate().public, None, "hello")
 
     assert runtime.outbox == {}
+
+
+def test_the_advice_after_a_stop_at_the_budget_can_be_followed(monkeypatch):
+    """What the advice says can be done is what can be done next (a review of 14 November 2026).
+
+    The advice was that aamio outbox retry sends the stored bytes, and a retry
+    sends neither a message that was stopped before it left nor one an inbox
+    refused with 428. Those two are done again, and go; a retry of a message
+    still open, or one a rate window turned away, is told its id and sent with
+    the same bytes.
+    """
+    slow_work(monkeypatch, 600)
+    monkeypatch.setattr("aamio.runtime.gate_solve", lambda *a, **k: "nonce")
+    heavy = {"require": {"pow": {"bits": 24, "covers": 1}}}
+    posted = []
+    answers = []
+
+    def post(w, body_text, key, signature, content_type="text/plain", work=None):
+        posted.append((body_text, work))
+        return answers.pop(0) if answers else (201, {"seq": len(posted), "at": 1, "sha256": "h", "expire_at": 2})
+
+    # Before the first post: nothing went, and nothing is kept to go again.
+    runtime = runtime_facing(heavy, 3600, post)
+    runtime._trace_safely = lambda *a, **k: None
+    runtime.work_budget = 40
+    first = entry_for(runtime)
+    with pytest.raises(GateStop) as stop:
+        runtime._deliver(first, budget=runtime._call_budget())
+    assert posted == [] and first["status"] == "stopped" and "outbox retry" not in stop.value.fix and stop.value.fix.startswith("Do it again from the command line")
+    assert runtime.outbox_retry(first["id"]) == [], "a stopped message is no retry's, which is why the advice does not say so"
+    runtime.work_budget = None
+    assert runtime._deliver(entry_for(runtime, w="t" * 20))[0] == 201 and posted[-1][1] == "nonce", "done again from the command line, it goes, with the work"
+
+    # After a 428: the refusal is the answer, and the same done again goes.
+    posted.clear()
+    answers.append((428, {"error": "work required", "gate": heavy, "seconds_left": 3000}))
+    runtime = runtime_facing({}, 3600, post)
+    runtime._trace_safely = lambda *a, **k: None
+    runtime.work_budget = 40
+    refused = entry_for(runtime)
+    status, result = runtime._deliver(refused, budget=runtime._call_budget())
+    assert status == 428 and refused["status"] == "refused" and len(posted) == 1 and "outbox retry" not in result["fix"] and "Do it again from the command line" in result["fix"]
+    runtime.work_budget = None
+    assert runtime._deliver(entry_for(runtime))[0] == 201 and posted[-1][1] == "nonce" and len(posted) == 2
+
+    # A retry of a message still open, and of one a rate window turned away: kept as it was, and sent with the same bytes.
+    posted.clear()
+    runtime = runtime_facing(heavy, 3600, post)
+    runtime._trace_safely = lambda *a, **k: None
+    runtime.work_budget = 40
+    open_one = entry_for(runtime, status="unknown", ever_open=True, attempts=1, last_status=0)
+    later = entry_for(runtime, w="u" * 20, status="refused", attempts=1, last_status=429)
+    rows = {row["id"]: row for row in runtime.outbox_retry()}
+    assert posted == [] and open_one["status"] == "unknown" and later["status"] == "refused", "a stop before the post changes nothing about what the attempts before it left"
+    assert all("aamio outbox retry --id %s" % key in rows[key]["fix"] for key in (open_one["id"], later["id"]))
+    runtime.work_budget = None
+    assert runtime.outbox_retry(open_one["id"])[0]["status"] == "delivered" and posted[-1] == (open_one["envelope"], "nonce")
+    assert runtime.outbox_retry(later["id"])[0]["status"] == "delivered" and posted[-1] == (later["envelope"], "nonce")
+
+
+def test_over_mcp_a_retry_stopped_at_the_budget_names_the_message_to_retry_from_the_command_line(monkeypatch):
+    """The fields a model gets: the id, the outcome as it was, and the advice that names the id (a review of 14 November 2026)."""
+    from aamio import mcp_server
+
+    slow_work(monkeypatch, 600)
+    posted = []
+    runtime = runtime_facing({"require": {"pow": {"bits": 24, "covers": 1}}}, 3600, lambda *a, **k: posted.append(a) or (201, {}))
+    runtime.work_budget = 40
+    runtime._trace_safely = lambda *a, **k: None
+    open_one = entry_for(runtime, status="unknown", ever_open=True, attempts=1, last_status=0)
+    said = mcp_server.dispatch(runtime, "aamio_outbox_retry", {"id": open_one["id"]})["structuredContent"]
+    assert posted == [] and said["id"] == open_one["id"] and said["status"] == "unknown" and said["http"] == 0
+    assert "not started" in said["stopped"] and "aamio outbox retry --id %s" % open_one["id"] in said["fix"]

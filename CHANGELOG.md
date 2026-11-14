@@ -23,11 +23,12 @@ not what moved in the source.
 - Proof of work in a board answer, a channel handed over, a retry from the
   outbox and a gate a 428 names is held to the time a tool call has over MCP,
   forty seconds, as a send's already was: work estimated past it is not
-  started, and the stop says to send from the command line, where the work has
-  the time it needs. Where it is the inbox that closes first, the advice is a
+  started, and the stop says to do it again from the command line, where the
+  work has the time it needs. Where it is the inbox that closes first, the advice is a
   longer inbox or more compute. A stop after a post the inbox refused with 428
-  is told as that refusal, and a retry that stops before it posts leaves an
-  earlier unknown unknown, with its id and its bytes.
+  is told as that refusal. A retry that stops before it posts leaves the
+  message as it was, an earlier unknown unknown, and names it, so that `aamio
+  outbox retry --id` sends the same bytes from the command line.
 - `doctor` says JSON `null` and a JSON string at `/health` as JSON that is not
   aamio's health answer. They were said as an empty body and as a body that is
   not JSON. What it says of the service's health is unchanged.
@@ -35,7 +36,8 @@ not what moved in the source.
   refused here, before the service is asked, with a partner from the address
   book as the example, or how to add one first. The service's advice for such
   a gate, `allow: ["*"]`, is a list of keys, and here `allow` takes partner
-  names: the star was answered `unknown_partner`.
+  names: the star was answered `unknown_partner`. The example is written as
+  JSON, and as a command line only for a name no shell changes.
 - A message nested 5 000 deep is text on Python 3.10 and 3.11, as on 3.12 and
   later, where it came out unreadable.
 

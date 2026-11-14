@@ -145,3 +145,18 @@ def test_per_key_without_allow_is_answered_here_with_a_name_from_the_address_boo
     with pytest.raises(CodedValueError) as star:
         runtime.open_channel("deal", 600, ["*"], {"require": {"per_key": 5}})
     assert star.value.error_code == "unknown_partner", "and the star the service would have given is no partner here"
+
+
+@pytest.mark.parametrize("name", ["Anne Hansen", 'Anne "A"', "back\\slash", "a,b", "bob"])
+def test_the_per_key_advice_keeps_a_name_whole(name):
+    """A name with a space or a quote was put into the advice unquoted, and was not one argument or not JSON (a review of 14 November 2026)."""
+    import json
+
+    from aamio.runtime import per_key_fix
+
+    said = per_key_fix([name])
+    assert json.loads(said.split("allow: ", 1)[1].split(" over MCP", 1)[0]) == [name], said
+    if name == "bob":
+        assert "--allow bob on the command line" in said
+    else:
+        assert "--allow %s" % name not in said, "no command that a shell would take apart"

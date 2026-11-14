@@ -278,6 +278,14 @@ def unfit_text(path, what):
     return "%s is nested deeper than %d: a reader hands a message nested that deep over as text" % (where, BODY_MAX_DEPTH)
 
 
+# What to do after a stop at the budget. A stop before the first post sent
+# nothing, and one after a 428 left a refusal: neither is in the outbox to be
+# sent again, so the advice is to do the same where the work has the time it
+# needs. It told everyone that aamio outbox retry sends the stored bytes, which
+# it does not do for either (a review of 14 November 2026). A retry of a
+# message whose earlier attempt is still open says otherwise, with its id.
+BUDGET_FIX = "Do it again from the command line, where the work has the time it needs: the command line is not held to the time of a tool call."
+
 PER_KEY_WHY = "a gate that requires per_key needs allow: messages are counted per signing key, and a channel without allow also takes writes nobody signed, which per_key cannot count"
 
 
@@ -292,7 +300,16 @@ def per_key_fix(names):
     named = next((str(name) for name in names if name), None)
     if named is None:
         return "Add the partners who may write to the address book first, with aamio partner add NAME KEY (aamio_partner_add over MCP), and name them in allow."
-    return 'Name the partners who may write in allow, as allow: ["%s"] over MCP, or --allow %s on the command line, and open the channel again.' % (named, named)
+    # As JSON writes it, and on the command line only a name no shell changes: a
+    # name with a space or a quote was given unquoted, and was not one argument
+    # or not JSON (a review of 14 November 2026).
+    if re.fullmatch(r"[A-Za-z0-9._-]+", named):
+        line = "--allow %s on the command line" % named
+    elif "," in named:
+        line = "on the command line --allow takes names apart at commas, so this one is named over MCP"
+    else:
+        line = "--allow on the command line with the name quoted as your shell quotes it"
+    return "Name the partners who may write in allow, as allow: %s over MCP, or %s, and open the channel again." % (json.dumps([named], ensure_ascii=False), line)
 
 
 def body_json(text):
@@ -3541,10 +3558,13 @@ class Runtime:
         4.6 times as long.
         """
         if budget is not None and advice.get("bits") and advice.get("expected_seconds", 0) > budget:
-            raise GateStop(
+            stop = GateStop(
                 "the inbox asks for %d bits of proof of work, which takes about %s on this machine, longer than a tool call is given here, so the work was not started" % (advice["bits"], describe_seconds(advice["expected_seconds"])),
-                "Send it from the command line, where the work has the time it needs: the same bytes are kept under this message id, and aamio outbox retry sends them.",
+                BUDGET_FIX,
             )
+            # Said, so that a retry can tell its own advice from the gate's.
+            stop.budget = True
+            raise stop
 
     def _gate_clock(self):
         clock = getattr(self, "gate_clock", None)
@@ -3668,6 +3688,11 @@ class Runtime:
         budget is how long work may take in this call, and None where it may
         take what it needs: the command line, and the background half of a send.
         """
+        # What an earlier attempt left, for a stop before this one posts: it
+        # settles nothing about them, so a message that could be sent again
+        # still can, and a retry from the command line finds it (a review of 14
+        # November 2026). Only a message that had not left before is stopped.
+        before = entry.get("status") if entry.get("attempts") else None
         entry["attempts"] += 1
         entry["status"] = "sending"
         try:
@@ -3695,7 +3720,7 @@ class Runtime:
             #
             # Unless an earlier attempt is still open. A stop now settles this
             # decision, not that one.
-            entry["status"] = "unknown" if entry.get("ever_open") else "stopped"
+            entry["status"] = "unknown" if entry.get("ever_open") else (before if before not in (None, "sending", "working") else "stopped")
             entry["error"] = stop.reason
             entry["last_at"] = int(time.time())
             self.save_outbox()
@@ -3843,8 +3868,12 @@ class Runtime:
             except GateStop as stop:
                 # Stopped here before it left, which settles nothing about an
                 # attempt before it: an unknown stays unknown, with its id and
-                # its bytes, for a retry from the command line.
-                out.append({"id": entry["id"], "w": entry["w"], "status": entry["status"], "http": 0, "stopped": stop.reason, "fix": stop.fix})
+                # its bytes, for a retry from the command line, and the advice
+                # says that one, with the id.
+                fix = stop.fix
+                if getattr(stop, "budget", False):
+                    fix = "Message %s is kept as it was, with the same bytes: aamio outbox retry --id %s on the command line sends them again, with the work done there." % (entry["id"], entry["id"])
+                out.append({"id": entry["id"], "w": entry["w"], "status": entry["status"], "http": 0, "stopped": stop.reason, "fix": fix})
                 continue
             row = {"id": entry["id"], "w": entry["w"], "status": entry["status"], "http": status}
             # A retry run once from a script never fetches attention either.
