@@ -28,7 +28,9 @@ import errno
 import importlib.util
 import ipaddress
 import json
+import ntpath
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -76,6 +78,20 @@ ENVIRONMENT = (
     "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 )
+
+# How the process of an add-on is started. python -m puts the working
+# directory first on the module path, so a folder of the add-on's name there
+# was what ran (a security review of 13 November 2026). From Python 3.11, -P
+# leaves it off. On 3.10 a starter takes it off before it imports anything,
+# runpy included, and runs the module as -m would: as __main__, with argv[0]
+# its file. The working directory itself is kept, for paths the user gives.
+BOOTSTRAP = (
+    "import sys; del sys.path[0]; module = sys.argv.pop(1); "
+    "import runpy; runpy.run_module(module, run_name='__main__', alter_sys=True)"
+)
+# Set for the process on Windows, so that a program it starts by a bare name
+# is not looked for in the working directory.
+NO_CURRENT_DIRECTORY = "NoDefaultCurrentDirectoryInExePath"
 
 _NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 # Names Windows takes for a device. An add-on's short name is the name of its
@@ -545,6 +561,66 @@ def limits_of(name):
         return _limits[name]
 
 
+def process_command(module, version=None, executable=None):
+    """The command that starts the module of an add-on, with the working directory off the module path."""
+    version = sys.version_info if version is None else version
+    executable = sys.executable if executable is None else executable
+    if tuple(version[:2]) >= (3, 11):
+        return [executable, "-P", "-m", module]
+    return [executable, "-c", BOOTSTRAP, module]
+
+
+def _is_absolute(entry, platform):
+    """A full path: with a drive and a root, or a share, on Windows; from the root elsewhere. C:folder and \\folder are not."""
+    if platform == "win32":
+        drive, rest = ntpath.splitdrive(entry)
+        return bool(drive) and (rest[:1] in ("\\", "/") or (drive[:2] in ("\\\\", "//") and rest == ""))
+    return entry.startswith("/")
+
+
+def _same_folder(entry, here, platform):
+    paths = ntpath if platform == "win32" else posixpath
+    if paths.normcase(paths.normpath(entry)) == paths.normcase(paths.normpath(here)):
+        return True
+    try:
+        return os.path.samefile(entry, here)
+    except (OSError, ValueError):
+        return False
+
+
+def module_path(value, cwd=None, platform=None):
+    """PYTHONPATH without what would put the working directory back on the module path.
+
+    An empty entry, a relative one, and the working directory by its full path
+    each brought the module of the same name in the working directory back,
+    with -P and with the starter alike (a review of 14 November 2026). A full
+    path elsewhere stays, for a checkout the user put there.
+    """
+    platform = sys.platform if platform is None else platform
+    here = os.getcwd() if cwd is None else cwd
+    separator = ";" if platform == "win32" else ":"
+    kept = []
+    for entry in value.split(separator):
+        if entry and _is_absolute(entry, platform) and not _same_folder(entry, here, platform):
+            kept.append(entry)
+    return separator.join(kept)
+
+
+def child_environment(env, cwd=None, platform=None):
+    """The environment a process of an add-on gets, made safe last, after what its manifest declared."""
+    platform = sys.platform if platform is None else platform
+    env = dict(env)
+    for key in [key for key in env if key.upper() == "PYTHONPATH"]:
+        kept = module_path(env.pop(key), cwd, platform)
+        if kept:
+            env["PYTHONPATH"] = kept
+    if platform == "win32":
+        for key in [key for key in env if key.upper() == NO_CURRENT_DIRECTORY.upper()]:
+            del env[key]
+        env[NO_CURRENT_DIRECTORY] = "1"
+    return env
+
+
 def _failure(manifest, reason, fix):
     return {"result": {"status": "unreachable", "reason": reason, "fix": fix, "addon": manifest.NAME}, "exit_code": 5, "is_error": True}
 
@@ -577,6 +653,7 @@ def run(manifest, kind, name, arguments, subject=None, own_key=None, state_dir=N
     # probe at enable. Never the home or the user's rest.
     env = {key: value for key, value in os.environ.items() if key.upper() in ENVIRONMENT or (declared and key in manifest.environment)}
     env["AAMIO_ADDON"] = "2"
+    env = child_environment(env)
     stop = "Reinstall it, or aamio addon disable %s to go on without it." % manifest.NAME
     # The request, the answer and standard error go through files in a directory
     # of this call's own, private from the start: a pipe would block a request
@@ -587,7 +664,7 @@ def run(manifest, kind, name, arguments, subject=None, own_key=None, state_dir=N
             handle.write(json.dumps(request).encode("utf-8"))
         with open(paths["in"], "rb") as stdin, open(paths["out"], "wb") as stdout, open(paths["err"], "wb") as stderr_file:
             try:
-                child = subprocess.Popen([sys.executable, "-m", manifest.process_module], stdin=stdin, stdout=stdout, stderr=stderr_file, env=env)
+                child = subprocess.Popen(process_command(manifest.process_module), stdin=stdin, stdout=stdout, stderr=stderr_file, env=env)
             except OSError as error:
                 return _failure(manifest, "addon_failed", "the process of the add-on %s could not be started: %s. %s" % (manifest.NAME, error, stop))
             until = time.monotonic() + deadline

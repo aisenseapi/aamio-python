@@ -29,6 +29,7 @@ import json
 import re
 import sys
 
+from .client import NotJson
 from . import __version__, addons, compat, storage
 from .gate import GateStop
 from .errors import code_of
@@ -70,10 +71,8 @@ def not_health(body):
     host was said as healthy, beside "answered 200 and not 200" (a check of 13
     November 2026). As the Node runtime and aamio-php say it.
     """
-    if body is None or body == "":
-        return "an empty body"
-    if isinstance(body, str):
-        return "a body that is not JSON"
+    if isinstance(body, NotJson):
+        return "an empty body" if body == "" else "a body that is not JSON"
     if not isinstance(body, dict) or body.get("service") != "aamio" or body.get("status") != "ok":
         return "JSON that is not aamio's health answer"
     return None

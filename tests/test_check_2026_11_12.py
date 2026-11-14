@@ -486,7 +486,7 @@ def test_the_command_line_says_the_channel_a_stop_at_the_gate_left_open(world, c
     a.peers[inbox] = b.keys.public
     deliver = a._deliver
 
-    def stopped(entry):
+    def stopped(entry, budget=None):
         raise GateStop("The inbox asks for 30 bits of proof of work, more than this call may take", "Ask its owner for an inbox that asks for less.")
 
     a._deliver = stopped

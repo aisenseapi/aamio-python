@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "ears
 
 from aamio import addon_process, addons, cli, mcp_server
 from aamio.runtime import Runtime
-from aamio_qrcast import __version__ as ADDON_VERSION, camera, card, process, reader, screen, service, symbol
+from aamio_qrcast import __version__ as ADDON_VERSION, camera, card, process, programs, reader, screen, service, symbol
 from aamio_earshot import card as sound_card
 from local_aisense import Receiver, busy, cut, direct, stall
 
@@ -486,12 +486,15 @@ def test_pgm_frames_are_read_from_the_pipe_one_by_one():
 
 def test_ffmpeg_is_found_on_the_path_or_in_wingets_link_folder(tmp_path):
     assert camera.find_ffmpeg(which=lambda name: "/usr/bin/ffmpeg", platform="linux", environ={}) == "/usr/bin/ffmpeg"
-    link = os.path.join(str(tmp_path), "Microsoft", "WinGet", "Links", "ffmpeg.exe")
-    os.makedirs(os.path.dirname(link))
-    open(link, "wb").close()
-    assert camera.find_ffmpeg(which=lambda name: None, platform="win32", environ={"LOCALAPPDATA": str(tmp_path)}) == link
-    assert camera.find_ffmpeg(which=lambda name: None, platform="linux", environ={"LOCALAPPDATA": str(tmp_path)}) is None
-    assert camera.find_ffmpeg(which=lambda name: None, platform="win32", environ={}) is None
+    link = r"C:\Users\u\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"
+    exists = lambda path: path == link
+    assert camera.find_ffmpeg(which=lambda name: None, platform="win32", environ={"LOCALAPPDATA": r"C:\Users\u\AppData\Local"}, exists=exists) == link
+    assert camera.find_ffmpeg(which=lambda name: None, platform="linux", environ={"LOCALAPPDATA": r"C:\Users\u\AppData\Local"}, exists=exists) is None
+    assert camera.find_ffmpeg(which=lambda name: None, platform="win32", environ={}, exists=exists) is None
+    assert camera.find_ffmpeg(which=lambda name: None, platform="win32", environ={"LOCALAPPDATA": "AppData"}, exists=lambda path: True) is None, "a LOCALAPPDATA that is no full path would be the working directory"
+    # The lookup on PATH is the one that never takes the working directory.
+    files = {r"C:\work\ffmpeg.exe", r"C:\Tools\ffmpeg\bin\ffmpeg.exe"}
+    assert camera.find_ffmpeg(which=lambda name: programs.find(name, platform="win32", environ={"PATH": r".;C:\work;C:\Tools\ffmpeg\bin"}, cwd=r"C:\work", isfile=files.__contains__), platform="win32", environ={}) == r"C:\Tools\ffmpeg\bin\ffmpeg.exe"
 
 
 class Said:
@@ -609,8 +612,12 @@ def test_the_screen_is_opened_the_way_each_system_does_it():
         started.append((command, options.get("start_new_session")))
         return Child()
 
-    assert screen.show("/tmp/card.png", platform="darwin", popen=popen) == "open" and started[-1] == (["open", "/tmp/card.png"], True)
+    assert screen.show("/tmp/card.png", platform="darwin", which=lambda name: "/usr/bin/open" if name == "open" else None, popen=popen) == "open" and started[-1] == (["/usr/bin/open", "/tmp/card.png"], True)
+    with pytest.raises(screen.Unavailable) as failed:
+        screen.show("/tmp/card.png", platform="darwin", which=lambda name: None, popen=popen)
+    assert failed.value.reason == "no_viewer" and len(started) == 1, "an opener that is not found is said, and nothing starts"
     assert screen.show("/tmp/card.png", platform="linux", environ={"WAYLAND_DISPLAY": "wayland-0"}, which=lambda name: "/usr/bin/xdg-open", popen=popen) == "xdg-open"
+    assert started[-1] == (["/usr/bin/xdg-open", "/tmp/card.png"], True), "what starts is the full path the lookup gave"
     with pytest.raises(screen.Unavailable) as failed:
         screen.show("/tmp/card.png", platform="linux", environ={}, which=lambda name: "/usr/bin/xdg-open", popen=popen)
     assert failed.value.reason == "no_screen"

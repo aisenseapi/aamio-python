@@ -13,10 +13,11 @@ Linux a sound server is reached through XDG_RUNTIME_DIR, which the manifest
 asks for by name.
 """
 
-import shutil
 import subprocess
 import sys
 import wave
+
+from . import programs
 
 RATES = (48000, 44100)
 
@@ -44,15 +45,15 @@ def _last_line(text):
     return lines[-1][:200] if lines else "no reason given"
 
 
-def _run(command, seconds, run):
+def _run(command, seconds, run, label):
     try:
         run(command, check=True, timeout=seconds, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError as error:
-        return "%s stopped with code %s: %s" % (command[0], error.returncode, _last_line(error.stderr))
+        return "%s stopped with code %s: %s" % (label, error.returncode, _last_line(error.stderr))
     except subprocess.TimeoutExpired:
-        return "%s did not finish within %d seconds" % (command[0], seconds)
+        return "%s did not finish within %d seconds" % (label, seconds)
     except OSError as error:
-        return "%s could not be started: %s" % (command[0], error)
+        return "%s could not be started: %s" % (label, error)
     return None
 
 
@@ -69,7 +70,7 @@ def recorders(seconds, path, platform):
     return found + [["rec", "-q", "-c", "1", "-r", "48000", "-b", "16", path, "trim", "0", str(seconds)]]
 
 
-def play(path, which=shutil.which, run=subprocess.run, platform=sys.platform, device=None):
+def play(path, which=programs.find, run=subprocess.run, platform=sys.platform, device=None):
     """Play the file to the end, and say what played it. Unavailable when nothing here can."""
     failed = []
     if platform == "win32":
@@ -85,8 +86,10 @@ def play(path, which=shutil.which, run=subprocess.run, platform=sys.platform, de
                 failed.append("winsound: %s" % error)
     else:
         for command in players(path, platform):
-            if which(command[0]):
-                why = _run(command, 60, run)
+            # What runs is the full path the lookup gave, never the bare name.
+            found = which(command[0])
+            if found:
+                why = _run([found] + command[1:], 60, run, command[0])
                 if why is None:
                     return command[0]
                 failed.append(why)
@@ -129,7 +132,7 @@ def _record_with(device, seconds, path):
     return "sounddevice: %s" % last
 
 
-def record(seconds, path, which=shutil.which, run=subprocess.run, platform=sys.platform, device=None):
+def record(seconds, path, which=programs.find, run=subprocess.run, platform=sys.platform, device=None):
     """Record this many seconds from the default microphone into path, and say what recorded it."""
     failed = []
     device = device or _sounddevice()
@@ -139,8 +142,9 @@ def record(seconds, path, which=shutil.which, run=subprocess.run, platform=sys.p
             return "sounddevice"
         failed.append(why)
     for command in recorders(seconds, path, platform):
-        if which(command[0]):
-            why = _run(command, seconds + 15, run)
+        found = which(command[0])
+        if found:
+            why = _run([found] + command[1:], seconds + 15, run, command[0])
             if why is None:
                 return command[0]
             failed.append(why)

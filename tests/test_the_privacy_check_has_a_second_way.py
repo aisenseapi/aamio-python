@@ -251,4 +251,6 @@ def test_the_windows_tools_are_asked_by_their_place_in_system32():
     root = os.environ.get("SystemRoot") or os.environ.get("windir") or "C:\\Windows"
     for parts in (("whoami.exe",), ("icacls.exe",), ("WindowsPowerShell", "v1.0", "powershell.exe")):
         assert os.path.normcase(storage._system_tool(*parts)) == os.path.normcase(os.path.join(root, "System32", *parts))
-    assert storage._system_tool("no-such-tool-here.exe") == "no-such-tool-here.exe", "a tool System32 does not have is asked by name"
+    # Never by the bare name, which Windows looks for in the working directory first (a security review of 13
+    # November 2026): a tool System32 does not have is asked where it would be, and starting it fails.
+    assert os.path.normcase(storage._system_tool("no-such-tool-here.exe")) == os.path.normcase(os.path.join(root, "System32", "no-such-tool-here.exe"))

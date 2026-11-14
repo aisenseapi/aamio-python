@@ -119,7 +119,7 @@ def test_retry_sends_the_stored_bytes_for_that_id_only(runtime):
     unsettled(runtime, "m1")
     unsettled(runtime, "m2")
     sent = []
-    runtime._deliver = lambda entry: (sent.append(entry["id"]), (201, {}))[1]
+    runtime._deliver = lambda entry, budget=None: (sent.append(entry["id"]), (201, {}))[1]
 
     answer = mcp_server.dispatch(runtime, "aamio_outbox_retry", {"id": "m1"})
 
@@ -142,7 +142,7 @@ def test_retry_of_an_id_this_outbox_never_had_refuses_and_says_where_to_look(run
 def test_retry_of_a_settled_message_is_refused_rather_than_sent_again(runtime):
     unsettled(runtime, "m3", status="sent")
     sent = []
-    runtime._deliver = lambda entry: (sent.append(entry["id"]), (201, {}))[1]
+    runtime._deliver = lambda entry, budget=None: (sent.append(entry["id"]), (201, {}))[1]
 
     answer = mcp_server.dispatch(runtime, "aamio_outbox_retry", {"id": "m3"})
 

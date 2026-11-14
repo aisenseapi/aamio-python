@@ -84,15 +84,22 @@ def test_doctor_says_health_and_fit_apart(runtime):
     assert gone["problem"] == "no answer from /health, so the service's version and health were not read"
 
 
-@pytest.mark.parametrize("body, what", [
+@pytest.mark.parametrize("text, what", [
     ("<!doctype html><title>Sign in</title>", "a body that is not JSON"),
-    (None, "an empty body"),
-    ([], "JSON that is not aamio's health answer"),
-    ({"status": "ok"}, "JSON that is not aamio's health answer"),
+    ("", "an empty body"),
+    # JSON null and a JSON string are answers in JSON, and were said as an empty
+    # body and as no JSON (a review of 13 November 2026).
+    ("null", "JSON that is not aamio's health answer"),
+    ('""', "JSON that is not aamio's health answer"),
+    ('"ok"', "JSON that is not aamio's health answer"),
+    ("[]", "JSON that is not aamio's health answer"),
+    ('{"status": "ok"}', "JSON that is not aamio's health answer"),
 ])
-def test_what_answers_200_at_health_and_is_not_aamio_is_not_healthy(runtime, body, what):
+def test_what_answers_200_at_health_and_is_not_aamio_is_not_healthy(runtime, text, what):
     """As the other two say it. A 200 from a proxy or a login page was said as healthy, beside "answered 200 and not 200"."""
-    runtime.client.health = lambda: (200, body)
+    from aamio.client import health_body
+
+    runtime.client.health = lambda: (200, health_body(text))
     runtime.client.descriptor = lambda: (200, {"version": "0.7.44", "protocol": {"version": 1, "capabilities": ["threads", "signing", "long-poll"]}})
     service = cli.doctor(runtime)["service"]
     assert [service["reachable"], service["healthy"], service["status"], "version" in service] == [True, False, 200, False]
@@ -120,3 +127,21 @@ def test_a_line_that_is_no_call_is_answered_once_and_a_list_that_holds_something
     invalid = {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
     said = [json.loads(line) for line in done.stdout.decode("utf-8").splitlines() if line.strip()]
     assert done.returncode == 0 and said == [invalid, invalid, invalid, [invalid]], said
+
+
+def test_per_key_without_allow_is_answered_here_with_a_name_from_the_address_book(runtime):
+    """The service's advice for per_key without allow is allow ["*"], a list of keys. Here allow takes partner names, and "*" was answered unknown_partner (a review of 13 November 2026). The service is not asked."""
+    from aamio.crypto import Keys
+    from aamio.errors import CodedValueError
+
+    runtime.client.open_thread = lambda *a, **k: pytest.fail("the service was asked")
+    with pytest.raises(CodedValueError) as first:
+        runtime.open_channel("deal", 600, None, {"require": {"per_key": 5}})
+    assert first.value.error_code == "invalid_gate" and "aamio partner add NAME KEY" in str(first.value) and "*" not in str(first.value)
+    runtime.partner_add("bob", Keys.generate().public)
+    with pytest.raises(CodedValueError) as named:
+        runtime.open_channel("deal", 600, [], {"require": {"per_key": 5}})
+    assert 'allow: ["bob"] over MCP, or --allow bob on the command line' in str(named.value)
+    with pytest.raises(CodedValueError) as star:
+        runtime.open_channel("deal", 600, ["*"], {"require": {"per_key": 5}})
+    assert star.value.error_code == "unknown_partner", "and the star the service would have given is no partner here"

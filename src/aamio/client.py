@@ -89,6 +89,25 @@ def normalize_allow(allow):
     return ["*"] if "*" in keys else keys
 
 
+class NotJson(str):
+    """The text of an answer that is not JSON, and "" for an empty one.
+
+    Kept apart from what JSON gives: null and "" in JSON are answers, and the
+    doctor said them as an empty body and as no JSON (a review of 13 November
+    2026).
+    """
+
+
+def health_body(text):
+    """What a text at /health is: JSON's value, or the text itself as NotJson where it is nothing or not JSON."""
+    if not text:
+        return NotJson("")
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError):
+        return NotJson(text)
+
+
 class AamioClient:
     def __init__(self, host: str = None, timeout: int = 60, board: str = None, verifyum: str = None):
         self.host = (host or os.environ.get("AAMIO_HOST") or DEFAULT_HOST).rstrip("/")
@@ -96,8 +115,8 @@ class AamioClient:
         self.board = (board or os.environ.get("AAMIO_BOARD") or DEFAULT_BOARD).rstrip("/")
         self.verifyum = (verifyum or os.environ.get("AAMIO_VERIFYUM") or VERIFYUM_MCP).rstrip("/")
 
-    def http(self, method: str, url: str, body=None, headers=None, timeout=None, with_headers=False, keep_status=False):
-        """(status, body), or (status, body, headers) with with_headers."""
+    def http(self, method: str, url: str, body=None, headers=None, timeout=None, with_headers=False, keep_status=False, parse=True):
+        """(status, body), or (status, body, headers) with with_headers. With parse false, body is the text as it came."""
         data = None
         if body is not None:
             data = body.encode("utf-8") if isinstance(body, str) else json.dumps(body).encode("utf-8")
@@ -145,6 +164,8 @@ class AamioClient:
             # request is unknown, and status 0 says exactly that.
             answer = (0, {"error": "no response", "detail": error.__class__.__name__})
             return answer + ({},) if with_headers else answer
+        if not parse:
+            return (status, text, got) if with_headers else (status, text)
         try:
             parsed = json.loads(text) if text else None
         except ValueError:
@@ -287,7 +308,9 @@ class AamioClient:
     # service
 
     def health(self):
-        return self.call("GET", "/health")
+        """(status, body) of /health: what JSON gives, or the text itself as NotJson, "" for an empty answer."""
+        status, text = self.http("GET", self.host + "/health", parse=False)
+        return status, health_body(text) if isinstance(text, str) else text
 
     def descriptor(self):
         return self.call("GET", "/.well-known/aamio.json")

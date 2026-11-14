@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "ears
 
 from aamio import addon_process, addons, cli, mcp_server
 from aamio.runtime import Runtime
-from aamio_earshot import __version__ as ADDON_VERSION, audio, card, codec, process, service
+from aamio_earshot import __version__ as ADDON_VERSION, audio, card, codec, process, programs, service
 from local_aisense import Receiver, busy, cut, direct, stall
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -642,10 +642,47 @@ def test_a_player_is_the_first_the_system_has(tmp_path):
     ran = []
     which = lambda name: "/usr/bin/" + name if name in ("aplay", "ffplay") else None
     assert audio.play(path, which=which, run=lambda command, **kw: ran.append(command), platform="linux") == "aplay"
-    assert ran == [["aplay", "-q", path]]
+    assert ran == [["/usr/bin/aplay", "-q", path]], "what runs is the full path the lookup gave, never the bare name"
     ran.clear()
     assert audio.play(path, which=lambda name: "/usr/bin/afplay" if name == "afplay" else None, run=lambda command, **kw: ran.append(command), platform="darwin") == "afplay"
-    assert ran == [["afplay", path]]
+    assert ran == [["/usr/bin/afplay", path]]
+
+
+def test_a_program_is_found_by_its_full_path_and_never_in_the_working_directory(tmp_path):
+    """A sox.exe in the working directory ran in place of the installed one (a security review of 13 November 2026), and shutil.which on 3.10 still looks there (a review of 14 November)."""
+    files = {r"C:\Program Files\sox\sox.exe", r"C:\work\sox.exe", r"D:\work b\sox.exe", r"C:\work\sox", r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", r"C:\work\powershell.exe"}
+    isfile = files.__contains__
+    for cwd in (r"C:\work", r"D:\work b"):
+        for path in (r".;C:\Program Files\sox", r";C:\Program Files\sox", cwd + r";C:\Program Files\sox", cwd.upper() + "\\;C:\\Program Files\\sox", r"sox;C:sox;\sox;C:\Program Files\sox", r'"C:\Program Files\sox"'):
+            assert programs.find("sox", platform="win32", environ={"PATH": path}, cwd=cwd, isfile=isfile) == r"C:\Program Files\sox\sox.exe", (cwd, path)
+        assert programs.find("sox", platform="win32", environ={"PATH": ".;" + cwd}, cwd=cwd, isfile=isfile) is None, "nothing found is None, not the one in the working directory"
+        assert programs.find("powershell", platform="win32", environ={"PATH": cwd, "SYSTEMROOT": r"C:\Windows"}, cwd=cwd, isfile=isfile) == r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    unix = {"/home/u/work/rec", "/usr/bin/rec", "bin/rec"}
+    assert programs.find("rec", platform="linux", environ={"PATH": "::.:bin:/home/u/work:/usr/bin"}, cwd="/home/u/work", isfile=unix.__contains__, access=lambda path, mode: True) == "/usr/bin/rec"
+    assert programs.find("rec", platform="linux", environ={"PATH": "/usr/bin"}, cwd="/", isfile=unix.__contains__, access=lambda path, mode: False) is None, "a file nobody may run is not a program"
+    # And on this machine, with files that are never started.
+    installed = tmp_path / "Program Files" / "tools"
+    installed.mkdir(parents=True)
+    name = "probe-tool.exe" if sys.platform == "win32" else "probe-tool"
+    for folder in (installed, tmp_path / "work-a", tmp_path / "work b"):
+        folder.mkdir(exist_ok=True)
+        (folder / name).write_bytes(b"")
+        os.chmod(str(folder / name), 0o755)
+    for work in (tmp_path / "work-a", tmp_path / "work b"):
+        found = programs.find("probe-tool", environ={"PATH": os.pathsep.join([".", "", str(work), str(installed)])}, cwd=str(work))
+        assert found is not None and os.path.samefile(found, str(installed / name)) and os.path.isabs(found)
+
+
+def test_earshot_runs_the_program_it_found(tmp_path, monkeypatch):
+    """argv[0] is the full path the lookup gave, for players and recorders alike, and a program that is not there is said."""
+    path = str(tmp_path / "heard.wav")
+    monkeypatch.setattr(audio, "_sounddevice", lambda: None)
+    ran = []
+    assert audio.record(3, path, which=lambda name: r"C:\Program Files\sox\sox.exe" if name == "sox" else None, run=lambda command, **kw: ran.append(command), platform="win32") == "sox"
+    assert ran[0][0] == r"C:\Program Files\sox\sox.exe" and ran[0][1:5] == ["-q", "-t", "waveaudio", "default"]
+    with pytest.raises(audio.Unavailable) as none:
+        audio.record(3, path, which=lambda name: None, run=lambda command, **kw: ran.append(command), platform="win32")
+    assert none.value.reason == "no_recorder" and "winget install ChrisBagwell.SoX" in none.value.fix and len(ran) == 1, "nothing was started"
 
 
 def test_no_player_and_a_player_that_fails_say_so(tmp_path, monkeypatch):
@@ -681,7 +718,7 @@ def test_without_sounddevice_a_program_records_or_the_answer_says_what_to_instal
     monkeypatch.setattr(audio, "_sounddevice", lambda: None)
     ran = []
     assert audio.record(7, path, which=lambda name: "/usr/bin/arecord" if name == "arecord" else None, run=lambda command, **kw: ran.append(command), platform="linux") == "arecord"
-    assert ran == [["arecord", "-q", "-f", "S16_LE", "-r", "48000", "-c", "1", "-d", "7", path]]
+    assert ran == [["/usr/bin/arecord", "-q", "-f", "S16_LE", "-r", "48000", "-c", "1", "-d", "7", path]]
     assert audio.recorders(7, path, "win32")[0][:5] == ["sox", "-q", "-t", "waveaudio", "default"], "on Windows sox reads the default device"
     with pytest.raises(audio.Unavailable) as none:
         audio.record(7, path, which=lambda name: None, platform="linux")

@@ -4,6 +4,15 @@ aamio-qrcast, the add-on. Dates are the day the version was committed; it is
 tagged on release, and the two are the same day. Every entry says what changed
 for somebody using it.
 
+## 0.1.3 - 2026-11-14
+
+- ffmpeg and the opener of a picture start by their full path, from the
+  folders `PATH` names by a full path and never from the working directory:
+  `open` on macOS and `xdg-open` on Linux. winget's link folder is looked in
+  only through a `LOCALAPPDATA` that is a full path. `shutil.which` is not used
+  for this, since on Python 3.10 it still looks in the working directory first
+  on Windows.
+
 ## 0.1.2 - 2026-11-12
 
 - An unknown call says something that is not a name as JSON, as the editions

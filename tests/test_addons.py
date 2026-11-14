@@ -565,7 +565,7 @@ if short == "mutter":
     sys.stderr.flush()
     print(json.dumps({"result": {"pong": True}}))
     sys.exit(0)
-print(json.dumps({"result": {"pong": True, "name": request["name"], "arguments": request["arguments"], "subject": request["subject"], "own_key": request["own_key"], "state_dir": request["state_dir"], "home_env": os.environ.get("AAMIO_HOME"), "addon_env": os.environ.get("AAMIO_ADDON"), "secret_env": os.environ.get("AAMIO_TEST_SECRET"), "passthru_env": os.environ.get("AAMIO_TEST_PASSTHRU"), "path_env": bool(os.environ.get("PATH"))}}))
+print(json.dumps({"result": {"pong": True, "name": request["name"], "arguments": request["arguments"], "subject": request["subject"], "own_key": request["own_key"], "state_dir": request["state_dir"], "home_env": os.environ.get("AAMIO_HOME"), "addon_env": os.environ.get("AAMIO_ADDON"), "secret_env": os.environ.get("AAMIO_TEST_SECRET"), "passthru_env": os.environ.get("AAMIO_TEST_PASSTHRU"), "path_env": bool(os.environ.get("PATH")), "cwd": os.getcwd(), "no_current_directory": os.environ.get("NoDefaultCurrentDirectoryInExePath")}}))
 """
 
 
@@ -861,6 +861,54 @@ def test_the_example_add_on_hello_runs_as_the_page_says(tmp_path, monkeypatch):
         assert reply["result"]["isError"] is False and reply["result"]["structuredContent"] == {"hello": "Ola"}
     finally:
         runtime.close()
+
+
+def test_the_process_of_an_add_on_starts_with_the_working_directory_off_the_module_path():
+    """python -m put the working directory first on the module path (a security review of 13 November 2026): -P from 3.11, and on 3.10 a starter that takes it off before it imports anything."""
+    assert addon_process.process_command("demo2_pkg.process", (3, 11), "py") == ["py", "-P", "-m", "demo2_pkg.process"]
+    assert addon_process.process_command("demo2_pkg.process", (3, 14, 7), "py") == ["py", "-P", "-m", "demo2_pkg.process"]
+    command = addon_process.process_command("demo2_pkg.process", (3, 10, 11), "py")
+    assert command[:2] == ["py", "-c"] and command[3] == "demo2_pkg.process"
+    starter = command[2]
+    assert starter.index("del sys.path[0]") < starter.index("import runpy") and "run_name='__main__'" in starter and "alter_sys=True" in starter, "the path is cut before runpy is imported, and the module runs as -m would run it"
+
+
+def test_pythonpath_cannot_put_the_working_directory_back(tmp_path):
+    """An empty, a relative and a full entry naming the working directory each brought the module there back (a review of 14 November 2026); a full path elsewhere stays."""
+    assert addon_process.module_path(r";.;src;C:src;\src;C:\work;c:\WORK\;C:\site;\\server\share\lib", cwd=r"C:\work", platform="win32") == r"C:\site;\\server\share\lib"
+    assert addon_process.module_path("::.:src:/home/u/work:/home/u/work/:/opt/site", cwd="/home/u/work", platform="linux") == "/opt/site"
+    env = addon_process.child_environment({"PYTHONPATH": r".;C:\site", "PATH": "x", "nodefaultcurrentdirectoryinexepath": "0"}, cwd=r"C:\work", platform="win32")
+    assert env == {"PYTHONPATH": r"C:\site", "PATH": "x", "NoDefaultCurrentDirectoryInExePath": "1"}, "on Windows the process is also told not to look for programs in the working directory, set last whatever case it came in"
+    assert addon_process.child_environment({"PYTHONPATH": ".", "PATH": "x"}, cwd="/home/u", platform="linux") == {"PATH": "x"}, "and a PYTHONPATH with nothing left is left out"
+    real = tmp_path / "work"
+    real.mkdir()
+    assert addon_process.module_path(os.pathsep.join([str(real), str(real) + os.sep, str(tmp_path)]), cwd=str(real)) == str(tmp_path)
+
+
+@pytest.mark.parametrize("named", ["empty", "relative", "full"])
+@pytest.mark.parametrize("editable", [False, True])
+def test_the_installed_module_runs_whatever_the_working_directory_holds(process_site, monkeypatch, tmp_path, named, editable):
+    """From two working directories, each with a harmless module of the add-on's name, and with PYTHONPATH naming the working directory three ways: enable and a call run the installed module, and the process keeps the working directory for paths the user gives (a security review of 13 November 2026, a review of 14 November)."""
+    ran, _ = process_site(editable=editable)
+    planted = tmp_path / "planted.ran"
+    installed_path = os.environ["PYTHONPATH"]
+    for work in (tmp_path / "work-a", tmp_path / "work b"):
+        package = work / "demo2_pkg"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("open(%r, 'a').close()\n" % str(planted), encoding="utf-8")
+        (package / "process.py").write_text("open(%r, 'a').close()\nprint('{\"result\": {\"planted\": true}}')\n" % str(planted), encoding="utf-8")
+        monkeypatch.setenv("PYTHONPATH", {"empty": "", "relative": ".", "full": str(work)}[named] + os.pathsep + installed_path)
+        monkeypatch.chdir(work)
+        if not (tmp_path / "home" / "addons.json").exists():
+            code, _, err = main(["addon", "enable", "demo2"], monkeypatch)
+            assert code == 0, err
+        code, out, err = main(["addon", "demo2", "ping"], monkeypatch)
+        got = json.loads(out)
+        assert code == 0 and got["pong"] is True and os.path.samefile(got["cwd"], str(work)), (out, err)
+        if sys.platform == "win32":
+            assert got["no_current_directory"] == "1"
+    assert not planted.exists(), "the module in the working directory never ran"
+    assert ran.read_text(encoding="utf-8").splitlines() == ["probe probe", "command ping", "command ping"]
 
 
 def test_contract_two_passes_only_the_environment_the_manifest_declares(process_site, monkeypatch, tmp_path):

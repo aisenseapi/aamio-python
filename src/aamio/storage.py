@@ -267,8 +267,9 @@ def _system_tool(*parts):
     of 13 November 2026). The Node runtime and aamio-php ask them so too.
     """
     root = os.environ.get("SystemRoot") or os.environ.get("windir") or "C:\\Windows"
-    path = os.path.join(root, "System32", *parts)
-    return path if os.path.isfile(path) else parts[-1]
+    # Never the bare name, which Windows looks for in the working directory
+    # first: where System32 has no such tool, starting it fails, as it should.
+    return os.path.join(root, "System32", *parts)
 
 
 def windows_acl_findings(lines, me):

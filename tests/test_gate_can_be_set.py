@@ -35,7 +35,10 @@ from aamio.mcp_server import TOOLS, dispatch
 from aamio.runtime import Runtime
 from types import SimpleNamespace
 
-ADVICE = {"require": {"pow": {"bits": 20}, "per_key": 5}}
+# Without per_key, which needs allow: a channel that asks for it and names
+# nobody is refused before the service is asked, since 0.6.36
+# (test_followup_2026_11_13.py has that case).
+ADVICE = {"require": {"pow": {"bits": 20}}}
 
 
 class Wire:

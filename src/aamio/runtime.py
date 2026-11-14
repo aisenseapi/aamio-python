@@ -278,6 +278,23 @@ def unfit_text(path, what):
     return "%s is nested deeper than %d: a reader hands a message nested that deep over as text" % (where, BODY_MAX_DEPTH)
 
 
+PER_KEY_WHY = "a gate that requires per_key needs allow: messages are counted per signing key, and a channel without allow also takes writes nobody signed, which per_key cannot count"
+
+
+def per_key_fix(names):
+    """What to do about per_key without allow, with a name from the address book where there is one.
+
+    The service's advice for such a gate is allow ["*"], a list of keys. Here
+    allow takes partner names, and "*" was looked up as one and answered
+    unknown_partner (a review of 13 November 2026). As the Node runtime and
+    aamio-php say it.
+    """
+    named = next((str(name) for name in names if name), None)
+    if named is None:
+        return "Add the partners who may write to the address book first, with aamio partner add NAME KEY (aamio_partner_add over MCP), and name them in allow."
+    return 'Name the partners who may write in allow, as allow: ["%s"] over MCP, or --allow %s on the command line, and open the channel again.' % (named, named)
+
+
 def body_json(text):
     """A body's JSON, or ValueError when it is to be read as text: not JSON, a number that is not finite, or too deep."""
     try:
@@ -2443,6 +2460,8 @@ class Runtime:
                 keys.append(key)
             handover = (reply_to, key)
 
+        if not keys and isinstance(gate, dict) and isinstance(gate.get("require"), dict) and "per_key" in gate["require"]:
+            raise CodedValueError("invalid_gate", "%s. %s" % (PER_KEY_WHY, per_key_fix([p.get("name") for p in self.partners])))
         status, data, read_key, w = self.client.open_thread(int(ttl), keys or None, gate)
         if status != 201:
             raise CodedRuntimeError("channel_unavailable", "could not open channel: %s %s" % (status, data))
@@ -2543,7 +2562,7 @@ class Runtime:
             # RuntimeError: a traceback on the command line, with the channel
             # open and the address delivered to nobody.
             entry = self._outbox_add(reply_to, key, envelope, body)
-            status, handed = self._deliver(entry)
+            status, handed = self._deliver(entry, budget=self._call_budget())
         except GateStop as stop:
             # The channel is open whatever stopped the message, and the caller
             # has to hear that as well as why.
@@ -2849,7 +2868,7 @@ class Runtime:
         # nonce, and the poster cannot tell that from a second answer. From
         # the outbox the same bytes go again, and a copy is a replay there.
         entry = self._outbox_add(post["w"], post["key"], envelope, body)
-        status, result = self._deliver(entry)
+        status, result = self._deliver(entry, budget=self._call_budget())
         archive_error = self._archive_done("board", {"kind": "answered", "at": time.time(), "post": post["id"], "w": post["w"], "status": status, "message_id": entry["id"], "outcome": entry["status"], "body": body}, "the answer %s" % entry["id"])
         if status != 201:
             raise SendFailed(entry["status"], entry["id"], status, result, trace_error=entry.get("trace_error"), archive_error=archive_error)
@@ -3320,7 +3339,7 @@ class Runtime:
                 "note": "This inbox asks for %d bits of proof of work, about %s here, so it is being done in the background and the message is sent when it is done. aamio_pending shows it until then, and the next aamio_read says how it ended." % (advice["bits"], describe_seconds(advice["expected_seconds"])),
             }
 
-        status, result = self._deliver(entry)
+        status, result = self._deliver(entry, budget=budget)
 
         if status in (404, 410) and partner is not None:
             # The partner may have renewed its inbox. Ask presence again, once.
@@ -3328,7 +3347,7 @@ class Runtime:
             w, key = self.address_for(partner)
             envelope = self.keys.seal(key, plaintext)
             entry = self._outbox_add(w, key, envelope, body, replaces=entry["id"])
-            status, result = self._deliver(entry)
+            status, result = self._deliver(entry, budget=budget)
 
         archived = body if archived_data is None else dict(body, data=archived_data)
         record = {"kind": "sent", "at": time.time(), "to": self.name_for_key(key) or key, "w": entry["w"], "status": status, "message_id": entry["id"], "outcome": entry["status"], "seq": (result or {}).get("seq") if isinstance(result, dict) else None, "sha256": (result or {}).get("sha256") if isinstance(result, dict) else None, "body": archived}
@@ -3506,6 +3525,27 @@ class Runtime:
             self._forget_gate(w)
             return gate_plan(self._gate_for(w), w, self.host, self._seconds_left(w))
 
+    def _call_budget(self):
+        """How long work may take in this call: the time a tool call is given over MCP, or None on the command line."""
+        return getattr(self, "work_budget", None)
+
+    @staticmethod
+    def _within_budget(advice, budget):
+        """Work that takes longer than this call may last is not started: the rule aamio-php's Gate::plan has.
+
+        A board answer, a channel handed over, a retry from the outbox and a
+        gate a 428 named did their work inside the call, however long it took,
+        and a host that cuts a tool call after a minute left a message nobody
+        knew the fate of (a security review of 13 November 2026). An estimate,
+        not a promise: the work is a lottery, and one in a hundred takes about
+        4.6 times as long.
+        """
+        if budget is not None and advice.get("bits") and advice.get("expected_seconds", 0) > budget:
+            raise GateStop(
+                "the inbox asks for %d bits of proof of work, which takes about %s on this machine, longer than a tool call is given here, so the work was not started" % (advice["bits"], describe_seconds(advice["expected_seconds"])),
+                "Send it from the command line, where the work has the time it needs: the same bytes are kept under this message id, and aamio outbox retry sends them.",
+            )
+
     def _gate_clock(self):
         clock = getattr(self, "gate_clock", None)
         if clock is None:
@@ -3520,7 +3560,7 @@ class Runtime:
         left, at = said
         return max(0, left - (time.monotonic() - at))
 
-    def _post(self, w, body_text, notes, entry=None):
+    def _post(self, w, body_text, notes, entry=None, budget=None):
         """POST to an inbox with the work its gate asks for, answering a 428 once.
 
         Never more than one more attempt. Each costs a place in the rate window,
@@ -3532,6 +3572,7 @@ class Runtime:
         signature = self.keys.sign(thread_signing_input(w, body_text))
         advice = self._plan_for(w)
         notes.extend(advice["notes"])
+        self._within_budget(advice, budget)
         status, result = self._post_with_work(w, body_text, signature, advice["bits"], self._seconds_left(w), entry)
 
         if status == 428 and isinstance(result, dict) and isinstance(result.get("gate"), dict):
@@ -3542,6 +3583,9 @@ class Runtime:
             try:
                 asked = gate_plan(result["gate"], w, self.host, left)
                 notes.extend(note for note in asked["notes"] if note not in notes)
+                # The gate the 428 named, held to the same budget: the one post
+                # that went, and its refusal, are then the answer.
+                self._within_budget(asked, budget)
 
                 if asked["bits"] and asked["bits"] != advice["bits"]:
                     status, result = self._post_with_work(w, body_text, signature, asked["bits"], left, entry)
@@ -3618,8 +3662,12 @@ class Runtime:
 
     # ----------------------------------------------------------- deliver --
 
-    def _deliver(self, entry):
-        """Send the stored bytes once, and record what the answer allows us to claim."""
+    def _deliver(self, entry, budget=None):
+        """Send the stored bytes once, and record what the answer allows us to claim.
+
+        budget is how long work may take in this call, and None where it may
+        take what it needs: the command line, and the background half of a send.
+        """
         entry["attempts"] += 1
         entry["status"] = "sending"
         try:
@@ -3637,7 +3685,7 @@ class Runtime:
         notes = []
 
         try:
-            status, result = self._post(entry["w"], entry["envelope"], notes, entry)
+            status, result = self._post(entry["w"], entry["envelope"], notes, entry, budget=budget)
         except GateStop as stop:
             # Nothing left this machine and nothing will. That is not the same as
             # the service turning bytes away: refused with no answer behind it read
@@ -3790,7 +3838,14 @@ class Runtime:
             if not outbox_retryable(entry):
                 continue
 
-            status, _ = self._deliver(entry)
+            try:
+                status, _ = self._deliver(entry, budget=self._call_budget())
+            except GateStop as stop:
+                # Stopped here before it left, which settles nothing about an
+                # attempt before it: an unknown stays unknown, with its id and
+                # its bytes, for a retry from the command line.
+                out.append({"id": entry["id"], "w": entry["w"], "status": entry["status"], "http": 0, "stopped": stop.reason, "fix": stop.fix})
+                continue
             row = {"id": entry["id"], "w": entry["w"], "status": entry["status"], "http": status}
             # A retry run once from a script never fetches attention either.
             if entry.get("trace_error"):

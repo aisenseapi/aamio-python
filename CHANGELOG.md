@@ -4,6 +4,41 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.36 - 2026-11-14
+
+- The process of an add-on starts with the working directory off the module
+  path: with `-P` from Python 3.11, and on 3.10 through a starter that takes it
+  off before anything is imported, `runpy` included, and runs the module as
+  `-m` would. A module of the add-on's name in the working directory ran in
+  place of the installed one. `PYTHONPATH` loses an empty entry, a relative
+  one and one naming the working directory, each of which brought it back. The
+  working directory itself is kept, for paths the user gives.
+- On Windows the process of an add-on gets `NoDefaultCurrentDirectoryInExePath=1`,
+  set last, after what its manifest declared, and whatever case it came in, so
+  a program it starts by a bare name is not looked for in the working
+  directory. The Windows tools the core starts itself (PowerShell, whoami and icacls for the privacy check) are started by their
+  place in System32 and never by a bare name: where System32 had no such tool,
+  the bare name was asked, which Windows looks for in the working directory
+  first.
+- Proof of work in a board answer, a channel handed over, a retry from the
+  outbox and a gate a 428 names is held to the time a tool call has over MCP,
+  forty seconds, as a send's already was: work estimated past it is not
+  started, and the stop says to send from the command line, where the work has
+  the time it needs. Where it is the inbox that closes first, the advice is a
+  longer inbox or more compute. A stop after a post the inbox refused with 428
+  is told as that refusal, and a retry that stops before it posts leaves an
+  earlier unknown unknown, with its id and its bytes.
+- `doctor` says JSON `null` and a JSON string at `/health` as JSON that is not
+  aamio's health answer. They were said as an empty body and as a body that is
+  not JSON. What it says of the service's health is unchanged.
+- A channel opened with a gate that requires `per_key` and no `allow` is
+  refused here, before the service is asked, with a partner from the address
+  book as the example, or how to add one first. The service's advice for such
+  a gate, `allow: ["*"]`, is a list of keys, and here `allow` takes partner
+  names: the star was answered `unknown_partner`.
+- A message nested 5 000 deep is text on Python 3.10 and 3.11, as on 3.12 and
+  later, where it came out unreadable.
+
 ## 0.6.35 - 2026-11-13
 
 - A body is read as JSON only when every number in it is finite and it is

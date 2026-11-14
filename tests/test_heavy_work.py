@@ -132,6 +132,103 @@ def test_without_a_budget_the_work_is_done_in_the_call():
     assert answer.get("status") != "working" and answer["seq"] == 1
 
 
+def entry_for(runtime, w="q" * 20, **fields):
+    """An outbox entry as a send leaves it, with fields of an earlier attempt."""
+    entry = runtime._outbox_add(w, Keys.generate().public, "sealed bytes", {"text": "x"})
+    entry.update(fields)
+    runtime.outbox[entry["id"]] = entry
+    return entry
+
+
+def slow_work(monkeypatch, seconds):
+    """Every amount of work takes this long here, so a test does not rest on the speed of the machine or on luck."""
+    monkeypatch.setattr(gatemod, "expected_seconds", lambda bits: seconds)
+
+
+def test_work_past_the_budget_of_a_call_is_not_started_and_nothing_is_posted(monkeypatch):
+    """A board answer, a handover and a retry go through _deliver with the call's budget (a security review of 13 November 2026): 0 posts, and a stop that says to use the command line."""
+    slow_work(monkeypatch, 600)
+    posted = []
+    runtime = runtime_facing({"require": {"pow": {"bits": 24, "covers": 1}}}, 3600, lambda *a, **k: posted.append(a) or (201, {}))
+    runtime.work_budget = 40
+    entry = entry_for(runtime)
+
+    with pytest.raises(GateStop) as stop:
+        runtime._deliver(entry, budget=runtime._call_budget())
+
+    assert posted == [] and entry["status"] == "stopped" and "not started" in stop.value.reason and "command line" in stop.value.fix
+    assert "longer than a tool call" in stop.value.why and "inbox" not in stop.value.fix.split(":")[0], "the advice is the command line, since the budget is the call's, not the inbox's"
+
+
+def test_an_inbox_that_closes_too_soon_is_told_apart_from_a_short_call(monkeypatch):
+    """Where it is the inbox that closes first, the advice is a longer inbox or more compute: the command line does not lengthen it (a review of 14 November 2026)."""
+    slow_work(monkeypatch, 600)
+    runtime = runtime_facing({"require": {"pow": {"bits": 24, "covers": 1}}}, 60, lambda *a, **k: (201, {}))
+    runtime.work_budget = 40
+    with pytest.raises(GateStop) as stop:
+        runtime._deliver(entry_for(runtime), budget=40)
+    assert "takes writes for" in stop.value.why and "machine with more compute" in stop.value.fix and "command line" not in stop.value.fix
+
+
+def test_a_gate_named_by_a_428_is_held_to_the_budget_and_the_one_post_is_the_answer(monkeypatch):
+    """One post, refused with 428 and a gate whose work passes the budget: not posted again, and told as the refusal it was."""
+    slow_work(monkeypatch, 600)
+    posted = []
+
+    def post(w, body_text, key, signature, content_type="text/plain", work=None):
+        posted.append(work)
+        return 428, {"error": "work required", "gate": {"require": {"pow": {"bits": 24, "covers": 1}}}, "seconds_left": 3000}
+
+    runtime = runtime_facing({}, 3600, post)
+    runtime.work_budget = 40
+    entry = entry_for(runtime)
+    status, result = runtime._deliver(entry, budget=40)
+
+    assert posted == [None] and status == 428 and entry["status"] == "refused"
+    assert result["fix"].startswith("The message went once and the inbox refused it with 428") and "command line" in result["fix"]
+
+
+def test_a_retry_stopped_before_it_posts_leaves_an_unknown_unknown(monkeypatch):
+    """An earlier attempt with no answer stays unknown, with the same id and bytes, when the retry stops at the budget, and the list goes on."""
+    slow_work(monkeypatch, 600)
+    posted = []
+    runtime = runtime_facing({"require": {"pow": {"bits": 24, "covers": 1}}}, 3600, lambda *a, **k: posted.append(a) or (201, {"seq": 1, "at": 1, "sha256": "h", "expire_at": 2}))
+    runtime.work_budget = 40
+    runtime._trace_safely = lambda *a, **k: None
+    open_one = entry_for(runtime, status="unknown", ever_open=True, attempts=1, last_status=0)
+    envelope = open_one["envelope"]
+
+    rows = runtime.outbox_retry()
+
+    assert posted == [] and open_one["status"] == "unknown" and open_one["ever_open"] is True and open_one["envelope"] == envelope and runtime.outbox[open_one["id"]] is open_one
+    assert rows == [{"id": open_one["id"], "w": open_one["w"], "status": "unknown", "http": 0, "stopped": rows[0]["stopped"], "fix": rows[0]["fix"]}] and "not started" in rows[0]["stopped"]
+
+
+def test_low_or_no_work_is_delivered_as_before_within_a_budget(monkeypatch):
+    """The rule stops only work that is long: an inbox without a gate, and one whose work is short, are delivered in the call."""
+    posted = []
+
+    def post(w, body_text, key, signature, content_type="text/plain", work=None):
+        posted.append(work)
+        return 201, {"seq": len(posted), "at": 1, "sha256": "h", "expire_at": 2}
+
+    runtime = runtime_facing({}, 3600, post)
+    runtime.work_budget = 40
+    runtime._trace_safely = lambda *a, **k: None
+    assert runtime._deliver(entry_for(runtime), budget=40)[0] == 201
+    runtime = runtime_facing({"require": {"pow": {"bits": 8, "covers": 1}}}, 3600, post)
+    runtime.work_budget = 40
+    runtime._trace_safely = lambda *a, **k: None
+    assert runtime._deliver(entry_for(runtime, w="r" * 20), budget=40)[0] == 201 and posted[-1] is not None
+    slow_work(monkeypatch, 600)
+    runtime = runtime_facing({"require": {"pow": {"bits": 24, "covers": 1}}}, 3600, post)
+    runtime._trace_safely = lambda *a, **k: None
+    started = time.monotonic()
+    monkeypatch.setattr("aamio.runtime.gate_solve", lambda *a, **k: "nonce")
+    assert runtime._deliver(entry_for(runtime, w="s" * 20))[0] == 201 and posted[-1] == "nonce", "and without a budget, on the command line, the work is done"
+    assert time.monotonic() - started < 5
+
+
 def test_an_inbox_that_closes_too_soon_stops_the_send_before_anything_is_stored():
     runtime = runtime_facing({"require": {"pow": {"bits": 30, "covers": 1}}}, 60, lambda *a, **k: (201, {}))
 

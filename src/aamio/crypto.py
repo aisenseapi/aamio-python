@@ -156,8 +156,12 @@ def check_message(w: str, message: dict):
 
 
 def is_envelope(text: str) -> bool:
+    # RecursionError too: JSON nested deeper than the decoder goes raises it on
+    # Python 3.10 and 3.11, and a message 5 000 deep came out unreadable there
+    # where it is text, as on 3.12 and later (found running the suite on 3.10,
+    # 14 November 2026).
     try:
         envelope = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         return False
     return isinstance(envelope, dict) and envelope.get("e2ee") == ENVELOPE

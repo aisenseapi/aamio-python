@@ -13,12 +13,14 @@ settings for desktop apps, macOS once for the app the agent runs in, and Linux
 by the video group.
 """
 
+import ntpath
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
+
+from . import programs
 
 FPS = 4
 MAX_SIDE = 4096
@@ -50,12 +52,13 @@ def privacy_hint(platform):
     return "Check that the camera is connected and that this user is in the video group."
 
 
-def find_ffmpeg(which=shutil.which, platform=sys.platform, environ=os.environ, exists=os.path.isfile):
+def find_ffmpeg(which=programs.find, platform=sys.platform, environ=os.environ, exists=os.path.isfile):
+    """The full path of ffmpeg: from PATH, never the working directory, then winget's link folder on Windows."""
     found = which("ffmpeg")
     if found:
         return found
-    if platform == "win32" and environ.get("LOCALAPPDATA"):
-        link = os.path.join(environ["LOCALAPPDATA"], *WINGET_LINK)
+    if platform == "win32" and environ.get("LOCALAPPDATA") and programs.is_absolute(environ["LOCALAPPDATA"], platform):
+        link = ntpath.join(environ["LOCALAPPDATA"], *WINGET_LINK)
         if exists(link):
             return link
     return None
@@ -154,7 +157,7 @@ def read_pgm(stream):
     return None if data is None else (width, height, data)
 
 
-def frames(seconds, camera=None, which=shutil.which, platform=sys.platform, environ=os.environ, popen=subprocess.Popen, run=subprocess.run):
+def frames(seconds, camera=None, which=programs.find, platform=sys.platform, environ=os.environ, popen=subprocess.Popen, run=subprocess.run):
     """Grey frames from the camera, four a second, for this many seconds, as (width, height, bytes). Closing the generator stops ffmpeg."""
     ffmpeg = find_ffmpeg(which, platform, environ)
     if ffmpeg is None:
