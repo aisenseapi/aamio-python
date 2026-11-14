@@ -992,6 +992,10 @@ class Channel:
         self.stopped_at_budget = False
         # The addresses the read under way bound, which it takes back if it fails.
         self.bound_here = None
+        # While a read of this channel is under way: the channel as that read
+        # found it, or as it last wrote itself down. A save made for another
+        # channel writes this, never what the read has done so far.
+        self.committed = None
         self.lock = threading.Lock()
         self.poller = None
         self.closed = False
@@ -1114,6 +1118,8 @@ class Runtime:
         try:
             with self.archive_lock:
                 gone = storage.prune(self.home, policy)
+                # What the end of each file held may be gone with it.
+                self.__dict__.pop("archive_before", None)
         except (OSError, ValueError) as error:
             # The archive keeps growing, in plain text, and the policy that was
             # meant to bound it did not run. Worth hearing about once per reason.
@@ -1454,8 +1460,19 @@ class Runtime:
         return keys
 
     def save_state(self):
+        """Writes state.json: each channel as it last finished, and no address binding a read under way has made.
+
+        The listener reads each channel in a thread of its own, and one save
+        wrote every channel as it stood: the hashes and bindings of a read that
+        had not finished, and then failed, were on the disk, and after a
+        restart its messages came marked replay, never having been handed over
+        (the release check of 14 November 2026).
+        """
         with self.lock:
-            self._save_json("state.json", {"tags": self.tags, "peers": self.peers, "channels": [c.to_state() for c in self.channels.values()]}, private=True)
+            unsettled = self.__dict__.get("unsettled") or {}
+            peers = {address: key for address, key in self.peers.items() if (address, key) not in unsettled}
+            channels = [c.committed if getattr(c, "committed", None) is not None else c.to_state() for c in self.channels.values()]
+            self._save_json("state.json", {"tags": self.tags, "peers": peers, "channels": channels}, private=True)
 
     def save_outbox(self):
         with self.lock:
@@ -1473,33 +1490,68 @@ class Runtime:
     def _archived_before(self, label):
         """What earlier processes wrote to this channel's archive, from the end of the file: (w, instance, seq) -> sha256.
 
-        Read once a process. The end is enough: what an earlier process wrote
-        and did not get past with its cursor was written last, and a read
-        takes at most a thread's megabyte of messages.
+        The end is enough for what an earlier process wrote and did not get
+        past with its cursor, which was written last: a read takes at most a
+        thread's megabyte of messages. A row further back is not found, and
+        that delivery is written down again. The rows are the ones the
+        archive's own reader counts, by its rules: past a byte order mark at
+        the start of the file, UTF-8, JSON. The first line of the end counts
+        when it starts where a line starts, and is passed by when it is the
+        tail of a line cut by where the end begins.
+
+        Read again when the file is not the one that was read: replaced, as a
+        prune replaces it, or shorter. A row a prune had removed was still
+        taken as there, and the message said archived: true with no row behind
+        it (the release check of 14 November 2026).
         """
         cache = self.__dict__.setdefault("archive_before", {})
-        if label in cache:
-            return cache[label]
-        found = {}
+        path = os.path.join(self.home, "archive", "%s.jsonl" % storage.archive_name(label)) if isinstance(getattr(self, "home", None), str) else None
         try:
-            path = os.path.join(self.home, "archive", "%s.jsonl" % storage.archive_name(label))
-            with open(path, "rb") as handle:
-                handle.seek(0, os.SEEK_END)
-                start = max(0, handle.tell() - ARCHIVE_TAIL_BYTES)
-                handle.seek(start)
-                lines = handle.read().split(b"\n")
-            for line in lines[1:] if start > 0 else lines:
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(row, dict) and row.get("kind") == "received" and isinstance(row.get("w"), str) and isinstance(row.get("instance"), str) \
-                        and type(row.get("seq")) is int:
-                    found[(row["w"], row["instance"], row["seq"])] = row.get("sha256")
-        except Exception:
-            # No archive for it yet, or one that cannot be read: there is no row to use again.
-            pass
-        cache[label] = found
+            stat = os.stat(path) if path else None
+        except OSError:
+            stat = None
+        version = None if stat is None else (stat.st_dev, stat.st_ino)
+        held = cache.get(label)
+        if held is not None and held[1] == version and (stat is None or stat.st_size >= held[2]):
+            return held[0]
+        found = {}
+        size = 0
+        if stat is not None:
+            try:
+                with open(path, "rb") as handle:
+                    handle.seek(0, os.SEEK_END)
+                    size = handle.tell()
+                    tail = max(0, size - getattr(self, "archive_tail_bytes", ARCHIVE_TAIL_BYTES))
+                    # The byte before the end says whether its first line is whole.
+                    handle.seek(max(0, tail - 1))
+                    data = handle.read()
+                if tail > 0:
+                    whole, data = data[:1] == b"\n", data[1:]
+                    lines = data.split(b"\n")
+                    if not whole:
+                        lines = lines[1:]
+                else:
+                    if data.startswith(b"\xef\xbb\xbf"):
+                        data = data[3:]
+                    lines = data.split(b"\n")
+                for raw in lines:
+                    try:
+                        line = raw.decode("utf-8").strip()
+                    except UnicodeDecodeError:
+                        continue
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict) and row.get("kind") == "received" and isinstance(row.get("w"), str) and isinstance(row.get("instance"), str) \
+                            and type(row.get("seq")) is int:
+                        found[(row["w"], row["instance"], row["seq"])] = row.get("sha256")
+            except Exception:
+                # One that cannot be read: there is no row to use again.
+                found = {}
+        cache[label] = (found, version, size)
         return found
 
     def archive(self, label, record):
@@ -3867,10 +3919,27 @@ class Runtime:
         Every save inside a poll used to be able to throw straight out at the loop
         that calls it, which logs and sleeps -- and the messages poll had already
         decoded went nowhere.
+
+        It is the channel's own save: the channel is written as it stands, and
+        the address bindings its read made are written with it, as settled.
         """
-        try:
-            self.save_state()
-        except Exception as error:
+        with self.lock:
+            unsettled = self.__dict__.setdefault("unsettled", {})
+            settled = {binding: unsettled.pop(binding) for binding in (getattr(channel, "bound_here", None) or []) if binding in unsettled}
+            held = getattr(channel, "committed", None)
+            channel.committed = None
+            try:
+                self.save_state()
+            except Exception as error:
+                unsettled.update(settled)
+                channel.committed = held
+                saved = error
+            else:
+                saved = None
+                if held is not None:
+                    channel.committed = channel.to_state()
+        if saved is not None:
+            error = saved
             self._note(
                 channel,
                 "unsaved",
@@ -3908,19 +3977,46 @@ class Runtime:
         # meantime with it (the release check of 14 November 2026).
         outer = getattr(channel, "bound_here", None)
         channel.bound_here = []
+        # The channel as this read finds it is what a save made for another
+        # channel writes of it until the read writes itself down.
+        outermost = getattr(channel, "committed", None) is None and callable(getattr(channel, "to_state", None))
+        if outermost:
+            channel.committed = channel.to_state()
         try:
-            return self._poll_channel(channel, wait, limit, max_bytes)
+            result = self._poll_channel(channel, wait, limit, max_bytes)
         except Exception:
             (channel.after, channel.created_at, channel.expire_at, channel.instance, channel.gone,
              channel.seen, channel.seen_from, received) = before
             del channel.received[received:]
             with self.lock:
-                for address, key in channel.bound_here:
-                    if self.peers.get(address) == key:
-                        del self.peers[address]
+                unsettled = self.__dict__.setdefault("unsettled", {})
+                for binding in channel.bound_here:
+                    holders = unsettled.get(binding)
+                    if holders is None or id(channel) not in holders:
+                        # Settled by a save, or another read's to keep.
+                        continue
+                    holders.discard(id(channel))
+                    if not holders:
+                        del unsettled[binding]
+                        if self.peers.get(binding[0]) == binding[1]:
+                            del self.peers[binding[0]]
             raise
+        else:
+            # A read that finished keeps what it bound, written down or not: a
+            # save that failed leaves it to the next one, as it leaves the hashes.
+            with self.lock:
+                unsettled = self.__dict__.setdefault("unsettled", {})
+                for binding in channel.bound_here:
+                    holders = unsettled.get(binding)
+                    if holders is not None:
+                        holders.discard(id(channel))
+                        if not holders:
+                            del unsettled[binding]
+            return result
         finally:
             channel.bound_here = outer
+            if outermost:
+                channel.committed = None
 
     def _poll_channel(self, channel, wait, limit, max_bytes):
         """One read of one channel, as poll describes it."""
@@ -4277,11 +4373,21 @@ class Runtime:
             return
         with self.lock:
             bound = self.peers.get(address)
+            reading = isinstance(getattr(channel, "bound_here", None), list)
+            unsettled = self.__dict__.setdefault("unsettled", {})
             if bound is None:
                 self.peers[address] = sender_key
-                if isinstance(getattr(channel, "bound_here", None), list):
+                if reading:
+                    # Written down when this read writes itself down, and
+                    # taken back if it fails before that.
                     channel.bound_here.append((address, sender_key))
+                    unsettled[(address, sender_key)] = {id(channel)}
                 return
+            if bound == sender_key and reading and (address, sender_key) in unsettled:
+                # Another read under way made it: this one holds it too, so it
+                # is written down with whichever finishes first.
+                unsettled[(address, sender_key)].add(id(channel))
+                channel.bound_here.append((address, sender_key))
         if bound == sender_key:
             return
         entry.setdefault("binding_conflicts", []).append({"field": field, "address": address, "claimed_by": sender_key, "bound_to": bound})

@@ -257,6 +257,139 @@ def test_after_a_restart_a_delivery_an_earlier_process_wrote_down_is_one_row(tmp
         again.release()
 
 
+def archived_runtime(home, service):
+    runtime = Runtime(home=str(home), host=DEAD, archive=True)
+    runtime.client.http = service.http
+    runtime.client.board = DEAD
+    runtime.client.verifyum = DEAD
+    return runtime
+
+
+def test_a_save_while_another_channel_reads_writes_that_channel_as_it_last_finished(tmp_path, monkeypatch):
+    """The second release check of 14 November 2026, item 1: the listener reads each channel in a thread of its own,
+    and one save wrote every channel as it stood. What a read under way had done was on the disk when it failed."""
+    service = Service()
+    home = tmp_path / "home"
+    runtime = opened(home, service)
+    inbox = runtime.ensure_inbox()
+    side = runtime.open_channel("side", 600)
+    sender = Keys.generate()
+    mine, theirs, both = "a" * 20, "b" * 20, "c" * 20
+    service.write(side["w"], json.dumps({"text": "first on the side", "reply_to": mine, "channel": both}), sender)
+    service.write(side["w"], json.dumps({"text": "second on the side"}), sender)
+    service.write(inbox.w, json.dumps({"text": "on the inbox", "reply_to": theirs, "channel": both}), sender)
+    channels = {c.label: c for c in runtime.channels.values()}
+    real = runtime._read_entry
+
+    def interleaved(channel, raw):
+        if channel.label == "side" and isinstance(raw, dict) and raw.get("seq") == 2:
+            # What the inbox's own thread does while the side's read is under way: it reads to the end and writes itself down.
+            assert [m["body"]["text"] for m in runtime.poll(channels["inbox"])[1]] == ["on the inbox"]
+            raise RuntimeError("the test made the side's second message fail")
+        return real(channel, raw)
+
+    monkeypatch.setattr(runtime, "_read_entry", interleaved)
+    with pytest.raises(RuntimeError):
+        runtime.poll(channels["side"])
+    with open(home / "state.json", encoding="utf-8") as handle:
+        disk = json.load(handle)
+    saved = {c["label"]: c for c in disk["channels"]}
+    assert (saved["side"]["after"], saved["side"]["seen"]) == (0, []), "nothing of the side's unfinished read is on the disk"
+    assert saved["inbox"]["after"] == 1 and len(saved["inbox"]["seen"]) == 1, "the inbox, which finished, is"
+    assert disk["peers"].get(theirs) == sender.public and mine not in disk["peers"], disk["peers"]
+    assert disk["peers"].get(both) == sender.public and runtime.peers.get(both) == sender.public, "a binding both reads made stays with the one that finished"
+    assert mine not in runtime.peers
+    monkeypatch.setattr(runtime, "_read_entry", real)
+    runtime.release()
+    again = opened(home, service)
+    try:
+        assert [(m["body"]["text"], m["replay"]) for m in again.read(0, 50)] == [("first on the side", False), ("second on the side", False)]
+    finally:
+        again.release()
+
+
+def crafted(tmp_path, texts):
+    """A home whose side channel holds texts at the service, read by nobody yet, and the rows an earlier process would have written for them."""
+    service = Service()
+    home = tmp_path / "home"
+    runtime = archived_runtime(home, service)
+    runtime.ensure_inbox()
+    side = runtime.open_channel("side", 600)
+    sender = Keys.generate()
+    bodies = [json.dumps({"text": text}) for text in texts]
+    for body in bodies:
+        service.write(side["w"], body, sender)
+    runtime.release()
+    instance = service.threads[side["w"]]["instance"]
+    rows = [json.dumps({"kind": "received", "channel": "side", "w": side["w"], "instance": instance, "seq": seq, "sha256": sha256hex(body), "body": json.loads(body)}).encode("utf-8")
+            for seq, body in enumerate(bodies, 1)]
+    return service, home, rows
+
+
+def written(home):
+    """The seq of every row the archive's reader counts for the side channel, and how many lines the file has."""
+    with open(os.path.join(home, "archive", "side.jsonl"), "rb") as handle:
+        lines = [line for line in handle.read().split(b"\n") if line]
+    seqs = []
+    for number, line in enumerate(lines):
+        try:
+            row = json.loads((line[3:] if number == 0 and line.startswith(b"\xef\xbb\xbf") else line).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if row.get("kind") == "received":
+            seqs.append(row["seq"])
+    return sorted(seqs), len(lines)
+
+
+def test_a_row_a_prune_removed_is_written_again_and_never_taken_as_there(tmp_path):
+    """Item 2: the end of the file read once was used after a prune had removed the row, and the message said archived."""
+    service, home, rows = crafted(tmp_path, ["first"])
+    with open(os.path.join(home, "archive", "side.jsonl"), "wb") as handle:
+        handle.write(rows[0] + b"\n")
+    again = archived_runtime(home, service)
+    try:
+        assert [(m["body"]["text"], m["archived"]) for m in again.read(0, 50)] == [("first", True)]
+        assert written(home) == ([1], 1), "the row an earlier process wrote is used"
+        # A prune writes the file again beside itself and renames it over: here, without the row.
+        path = os.path.join(home, "archive", "side.jsonl")
+        with open(path + ".tmp", "wb") as handle:
+            handle.write(b"")
+        os.replace(path + ".tmp", path)
+        [c for c in again.channels.values() if c.label == "side"][0].after = 0
+        assert [(m["body"]["text"], m["archived"]) for m in again.read(0, 50)] == [("first", True)]
+        assert written(home) == ([1], 1), "the row is written again: the archive has what the message says"
+    finally:
+        again.release()
+
+
+@pytest.mark.parametrize("case", ["a byte order mark", "a line that is not UTF-8", "a line that starts where the end starts"])
+def test_the_rows_used_again_are_the_ones_the_archive_reader_counts(tmp_path, case):
+    """Item 3: the same rules for which rows count, and the first line of the end told whole from cut.
+
+    The mark and the line that is not UTF-8 were read right here before, and
+    are held here as in the other two runtimes, where they were not.
+    """
+    service, home, rows = crafted(tmp_path, ["first", "second"])
+    path = os.path.join(home, "archive", "side.jsonl")
+    if case == "a line that is not UTF-8":
+        rows[0] = rows[0].replace(b'"first"', b'"fir\xffst"')
+    with open(path, "wb") as handle:
+        handle.write((b"\xef\xbb\xbf" if case == "a byte order mark" else b"") + rows[0] + b"\n" + rows[1] + b"\n")
+    again = archived_runtime(home, service)
+    if case == "a line that starts where the end starts":
+        again.archive_tail_bytes = len(rows[1]) + 1
+    try:
+        assert [(m["body"]["text"], m["archived"]) for m in again.read(0, 50)] == [("first", True), ("second", True)]
+        if case == "a byte order mark":
+            assert written(home) == ([1, 2], 2), "the first row, past the mark, is used as the reader counts it"
+        elif case == "a line that is not UTF-8":
+            assert written(home) == ([1, 2], 3), "the line the reader passes by is no row: the first is written down"
+        else:
+            assert written(home) == ([1, 1, 2], 3), "the second, which starts where the end starts, is used; the first, further back, is written again"
+    finally:
+        again.release()
+
+
 def test_half_a_surrogate_pair_is_named_where_it_stands():
     assert unfit_json(json.loads('{"a": {"\\ud800": 1}}')) == ("a.\\ud800", "half a pair")
     assert unfit_json(json.loads('{"a": 1e999, "b": "\\udfff"}')) == ("a", "not finite"), "the first in the document is named"

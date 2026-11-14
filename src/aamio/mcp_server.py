@@ -860,7 +860,8 @@ def handle(runtime: Runtime, message, session=None):
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
     if "id" not in message or method.startswith("notifications/"):
         return None
-    rid = message["id"]
+    # A whole number written 1.0 is the id 1, as the Node runtime and aamio-php read it.
+    rid = int(message["id"]) if isinstance(message["id"], float) else message["id"]
     session = {} if session is None else session
     # A request that names a revision this server does not know is refused
     # before anything is done, as the hosted service refuses it: the shape

@@ -31,6 +31,11 @@ not what moved in the source.
   been handed over. Of the address bindings it takes back only its own: the
   listener reads each channel in a thread of its own, and a copy of the whole
   book put back took a binding another channel had made in the meantime.
+- A save writes each channel as it last finished. One save wrote every
+  channel as it stood, so the hashes and bindings of a read under way were on
+  the disk when that read failed, and after a restart its messages came
+  marked `replay`. A binding two reads made is written down with whichever
+  finishes first.
 - A logger that fails costs the log line, never the read: a note made after
   the cursor was written down threw out of the read, which then handed over
   nothing of what it had passed.
@@ -40,14 +45,18 @@ not what moved in the source.
   stopped the read, in both ways of reading.
 - Over MCP a request id that is not a string or a whole number a double holds
   exactly, such as `1e999`, is refused with `-32600` and id null, as in the
-  Node runtime. `1e999` was copied into the answer as `Infinity`.
+  Node runtime. `1e999` was copied into the answer as `Infinity`. A whole
+  number written `1.0` is the id `1`.
 - A delivery is written to the archive once. One read again after a read that
   failed, or after a cursor that could not be written, uses the row that is
   there, in the next process too when the row is among the last 16 MiB of its
   channel's archive and holds the same message. A row written without the
   thread's instance, by a version before it was kept, is not taken for it, so
   such a delivery can stand there twice. Board replies lists a row used again
-  as it was first written down.
+  as it was first written down. The rows used again are the ones the archive's
+  reader counts, past a byte order mark and in UTF-8, and the end of the file
+  is read again once a prune has replaced it: a row a prune had removed was
+  still taken as there.
 
 ## 0.6.34 - 2026-11-13
 
