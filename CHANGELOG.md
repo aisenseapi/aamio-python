@@ -35,7 +35,12 @@ not what moved in the source.
   channel as it stood, so the hashes and bindings of a read under way were on
   the disk when that read failed, and after a restart its messages came
   marked `replay`. A binding two reads made is written down with whichever
-  finishes first.
+  finishes first, and one a read that finished made stays when another read
+  fails, also when the one that finished could not write. A lookup or a board
+  post that names an address binds it on its own. Of a channel under a read,
+  the read's own fields are written as it last finished, and its name, mute
+  and list as they stand: a rotation of the inbox during a read wrote the old
+  inbox back as inbox, unmuted.
 - A logger that fails costs the log line, never the read: a note made after
   the cursor was written down threw out of the read, which then handed over
   nothing of what it had passed.
@@ -56,7 +61,9 @@ not what moved in the source.
   as it was first written down. The rows used again are the ones the archive's
   reader counts, past a byte order mark and in UTF-8, and the end of the file
   is read again once a prune has replaced it: a row a prune had removed was
-  still taken as there.
+  still taken as there. What this process wrote at a read whose cursor was not
+  written is looked for in the file again after a prune too, so `archived` is
+  the row that is there.
 
 ## 0.6.34 - 2026-11-13
 

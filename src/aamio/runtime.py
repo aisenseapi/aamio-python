@@ -1062,7 +1062,7 @@ class Runtime:
         # could not be saved, reads them again, and they were written down a
         # second time (the release check of 14 November 2026). As in the Node
         # runtime.
-        self.written_down = set()
+        self.written_down = {}
         # How often a delivery was handed over here with a row an earlier
         # process had written: copies held here that wrote none.
         self.rows_reused = collections.Counter()
@@ -1118,8 +1118,12 @@ class Runtime:
         try:
             with self.archive_lock:
                 gone = storage.prune(self.home, policy)
-                # What the end of each file held may be gone with it.
+                # What the end of each file held may be gone with it, and with
+                # it a row this process wrote at a read whose cursor was not
+                # written: the next read looks in the file again (the third
+                # release check of 14 November 2026).
                 self.__dict__.pop("archive_before", None)
+                self.__dict__.get("written_down", {}).clear()
         except (OSError, ValueError) as error:
             # The archive keeps growing, in plain text, and the policy that was
             # meant to bound it did not run. Worth hearing about once per reason.
@@ -1471,8 +1475,24 @@ class Runtime:
         with self.lock:
             unsettled = self.__dict__.get("unsettled") or {}
             peers = {address: key for address, key in self.peers.items() if (address, key) not in unsettled}
-            channels = [c.committed if getattr(c, "committed", None) is not None else c.to_state() for c in self.channels.values()]
+            channels = [self._saved_channel(c) for c in self.channels.values()]
             self._save_json("state.json", {"tags": self.tags, "peers": peers, "channels": channels}, private=True)
+
+    # What a read writes down of a channel: its cursor, the thread it is on, and
+    # the hashes. The rest is the channel's own, which a rotation of the inbox
+    # changes while a listener reads: a copy of the whole channel wrote the old
+    # inbox back under the name inbox, unmuted, beside the new one (the third
+    # release check of 14 November 2026).
+    READ_FIELDS = ("after", "created_at", "expire_at", "instance", "gone", "seen", "seen_from")
+
+    def _saved_channel(self, channel):
+        """A channel as state.json gets it: with a read under way, that read's fields as it last finished."""
+        live = channel.to_state()
+        held = getattr(channel, "committed", None)
+        if held is None:
+            return live
+        live.update({field: held[field] for field in self.READ_FIELDS if field in held})
+        return live
 
     def save_outbox(self):
         with self.lock:
@@ -1485,7 +1505,7 @@ class Runtime:
     def _archive_book(self):
         """The lock, the deliveries written down at reads not yet past them, and the rows used again: made when first wanted."""
         held = self.__dict__
-        return held.setdefault("archive_lock", threading.Lock()), held.setdefault("written_down", set()), held.setdefault("rows_reused", collections.Counter())
+        return held.setdefault("archive_lock", threading.Lock()), held.setdefault("written_down", {}), held.setdefault("rows_reused", collections.Counter())
 
     def _archived_before(self, label):
         """What earlier processes wrote to this channel's archive, from the end of the file: (w, instance, seq) -> sha256.
@@ -1514,6 +1534,14 @@ class Runtime:
         held = cache.get(label)
         if held is not None and held[1] == version and (stat is None or stat.st_size >= held[2]):
             return held[0]
+        if held is not None:
+            # The file is another one now, or shorter: what this process wrote
+            # to it at a read that did not get past its cursor is looked for
+            # in it again.
+            book_lock, written_down, _ = self._archive_book()
+            with book_lock:
+                for done in [d for d, at in written_down.items() if at == label]:
+                    del written_down[done]
         found = {}
         size = 0
         if stat is not None:
@@ -2592,8 +2620,7 @@ class Runtime:
             data["scope_name"] = held["name"]
         for post in data.get("posts", []):
             if post.get("w") and post.get("key"):
-                with self.lock:
-                    self.peers[post["w"]] = post["key"]
+                self._bind_settled(post["w"], post["key"])
         return data
 
     def board_get(self, post_id):
@@ -2669,8 +2696,7 @@ class Runtime:
             )
         if own_post:
             self.log("this post is signed by your own key, so the answer is sealed to you and nobody else will read it")
-        with self.lock:
-            self.peers[post["w"]] = post["key"]
+        self._bind_settled(post["w"], post["key"])
         body = {"post": post["id"], "reply_to": channel.w, "from": self.keys.hash[:8]}
         body.update(self._conversation(post["key"]))
         if text is not None:
@@ -3034,8 +3060,7 @@ class Runtime:
             if partner is None or partner["key"] not in asked:
                 continue
             found.add(partner["name"])
-            with self.lock:
-                self.peers[match["w"]] = partner["key"]
+            self._bind_settled(match["w"], partner["key"])
             online.append({"name": partner["name"], "w": match["w"], "tags": match.get("tags", []), "expires_at": match.get("expire_at")})
         self.save_state()
         result = {"online": online, "offline": [p["name"] for p in partners if p["name"] not in found]}
@@ -3911,7 +3936,8 @@ class Runtime:
         # What the cursor is now past is never read again here.
         book_lock, written_down, _ = self._archive_book()
         with book_lock:
-            written_down.difference_update({d for d in written_down if d[0] == channel.w and isinstance(d[2], int) and d[2] <= to_seq})
+            for done in [d for d in written_down if d[0] == channel.w and isinstance(d[2], int) and d[2] <= to_seq]:
+                del written_down[done]
 
     def _save_quietly(self, channel, was=None):
         """Write the state; a failure is said in attention and never raised.
@@ -3981,7 +4007,8 @@ class Runtime:
         # channel writes of it until the read writes itself down.
         outermost = getattr(channel, "committed", None) is None and callable(getattr(channel, "to_state", None))
         if outermost:
-            channel.committed = channel.to_state()
+            with self.lock:
+                channel.committed = channel.to_state()
         try:
             result = self._poll_channel(channel, wait, limit, max_bytes)
         except Exception:
@@ -4003,20 +4030,20 @@ class Runtime:
             raise
         else:
             # A read that finished keeps what it bound, written down or not: a
-            # save that failed leaves it to the next one, as it leaves the hashes.
+            # save that failed leaves it to the next one, as it leaves the
+            # hashes. It is settled for every read that holds it: one that
+            # fails later took back a binding a finished read had delivered
+            # (the third release check of 14 November 2026).
             with self.lock:
                 unsettled = self.__dict__.setdefault("unsettled", {})
                 for binding in channel.bound_here:
-                    holders = unsettled.get(binding)
-                    if holders is not None:
-                        holders.discard(id(channel))
-                        if not holders:
-                            del unsettled[binding]
+                    unsettled.pop(binding, None)
             return result
         finally:
             channel.bound_here = outer
             if outermost:
-                channel.committed = None
+                with self.lock:
+                    channel.committed = None
 
     def _poll_channel(self, channel, wait, limit, max_bytes):
         """One read of one channel, as poll describes it."""
@@ -4256,6 +4283,10 @@ class Runtime:
                 # nothing else to tell the two by (a review of 11 November 2026).
                 delivery = (channel.w, channel.instance, entry["seq"])
                 book_lock, written_down, rows_reused = self._archive_book()
+                # The file first: one that is another now, or shorter, makes
+                # this process forget what it wrote to it, and that is looked
+                # for in it again.
+                found_before = self._archived_before(channel.label) if getattr(self, "archive_enabled", False) and isinstance(channel.instance, str) else {}
                 with book_lock:
                     already = isinstance(channel.instance, str) and delivery in written_down
                 if not already and getattr(self, "archive_enabled", False) and isinstance(channel.instance, str):
@@ -4264,11 +4295,11 @@ class Runtime:
                     # message (the release check of 14 November 2026). A row
                     # without the thread's instance, from a version before it
                     # was kept, could be another delivery, so both are kept.
-                    earlier = self._archived_before(channel.label).get(delivery)
+                    earlier = found_before.get(delivery)
                     already = earlier is not None and earlier == entry.get("sha256")
                     if already:
                         with book_lock:
-                            written_down.add(delivery)
+                            written_down[delivery] = channel.label
                             rows_reused[delivery] += 1
                 if already:
                     # Written down by this process at a read that did not get
@@ -4287,7 +4318,7 @@ class Runtime:
                         entry["archive_off"] = True
                     elif isinstance(channel.instance, str):
                         with book_lock:
-                            written_down.add(delivery)
+                            written_down[delivery] = channel.label
             except Exception as error:
                 # Said in attention, not on the message: a message has to be the
                 # size it was weighed at, and an error of any length added after
@@ -4355,6 +4386,12 @@ class Runtime:
         if oversized is not None:
             self._note(channel, "over_budget", "message %s on this channel is %d bytes as handed over here, larger than the whole byte budget of %d this read asked for. It had already come, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose." % (oversized[0], oversized[1], max_bytes))
         return "ok", entries
+
+    def _bind_settled(self, address, key):
+        """An address bound by something that has finished, a lookup or a post: written down with the next save, whatever a read under way holds of it."""
+        with self.lock:
+            self.peers[address] = key
+            self.__dict__.setdefault("unsettled", {}).pop((address, key), None)
 
     def _bind_claimed_address(self, channel, entry, field, address, sender_key):
         """A verified message that names an address binds its signer's key to it, once.

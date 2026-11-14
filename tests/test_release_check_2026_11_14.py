@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -328,7 +329,10 @@ def crafted(tmp_path, texts):
 
 def written(home):
     """The seq of every row the archive's reader counts for the side channel, and how many lines the file has."""
-    with open(os.path.join(home, "archive", "side.jsonl"), "rb") as handle:
+    path = os.path.join(home, "archive", "side.jsonl")
+    if not os.path.exists(path):
+        return [], 0
+    with open(path, "rb") as handle:
         lines = [line for line in handle.read().split(b"\n") if line]
     seqs = []
     for number, line in enumerate(lines):
@@ -388,6 +392,158 @@ def test_the_rows_used_again_are_the_ones_the_archive_reader_counts(tmp_path, ca
             assert written(home) == ([1, 1, 2], 3), "the second, which starts where the end starts, is used; the first, further back, is written again"
     finally:
         again.release()
+
+
+def test_a_rotation_while_the_old_inbox_is_read_leaves_one_inbox_and_the_old_one_muted(tmp_path):
+    """The third release check of 14 November 2026, item 1, with two threads held to their order: the save of a
+    rotation wrote the old inbox as the read had found it, named inbox and not muted, beside the new one."""
+    service = Service()
+    home = tmp_path / "home"
+    runtime = opened(home, service)
+    pal = Keys.generate()
+    runtime.partner_add("pal", pal.public)
+    old = runtime.ensure_inbox()
+    entered, release = threading.Event(), threading.Event()
+    real_http = runtime.client.http
+
+    def held(method, url, *args, **kwargs):
+        if method == "GET" and ("/" + old.w) in url and not release.is_set():
+            entered.set()
+            release.wait(10)
+        return real_http(method, url, *args, **kwargs)
+
+    runtime.client.http = held
+    reader = threading.Thread(target=runtime.poll, args=(old,))
+    reader.start()
+    try:
+        assert entered.wait(10), "the read of the old inbox is under way"
+        runtime.partner_remove("pal")
+        new = runtime.channels["inbox"].w
+        assert new != old.w
+        # What a process that started now, the read still under way, would find.
+        with open(home / "state.json", encoding="utf-8") as handle:
+            during = json.load(handle)["channels"]
+        assert [c["w"] for c in during if c["label"] == "inbox"] == [new], during
+        assert [c["muted"] for c in during if c["w"] == old.w] == [True], during
+    finally:
+        release.set()
+        reader.join(10)
+    runtime.release()
+    with open(home / "state.json", encoding="utf-8") as handle:
+        saved = json.load(handle)["channels"]
+    assert [c["w"] for c in saved if c["label"] == "inbox"] == [new], saved
+    assert [c["muted"] for c in saved if c["w"] == old.w] == [True], saved
+    again = opened(home, service)
+    try:
+        assert again.channels["inbox"].w == new, "the next process takes the new inbox, the two expiring in the same second"
+        assert [c.muted for c in again.channels.values() if c.w == old.w] == [True]
+    finally:
+        again.release()
+
+
+def test_a_lookup_that_finds_what_a_read_under_way_bound_keeps_it(tmp_path, monkeypatch):
+    """Item 2: a lookup that finished confirms the binding on its own, and a read that fails after it takes nothing back."""
+    service = Service()
+    home = tmp_path / "home"
+    runtime = opened(home, service)
+    pal = Keys.generate()
+    runtime.partner_add("pal", pal.public)
+    runtime.ensure_inbox()
+    side = runtime.open_channel("side", 600)
+    where = "d" * 20
+    service.write(side["w"], json.dumps({"text": "first", "reply_to": where}), pal)
+    service.write(side["w"], json.dumps({"text": "second"}), pal)
+    monkeypatch.setattr(runtime.client, "presence_lookup", lambda prefixes, wait=0: (200, {"matches": [{"key": pal.public, "w": where, "tags": [], "expire_at": int(time.time()) + 60}]}))
+    channel = [c for c in runtime.channels.values() if c.label == "side"][0]
+    real = runtime._read_entry
+
+    def interleaved(at, raw):
+        if at.label == "side" and isinstance(raw, dict) and raw.get("seq") == 2:
+            assert [found["w"] for found in runtime.lookup(["pal"])["online"]] == [where]
+            raise RuntimeError("the test made the side's second message fail")
+        return real(at, raw)
+
+    monkeypatch.setattr(runtime, "_read_entry", interleaved)
+    with pytest.raises(RuntimeError):
+        runtime.poll(channel)
+    assert runtime.peers.get(where) == pal.public, "the lookup's binding stays"
+    runtime.release()
+    again = opened(home, service)
+    try:
+        assert again.peers.get(where) == pal.public, "on the disk too"
+    finally:
+        again.release()
+
+
+def test_a_binding_two_reads_made_stays_when_the_one_that_finished_could_not_write(tmp_path, monkeypatch):
+    """Item 2: the inbox finishes under a write that fails and delivers, the side fails after it, and the binding both made stays."""
+    service = Service()
+    home = tmp_path / "home"
+    runtime = opened(home, service)
+    inbox = runtime.ensure_inbox()
+    side = runtime.open_channel("side", 600)
+    sender = Keys.generate()
+    both = "e" * 20
+    service.write(side["w"], json.dumps({"text": "first on the side", "reply_to": both}), sender)
+    service.write(side["w"], json.dumps({"text": "second on the side"}), sender)
+    service.write(inbox.w, json.dumps({"text": "on the inbox", "reply_to": both}), sender)
+    channels = {c.label: c for c in runtime.channels.values()}
+    real_save = runtime.save_state
+    real = runtime._read_entry
+
+    def failing():
+        raise OSError("the test made this save fail")
+
+    def interleaved(at, raw):
+        if at.label == "side" and isinstance(raw, dict) and raw.get("seq") == 2:
+            monkeypatch.setattr(runtime, "save_state", failing)
+            assert [m["body"]["text"] for m in runtime.poll(channels["inbox"])[1]] == ["on the inbox"], "delivered, its cursor not written"
+            monkeypatch.setattr(runtime, "save_state", real_save)
+            raise RuntimeError("the test made the side's second message fail")
+        return real(at, raw)
+
+    monkeypatch.setattr(runtime, "_read_entry", interleaved)
+    with pytest.raises(RuntimeError):
+        runtime.poll(channels["side"])
+    assert runtime.peers.get(both) == sender.public, "the binding the inbox delivered stays"
+    runtime.save_state()
+    runtime.release()
+    again = opened(home, service)
+    try:
+        assert again.peers.get(both) == sender.public
+    finally:
+        again.release()
+
+
+def test_after_a_cursor_that_could_not_be_written_and_a_prune_the_mark_is_the_row_that_is_there(tmp_path, monkeypatch):
+    """Item 3: in one process, a row written down, its cursor not written, the row pruned, and the message read again."""
+    service = Service()
+    home = tmp_path / "home"
+    runtime = archived_runtime(home, service)
+    try:
+        runtime.ensure_inbox()
+        side = runtime.open_channel("side", 600)
+        service.write(side["w"], json.dumps({"text": "first"}), Keys.generate())
+        channel = [c for c in runtime.channels.values() if c.label == "side"][0]
+        real_save = runtime.save_state
+
+        def failing_past_the_side():
+            if channel.after == 1:
+                raise OSError("the test made the save of the side's cursor fail")
+            return real_save()
+
+        monkeypatch.setattr(runtime, "save_state", failing_past_the_side)
+        assert [(m["body"]["text"], m["archived"]) for m in runtime.read(0, 50)] == [("first", True)]
+        monkeypatch.setattr(runtime, "save_state", real_save)
+        assert written(home) == ([1], 1)
+        # A prune in this process, under a ceiling far below one row: every row goes.
+        runtime.archive_policy = {"mode": "keep", "days": None, "max_mb": 1e-9}
+        runtime._prune()
+        assert written(home) == ([], 0)
+        assert [(m["body"]["text"], m["archived"]) for m in runtime.read(0, 50)] == [("first", True)]
+        assert written(home) == ([1], 1), "the mark is the row that is there: it is written again"
+    finally:
+        runtime.release()
 
 
 def test_half_a_surrogate_pair_is_named_where_it_stands():
