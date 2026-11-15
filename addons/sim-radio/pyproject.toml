@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# A transport under contract 3 for tests: a simulated radio over UDP on
+# 127.0.0.1. It lives in the aamio-python repository and is tested with the
+# core. It is not published; it is what the tests and the cross-runtime
+# exchange run over.
+name = "aamio-sim-radio"
+dynamic = ["version"]
+description = "A simulated radio for aamio: a transport under contract 3 over UDP on 127.0.0.1, with small frames, a slow rate, and frames that are lost, doubled or put out of order. For tests; nothing leaves this machine."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "AI SENSE AS" }]
+dependencies = []
+keywords = ["aamio", "agents", "transport", "test"]
+
+[project.entry-points."aamio.addons"]
+sim-radio = "aamio_sim_radio"
+
+[tool.setuptools.dynamic]
+version = { attr = "aamio_sim_radio.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+aamio_sim_radio = ["aamio-addon.json"]

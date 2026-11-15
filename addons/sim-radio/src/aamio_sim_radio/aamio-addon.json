@@ -1,0 +1,14 @@
+{
+  "aamio_addon": 3,
+  "name": "sim-radio",
+  "version": "0.1.0",
+  "description": "A simulated radio over UDP on 127.0.0.1, with small frames, a slow rate, and frames that are lost, doubled or put out of order. For tests; nothing leaves this machine.",
+  "transport": {
+    "medium": "simulated radio",
+    "start": {"python": "aamio_sim_radio.transport"},
+    "platforms": ["linux", "darwin", "win32"],
+    "permissions": ["network_local"]
+  },
+  "environment": ["AAMIO_SIM_PORT", "AAMIO_SIM_PEERS", "AAMIO_SIM_MAX_FRAME", "AAMIO_SIM_RATE", "AAMIO_SIM_LOSS",
+                  "AAMIO_SIM_DUPLICATE", "AAMIO_SIM_REORDER", "AAMIO_SIM_SEED"]
+}
