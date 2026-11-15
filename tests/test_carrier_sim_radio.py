@@ -89,3 +89,31 @@ def test_a_message_each_way_arrives_once_with_its_receipt(tmp_path, mode, medium
         for process in (radio_a, radio_b):
             if process is not None:
                 process.stop()
+
+
+def test_a_radio_that_speaks_before_its_peer_is_up_still_hears_it_afterwards(tmp_path):
+    """Windows answers a frame to a port nobody listens on with an error on the next receive; listening goes on."""
+    port, peer = free_port(), free_port()
+    (tmp_path / "a").mkdir()
+    process = radio(tmp_path / "a", "a", port, peer, CLEAN)
+    try:
+        until = time.monotonic() + 10
+        while process.room() < 1:
+            assert time.monotonic() < until, "no room"
+            process.poll(timeout=0.1)
+        early = process.send(b"AF" + bytes(20))
+        while process.status(early) == "waiting":
+            assert time.monotonic() < until, "the frame to nobody was never answered"
+            process.poll(timeout=0.1)
+        time.sleep(0.3)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as other:
+            other.bind(("127.0.0.1", peer))
+            other.sendto(b"AF" + bytes(range(20)), ("127.0.0.1", port))
+            heard = []
+            until = time.monotonic() + 10
+            while not heard:
+                assert time.monotonic() < until, "the radio went deaf after a frame found nobody"
+                heard = [event for event in process.poll(timeout=0.1) if event[0] == "received"]
+        assert heard[0][1:] == ("sim:%d" % peer, b"AF" + bytes(range(20)))
+    finally:
+        process.stop()

@@ -52,6 +52,7 @@ class Radio:
         self.out = threading.Lock()
         self.held = None
         self.sends_read = 0
+        self.stopping = False
 
     def say(self, message):
         line = json.dumps(message, separators=(",", ":")) + "\n"
@@ -63,7 +64,15 @@ class Radio:
         while True:
             try:
                 data, (_, port) = self.socket.recvfrom(65_535)
-            except OSError:
+            except ConnectionResetError:
+                # Windows answers a frame sent to a port nobody listens on yet with an error on the
+                # next receive (WSAECONNRESET). On the air a frame that finds nobody is just gone, and
+                # the radio goes on hearing: without this, whoever spoke first went deaf for good.
+                continue
+            except OSError as error:
+                if not self.stopping:
+                    # A radio that can no longer hear says so, rather than go quiet as if the air were.
+                    self.say({"t": "status", "state": "down", "reason": "the radio cannot receive: %s" % error})
                 return
             frame = base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
             self.say({"t": "received", "from": "sim:%d" % port, "frame": frame})
@@ -111,6 +120,7 @@ class Radio:
                 pass  # every frame is on the air before its send is answered, so nothing is left to cancel
             elif kind == "stop":
                 break
+        self.stopping = True
         self.socket.close()
 
 
