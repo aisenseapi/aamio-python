@@ -12,6 +12,12 @@ the sessions, the session ids that were used, the messages taken with their
 marks, the time floor and the count of challenges given. A receipt goes out
 only after that write; a write that fails is carry_storage_failed, and nothing
 that guards against a replay is deleted before section A6.9 allows it.
+
+The kept state has the same shape in every runtime, since another runtime may
+take the home over: four maps (incoming, stored, outgoing, outbox), written as
+JSON objects also when they are empty, one list (used) and three numbers. A
+file of any other shape is refused whole as carry_state_unreadable, rather
+than read in part and written back without what could not be read.
 """
 
 import hashlib
@@ -62,6 +68,26 @@ def _empty():
             "outgoing": {}, "outbox": {}}
 
 
+def _whole(number, nullable=False):
+    return (nullable and number is None) or (isinstance(number, int) and not isinstance(number, bool) and number >= 0)
+
+
+def _readable(value):
+    """The shape every runtime writes (the module's docstring): anything else is not read at all."""
+    if not isinstance(value, dict) or value.get("version") != STATE_VERSION or "floor" not in value:
+        return False
+    if not _whole(value["floor"], nullable=True) or not _whole(value.get("challenges")):
+        return False
+    used = value.get("used")
+    if not isinstance(used, list) or not all(isinstance(item, str) for item in used):
+        return False
+    for name, kind in (("incoming", dict), ("outgoing", dict), ("stored", str), ("outbox", str)):
+        group = value.get(name)
+        if not isinstance(group, dict) or not all(isinstance(item, kind) for item in group.values()):
+            return False
+    return True
+
+
 class CarryState:
     """One home's carrier state. path is where it is kept; None keeps it in memory, for a test."""
 
@@ -87,9 +113,10 @@ class CarryState:
             value = json.loads(text)
         except ValueError:
             value = None
-        if not isinstance(value, dict) or value.get("version") != STATE_VERSION:
+        if not _readable(value):
             # Starting from nothing would forget which messages were taken, and
-            # a copy of one could then be taken again.
+            # a copy of one could then be taken again; reading only part of it
+            # would write the rest away at the next save.
             raise CarryRefused("carry_state_unreadable", "%s could not be read, so nothing is taken until it is repaired or moved away" % self.path)
         return value
 

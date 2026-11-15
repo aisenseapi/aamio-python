@@ -79,6 +79,37 @@ def test_a_state_that_cannot_be_read_stops_everything_rather_than_start_from_not
     assert refused.value.code == "carry_state_unreadable"
 
 
+EMPTY = {"version": 1, "floor": None, "challenges": 0, "incoming": {}, "used": [], "stored": {}, "outgoing": {}, "outbox": {}}
+# What is changed, and what is left out.
+OTHER_SHAPES = {
+    "an empty map written as a list": ({"incoming": []}, ()),
+    "a list where a map goes": ({"outgoing": ["a"]}, ()),
+    "a record that is not one": ({"incoming": {"a:b": "x"}}, ()),
+    "a hash that is a number": ({"stored": {"a:b:1": 5}}, ()),
+    "used as a map": ({"used": {}}, ()),
+    "used with a number": ({"used": [1]}, ()),
+    "a floor as text": ({"floor": "1794700000"}, ()),
+    "a floor below zero": ({"floor": -1}, ()),
+    "a count that is true": ({"challenges": True}, ()),
+    "no outbox": ({}, ("outbox",)),
+    "no floor": ({}, ("floor",)),
+}
+
+
+@pytest.mark.parametrize("change, missing", OTHER_SHAPES.values(), ids=OTHER_SHAPES.keys())
+def test_a_state_of_another_shape_is_refused_whole_rather_than_read_in_part(tmp_path, change, missing):
+    """Another runtime may have written it: read in part, what was not read would be written away at the next save."""
+    path = tmp_path / "carry.json"
+    path.write_text(json.dumps(EMPTY), encoding="utf-8")
+    carry_state.CarryState(Keys(bytes(range(32))), str(path)).prune(1_794_700_000)
+    assert json.loads(path.read_text(encoding="utf-8")) == dict(EMPTY, floor=1_794_700_000), "the maps are written as objects"
+    other = {key: value for key, value in dict(EMPTY, **change).items() if key not in missing}
+    path.write_text(json.dumps(other), encoding="utf-8")
+    with pytest.raises(CarryRefused) as refused:
+        carry_state.CarryState(Keys(bytes(range(32))), str(path))
+    assert refused.value.code == "carry_state_unreadable"
+
+
 def test_a_write_that_fails_gives_no_receipt(tmp_path):
     """A6.6, step 8: no receipt without the message and its mark kept first."""
     a, b = Keys(bytes(range(32))), Keys(bytes(range(32, 64)))
