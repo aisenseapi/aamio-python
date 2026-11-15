@@ -38,16 +38,20 @@ class Carrier:
     def __init__(self, state, process, profile, known, clock=time.monotonic, wall=time.time, log=None,
                  retry_seconds=2.0, ask_retry_seconds=5.0, tries=carry_state.TRIES_DEFAULT):
         self.state, self.process, self.profile, self.known = state, process, profile, list(known)
+        # One profile for every partner, or a function from a partner's key to its own (B5).
+        self.profile_of = profile if callable(profile) else (lambda pk: profile)
         self.clock, self.wall = clock, wall
         self.log = log or (lambda line: None)
         self.retry_seconds, self.ask_retry_seconds, self.tries = retry_seconds, ask_retry_seconds, tries
         self.reassembly = Reassembly(clock)
         self.frame_limit = process.properties["max_frame_up"]
-        self.queue = []          # (frames, to), in order
+        self.queue = []          # [frames, to, mark or None, ids given so far], in order
+        self.given = {}          # mark -> the frame ids of each try that was given to the transport whole
+        self.handed = set()      # marks one try of which the transport said it handed over whole (B6 1)
         self.messages = {}       # mark -> {"envelope", "pair", "next"}: sent, and its receipt not come
         self.control = {}        # id -> {"envelope", "to", "pair", "kind", "next", "tries", "most"}: challenges and opens
         self.asks = {}           # (partner pk, session) -> {"next", "tries"}
-        self.answered = {}       # (partner pk, session) this party may send in -> None, in the order challenges came
+        self.answered = {}       # (partner pk, session) this party may send in -> when its challenge came, in that order
         self.addresses = {}      # partner pk -> the transport address it was last heard from
         self.refused = []        # codes, for a test or a log to read
         self.budget, self.budget_at = UNVERIFIED_PER_SECOND, clock()
@@ -60,8 +64,8 @@ class Carrier:
 
     # ---------------------------------------------------------- out
 
-    def _queue(self, envelope, to):
-        self.queue.append([carry.split(envelope, self.frame_limit), to])
+    def _queue(self, envelope, to, key=None):
+        self.queue.append([carry.split(envelope, self.frame_limit), to, key, []])
 
     def _control(self, envelope, to, kind, pair, most):
         self.counter += 1
@@ -71,7 +75,7 @@ class Carrier:
 
     def open(self, partner_pk):
         """Ask the partner for a session of this party's: the challenge and the open follow in pump."""
-        session, envelope = self.state.ask(partner_pk, self.profile, self.clock())
+        session, envelope = self.state.ask(partner_pk, self.profile_of(partner_pk), self.clock())
         self.asks[(partner_pk, session)] = {"next": self.clock() + self.ask_retry_seconds, "tries": 1}
         self._queue(envelope, self.addresses.get(partner_pk))
         return session
@@ -87,12 +91,20 @@ class Carrier:
                 found = session
         return found
 
+    def usable_session(self, partner_pk, seconds):
+        """The newest session of this party's with the partner whose challenge came less than seconds ago, or None."""
+        found, now = None, self.clock()
+        for (pk, session), at in self.answered.items():
+            if pk == partner_pk and now - at < seconds:
+                found = session
+        return found
+
     def send(self, partner_pk, session, content, deadline=0):
         """A message in an open session, sent again with the same bytes until its receipt comes: its mark."""
-        envelope = self.state.send(partner_pk, session, content, self.profile, deadline=deadline, most=self.tries)
+        envelope = self.state.send(partner_pk, session, content, self.profile_of(partner_pk), deadline=deadline, most=self.tries)
         key = carry_state.mark(partner_pk, session, self.state.counter_of(partner_pk, session))
         self.messages[key] = {"envelope": envelope, "pair": (partner_pk, session), "next": self.clock() + self.retry_seconds}
-        self._queue(envelope, self.addresses.get(partner_pk))
+        self._queue(envelope, self.addresses.get(partner_pk), key)
         return key
 
     def confirmed(self, key):
@@ -103,6 +115,17 @@ class Carrier:
         """waiting while it is sent again, confirmed when its receipt came, and unknown when the tries ran out
         without one (it may still have arrived) or nothing is known of it."""
         return self.state.outcome(key)
+
+    def handed_over(self, key):
+        """B6 1: the transport said sent for every frame of one try at the message, in this process. Nothing about receipt."""
+        if key in self.handed:
+            return True
+        for ids in self.given.get(key, []):
+            if ids and all(self.process.status(frame_id) == "sent" for frame_id in ids):
+                self.handed.add(key)
+                self.given.pop(key, None)
+                return True
+        return False
 
     # ---------------------------------------------------------- what came in
 
@@ -144,7 +167,7 @@ class Carrier:
             return
         self.budget -= 1
         try:
-            result, reply, got = self.state.deliver(envelope, self.known, self.profile, now, int(self.wall()))
+            result, reply, got = self.state.deliver(envelope, self.known, self.profile_of, now, int(self.wall()))
         except CarryRefused as refused:
             # Refusals stay here (A7): logged and counted, never answered over the medium.
             self.refused.append(refused.code)
@@ -154,10 +177,10 @@ class Carrier:
         pair = (got.sender, got.session)
         if got.kind == carry.CHALLENGE:
             self.asks.pop(pair, None)
-            self.answered.setdefault(pair, None)
+            self.answered.setdefault(pair, now)
             # The open is sent again with the same bytes through the challenge window, until the
             # first receipt in the session shows it came: on a medium that loses frames, one try is not enough.
-            self._control(reply, source, "open", pair, self._window_tries())
+            self._control(reply, source, "open", pair, self._window_tries(got.sender))
             return
         if got.kind == carry.OPEN:
             self._settled(pair, "challenge")
@@ -168,13 +191,13 @@ class Carrier:
             return
         if got.kind == carry.ASK:
             # The challenge too is sent again with the same bytes until its open comes, or the window is gone.
-            self._control(reply, source, "challenge", pair, self._window_tries())
+            self._control(reply, source, "challenge", pair, self._window_tries(got.sender))
             return
         if reply is not None:
             self._queue(reply, source)
 
-    def _window_tries(self):
-        return max(1, int(self.profile["challenge_window"] / self.retry_seconds))
+    def _window_tries(self, pk):
+        return max(1, int(self.profile_of(pk)["challenge_window"] / self.retry_seconds))
 
     def _settled(self, pair, kind):
         for key, entry in list(self.control.items()):
@@ -192,7 +215,7 @@ class Carrier:
                 del self.messages[key]
                 continue
             entry["next"] = now + self.retry_seconds
-            self._queue(entry["envelope"], self.addresses.get(entry["pair"][0]))
+            self._queue(entry["envelope"], self.addresses.get(entry["pair"][0]), key)
         for key, entry in list(self.control.items()):
             if now < entry["next"]:
                 continue
@@ -207,18 +230,22 @@ class Carrier:
                 continue
             del self.asks[(pk, session)]
             if entry["tries"] < self.tries:
-                new_session, envelope = self.state.ask(pk, self.profile, now)
+                new_session, envelope = self.state.ask(pk, self.profile_of(pk), now)
                 self.asks[(pk, new_session)] = {"next": now + self.ask_retry_seconds, "tries": entry["tries"] + 1}
                 self._queue(envelope, self.addresses.get(pk))
 
     def _flush(self):
         while self.queue and self.process.room() > 0:
-            frames, to = self.queue[0]
+            frames, to, key, ids = self.queue[0]
             frame = frames.pop(0)
-            if self.process.send(frame, to=to) is None:
+            frame_id = self.process.send(frame, to=to)
+            if frame_id is None:
                 frames.insert(0, frame)
                 break
+            ids.append(frame_id)
             if not frames:
                 self.queue.pop(0)
+                if key is not None and key not in self.handed:
+                    self.given.setdefault(key, []).append(ids)
         # The host measures how long frames wait for room (B3.2), so it is told whether any do.
         self.process.waiting_for_room(bool(self.queue))

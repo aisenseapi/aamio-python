@@ -84,6 +84,7 @@ PAIR = "aa" * 32 + ":" + "bb" * 8
 SESSION = {"challenged": False, "nonce": None, "highest": 1, "closed": False, "deadline": 1_794_700_300, "opened": None,
            "closed_at": None, "lifetime": None}
 SENT = {"sha256": "cc" * 32, "envelope": "00", "receipt": False, "tries": 1, "most": 30}
+KEPT = {"sha256": "cc" * 32, "content": None, "sealed": True, "at": 1_794_700_000}
 # What is changed, and what is left out.
 OTHER_SHAPES = {
     "an empty map written as a list": ({"incoming": []}, ()),
@@ -104,9 +105,13 @@ OTHER_SHAPES = {
     "a session with a counter past four bytes": ({"used": [PAIR], "incoming": {PAIR: dict(SESSION, highest=2 ** 32)}}, ()),
     "a closed session without when": ({"used": [PAIR], "incoming": {PAIR: dict(SESSION, closed=True)}}, ()),
     "a session key that is not hex": ({"used": ["zz" + PAIR[2:]], "incoming": {"zz" + PAIR[2:]: SESSION}}, ()),
-    "a mark of no session kept": ({"stored": {PAIR + ":1": {"sha256": "cc" * 32, "content": None}}}, ()),
-    "content that is not hex": ({"used": [PAIR], "incoming": {PAIR: SESSION}, "stored": {PAIR + ":1": {"sha256": "cc" * 32, "content": "zz"}}}, ()),
-    "a hash of the wrong length": ({"used": [PAIR], "incoming": {PAIR: SESSION}, "stored": {PAIR + ":1": {"sha256": "cc", "content": None}}}, ()),
+    "a mark of no session kept": ({"stored": {PAIR + ":1": dict(KEPT, content=None)}}, ()),
+    "content that is not hex": ({"used": [PAIR], "incoming": {PAIR: SESSION}, "stored": {PAIR + ":1": dict(KEPT, content="zz")}}, ()),
+    "a hash of the wrong length": ({"used": [PAIR], "incoming": {PAIR: SESSION}, "stored": {PAIR + ":1": dict(KEPT, sha256="cc")}}, ()),
+    "a message kept without how it came": ({"used": [PAIR], "incoming": {PAIR: SESSION}, "stored": {PAIR + ":1": {"sha256": "cc" * 32, "content": None, "at": 1}}}, ()),
+    "a message kept without when": ({"used": [PAIR], "incoming": {PAIR: SESSION}, "stored": {PAIR + ":1": {"sha256": "cc" * 32, "content": None, "sealed": True}}}, ()),
+    "sealed as a number": ({"used": [PAIR], "incoming": {PAIR: SESSION}, "stored": {PAIR + ":1": dict(KEPT, sealed=1)}}, ()),
+    "when as text": ({"used": [PAIR], "incoming": {PAIR: SESSION}, "stored": {PAIR + ":1": dict(KEPT, at="1")}}, ()),
     "a receipt with its bytes still kept": ({"outbox": {PAIR + ":1": dict(SENT, receipt=True)}}, ()),
     "more tries than the budget": ({"outbox": {PAIR + ":1": dict(SENT, tries=31)}}, ()),
     "a count of challenges past 2^53 - 1": ({"challenges": 2 ** 53}, ()),
@@ -116,7 +121,7 @@ OTHER_SHAPES = {
 
 def test_a_state_of_the_shape_every_runtime_writes_is_read(tmp_path):
     path = tmp_path / "carry.json"
-    whole = dict(EMPTY, used=[PAIR], incoming={PAIR: SESSION}, stored={PAIR + ":1": {"sha256": "cc" * 32, "content": "6869"}},
+    whole = dict(EMPTY, used=[PAIR], incoming={PAIR: SESSION}, stored={PAIR + ":1": dict(KEPT, content="6869")},
                  outbox={PAIR + ":1": SENT})
     path.write_text(json.dumps(whole), encoding="utf-8")
     state = carry_state.CarryState(Keys(bytes(range(32))), str(path))

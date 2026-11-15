@@ -42,6 +42,7 @@ DESCRIBE_SECONDS = 10
 STOP_SECONDS = 5
 HANG_TIMEOUTS = 3
 HANG_ROOM_SECONDS = 60
+FORGET_SECONDS = 600
 FRAME_GROUPS, FRAME_BYTES, FRAME_SECONDS = 32, 256 * 1024, 120
 WRITE_QUEUE = 1024
 
@@ -113,6 +114,7 @@ class TransportProcess:
         self.process = None
         self.lines = queue.Queue()
         self.properties = None
+        self.medium = None
         self.written = 0          # sends written in all since the process started
         self.credit = 0           # from the latest ready
         self.sends_read = 0       # from the latest ready
@@ -130,13 +132,17 @@ class TransportProcess:
 
     # ---------------------------------------------------------- the process
 
-    def start(self, aamio_version, runtime, state_dir):
+    def start(self, aamio_version, runtime, state_dir, probe=False):
+        """hello, and the describe that answers it. With probe, the transport is asked to take nothing of its medium in use (B3)."""
         self.process = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         cwd=self.cwd, env=self.env, bufsize=0)
         threading.Thread(target=self._read_lines, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
         threading.Thread(target=self._write_lines, daemon=True).start()
-        self._write({"t": "hello", "aamio_addon": 3, "aamio": {"version": aamio_version, "runtime": runtime}, "state_dir": state_dir})
+        hello = {"t": "hello", "aamio_addon": 3, "aamio": {"version": aamio_version, "runtime": runtime}, "state_dir": state_dir}
+        if probe:
+            hello["probe"] = True
+        self._write(hello)
         until = self.clock() + DESCRIBE_SECONDS
         while self.properties is None:
             left = until - self.clock()
@@ -287,7 +293,9 @@ class TransportProcess:
         return frame_id
 
     def status(self, frame_id):
-        return self.frames[frame_id]["status"]
+        """What is known of a frame: waiting, sent, not_sent or unknown, and forgotten once it settled long ago."""
+        entry = self.frames.get(frame_id)
+        return entry["status"] if entry is not None else "forgotten"
 
     def _answer(self, message):
         frame_id = message.get("id")
@@ -319,6 +327,10 @@ class TransportProcess:
     def check_time(self):
         """B3.2: frames past their deadline become unknown and are cancelled; a transport without progress is hung."""
         now = self.clock()
+        # A frame that settled is kept for a while for a late answer and for status, and then forgotten, so a transport that
+        # runs for days does not carry every frame it was ever given.
+        for frame_id in [frame_id for frame_id, entry in self.frames.items() if entry["status"] != "waiting" and now - entry["deadline"] > FORGET_SECONDS]:
+            del self.frames[frame_id]
         for frame_id, entry in self.frames.items():
             if entry["status"] == "waiting" and now > entry["deadline"]:
                 self.timeouts_in_a_row += 1
@@ -376,6 +388,7 @@ class TransportProcess:
                 return []
             if message.get("name") != self.name or message.get("version") != self.version or message.get("aamio_addon") != 3:
                 self._fail(TransportFailed("transport_bad_describe", "describe names another add-on, version or contract than its manifest"))
+            self.medium = message.get("medium")
             self.properties = check_properties(message.get("properties"))
             return []
         if kind == "ready":

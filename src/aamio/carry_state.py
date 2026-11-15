@@ -56,7 +56,7 @@ _HEX = re.compile(r"\A(?:[0-9a-f]{2})*\Z")
 _TOP = {"version", "floor", "challenges", "used", "incoming", "stored", "outgoing", "outbox"}
 _INCOMING = {"challenged", "nonce", "highest", "closed", "deadline", "opened", "closed_at", "lifetime"}
 _OUTGOING = {"nonce", "answered", "counter", "closed", "closed_at", "deadline"}
-_STORED = {"sha256", "content"}
+_STORED = {"sha256", "content", "sealed", "at"}
 _OUTBOX = {"sha256", "envelope", "receipt", "tries", "most"}
 
 
@@ -143,7 +143,8 @@ def _outgoing_ok(record):
 
 def _stored_ok(entry):
     return (isinstance(entry, dict) and set(entry) == _STORED and _hex(entry["sha256"], 32)
-            and (entry["content"] is None or _hex(entry["content"], most=carry.MAX_CONTENT)))
+            and (entry["content"] is None or _hex(entry["content"], most=carry.MAX_CONTENT))
+            and isinstance(entry["sealed"], bool) and _int(entry["at"], 0, SAFE))
 
 
 def _outbox_ok(entry):
@@ -387,6 +388,11 @@ class CarryState:
         return [(key,) + _parts(key) + (bytes.fromhex(entry["content"]),) for key, entry in self.durable["stored"].items()
                 if entry["content"] is not None]
 
+    def kept(self, key):
+        """What is kept of a message taken in: sha256, whether it came sealed, and when (the time floor's clock), or None."""
+        entry = self.durable["stored"].get(key)
+        return None if entry is None else {"sha256": entry["sha256"], "sealed": entry["sealed"], "at": entry["at"]}
+
     def handed_over(self, key):
         """The program has kept the message itself or is done with it: the content goes, the mark stays until A6.9."""
         self._check()
@@ -402,7 +408,10 @@ class CarryState:
         return bytes.fromhex(record["nonce"]) if record is not None and record["challenged"] else None
 
     def deliver(self, envelope, known, profile_in, mono, now, rnd=None, seal_rnd=None):
-        """An envelope that came over a transport: ('accepted' | 'duplicate', what goes back or None, the reading), or CarryRefused."""
+        """An envelope that came over a transport: ('accepted' | 'duplicate', what goes back or None, the reading), or CarryRefused.
+
+        profile_in is a profile, or a function from the sender's key to its profile, asked once the sender is known.
+        """
         self._check()
         try:
             answer = self._deliver(envelope, known, profile_in, mono, now, rnd, seal_rnd)
@@ -416,6 +425,8 @@ class CarryState:
     def _deliver(self, envelope, known, profile_in, mono, now, rnd, seal_rnd):
         t = self._tick(now)
         got = carry.read(envelope, self.keys, known, self._binding_for)
+        if callable(profile_in):
+            profile_in = profile_in(got.sender)
         if got.mode != (carry.SEALED if profile_in["mode"] == "sealed" else carry.READABLE):
             raise CarryRefused("carry_mode_refused")
         pk, session, kind = got.sender, got.session, got.kind
@@ -574,7 +585,8 @@ class CarryState:
         if new is not None:
             incoming[pair] = new
             self.used.add(pair)
-        self.durable["stored"][key] = {"sha256": digest, "content": got.content.hex()}
+        # How it came and when, kept with it: what read says of it does not depend on a profile that may change meanwhile.
+        self.durable["stored"][key] = {"sha256": digest, "content": got.content.hex(), "sealed": got.mode == carry.SEALED, "at": t}
         record["highest"] = max(record["highest"], counter)
         self._save()
         return "accepted", receipt(), got
