@@ -5073,7 +5073,7 @@ class Runtime:
                     self.publish_presence()
                 except (RuntimeError, OSError) as error:
                     online = False
-                    self._note_trouble("inbox", "unreachable", "the inbox could not be reached: %s. What came over a transport is read all the same; nothing on the service was." % error)
+                    self._note_trouble("inbox", "unreachable", "the inbox could not be reached: %s. What came over a transport is read all the same; nothing on the service was." % str(error).rstrip("."))
             else:
                 self.ensure_inbox()
                 self.publish_presence()
