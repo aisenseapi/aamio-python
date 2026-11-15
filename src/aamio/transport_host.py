@@ -12,10 +12,20 @@ cross each other still leave one answer to "how much room is there" (B3.1).
 The first answer for a frame decides its status, also after its deadline
 (B3.2). A transport is hung when three frames in a row reach their deadline
 without an answer, or when frames have waited 60 seconds for room that no
-`ready` gave; what else it says does not count as progress.
+`ready` gave; what else it says does not count as progress. A transport that
+says `down` gets no frames until it says `up` and a new `ready` gives room,
+and one that has said `down` for 60 seconds is stopped to be started again.
+
+Lines go to the transport through one writer thread, a whole line at a time,
+so a transport that stops reading never holds up the owner, its deadlines or
+its stop, and a cancel or a stop never lands inside another line. A frame's
+deadline runs from when it is given. A send line that was never written when
+its deadline came is withdrawn and not sent, and the room it held comes back;
+one that was written, or written in part, is unknown.
 """
 
 import base64
+import collections
 import hashlib
 import json
 import os
@@ -33,10 +43,20 @@ STOP_SECONDS = 5
 HANG_TIMEOUTS = 3
 HANG_ROOM_SECONDS = 60
 FRAME_GROUPS, FRAME_BYTES, FRAME_SECONDS = 32, 256 * 1024, 120
+WRITE_QUEUE = 1024
 
 DIRECTIONS = ("duplex", "half", "send_only", "receive_only")
 ADDRESSING = ("none", "device", "routed")
 VISIBLE_TO = ("range", "local", "operator")
+
+
+class _Line:
+    """One JSON line on its way to the transport: queued, writing, written, or withdrawn before it was written."""
+
+    __slots__ = ("data", "state")
+
+    def __init__(self, data):
+        self.data, self.state = data, "queued"
 
 
 class TransportFailed(Exception):
@@ -100,7 +120,13 @@ class TransportProcess:
         self.counter = 0
         self.timeouts_in_a_row = 0
         self.waiting_for_room_since = None
+        self.down_since = None    # when the transport said down, while it has not said up again
+        self.after_down = False   # down was said: no room until a ready that comes after up
         self.failed = None        # a TransportFailed once the process may not be used
+        self.lines_out = collections.deque()
+        self.out_cv = threading.Condition()
+        self.closing = False
+        self.write_failed = False
 
     # ---------------------------------------------------------- the process
 
@@ -109,6 +135,7 @@ class TransportProcess:
                                         cwd=self.cwd, env=self.env, bufsize=0)
         threading.Thread(target=self._read_lines, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
+        threading.Thread(target=self._write_lines, daemon=True).start()
         self._write({"t": "hello", "aamio_addon": 3, "aamio": {"version": aamio_version, "runtime": runtime}, "state_dir": state_dir})
         until = self.clock() + DESCRIBE_SECONDS
         while self.properties is None:
@@ -154,13 +181,44 @@ class TransportProcess:
             self.log("transport %s: %s" % (self.name, line.decode("utf-8", "replace").rstrip()))
 
     def _write(self, message):
+        """A line for the writer thread: it never waits for the transport to read."""
         if self.failed is not None:
             raise self.failed
-        try:
-            self.process.stdin.write((json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8"))
-            self.process.stdin.flush()
-        except (OSError, ValueError):
+        if self.write_failed:
             self._fail(TransportFailed("transport_down", "the process does not take what is written to it"))
+        line = _Line((json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8"))
+        with self.out_cv:
+            if len(self.lines_out) >= WRITE_QUEUE:
+                full = True
+            else:
+                full = False
+                self.lines_out.append(line)
+                self.out_cv.notify()
+        if full:
+            self._fail(TransportFailed("transport_hung", "the transport has not read the last %d lines it was given" % WRITE_QUEUE))
+        return line
+
+    def _write_lines(self):
+        """The one place that writes to the transport, a whole line at a time."""
+        stream = self.process.stdin
+        while True:
+            with self.out_cv:
+                while not self.lines_out and not self.closing:
+                    self.out_cv.wait()
+                if not self.lines_out:
+                    return
+                line = self.lines_out.popleft()
+                if line.state == "withdrawn":
+                    continue
+                line.state = "writing"
+            try:
+                stream.write(line.data)
+                stream.flush()
+            except (OSError, ValueError):
+                self.write_failed = True
+                return
+            with self.out_cv:
+                line.state = "written"
 
     def _fail(self, failure):
         if self.failed is None:
@@ -171,17 +229,24 @@ class TransportProcess:
     def stop(self):
         """B2: stop, five seconds to go, then killed.
 
-        The stop line is written also after a failure, as far as the pipe takes
-        it, so a transport that still listens can go at once.
+        The five seconds hold whatever the writing does: lines not yet written
+        are withdrawn rather than waited for, the stop line goes next, also
+        after a failure, so a transport that still listens can go at once, and
+        the writer thread is never waited on.
         """
         if self.process is None:
             return
-        if self.process.poll() is None:
-            try:
-                self.process.stdin.write(b'{"t":"stop"}\n')
-                self.process.stdin.flush()
-            except (OSError, ValueError):
-                pass
+        with self.out_cv:
+            for line in self.lines_out:
+                if line.state == "queued":
+                    line.state = "withdrawn"
+            for entry in self.frames.values():
+                if entry["status"] == "waiting" and entry.get("line") is not None and entry["line"].state == "withdrawn":
+                    entry["status"], entry["reason"] = "not_sent", "stopped before it was written"
+            if self.process.poll() is None and not self.write_failed:
+                self.lines_out.append(_Line(b'{"t":"stop"}\n'))
+            self.closing = True
+            self.out_cv.notify()
         try:
             self.process.wait(timeout=STOP_SECONDS)
         except subprocess.TimeoutExpired:
@@ -196,7 +261,16 @@ class TransportProcess:
     # ---------------------------------------------------------- room and frames
 
     def room(self):
-        return self.credit - (self.written - self.sends_read)
+        free = self.credit - (self.written - self.sends_read)
+        # After a down, the room it had is not trusted: only a ready that comes after up gives room again.
+        return min(free, 0) if self.after_down else free
+
+    def waiting_for_room(self, waiting):
+        """The owner has frames that wait for room, or has none: B3.2 counts the sixty seconds from the first moment."""
+        if not waiting:
+            self.waiting_for_room_since = None
+        elif self.room() <= 0 and self.waiting_for_room_since is None:
+            self.waiting_for_room_since = self.clock()
 
     def send(self, frame, to=None, deadline_ms=30_000):
         """Give the transport a frame if there is room: its id, or None when there is no room now."""
@@ -206,9 +280,10 @@ class TransportProcess:
             return None
         self.counter += 1
         frame_id = "f-%d" % self.counter
-        self._write({"t": "send", "id": frame_id, "to": to, "frame": b64url(frame), "deadline_ms": deadline_ms})
+        # The frame and its deadline are known before the line goes, so the deadline holds whatever the writing does.
+        entry = self.frames[frame_id] = {"status": "waiting", "deadline": self.clock() + deadline_ms / 1000.0, "late": False, "line": None}
         self.written += 1
-        self.frames[frame_id] = {"status": "waiting", "deadline": self.clock() + deadline_ms / 1000.0, "late": False}
+        entry["line"] = self._write({"t": "send", "id": frame_id, "to": to, "frame": b64url(frame), "deadline_ms": deadline_ms})
         return frame_id
 
     def status(self, frame_id):
@@ -246,8 +321,17 @@ class TransportProcess:
         now = self.clock()
         for frame_id, entry in self.frames.items():
             if entry["status"] == "waiting" and now > entry["deadline"]:
-                entry["status"] = "unknown"
                 self.timeouts_in_a_row += 1
+                with self.out_cv:
+                    never = entry["line"] is not None and entry["line"].state == "queued"
+                    if never:
+                        entry["line"].state = "withdrawn"
+                if never:
+                    # It never reached the transport: not sent, and the room it held comes back (B3.1).
+                    entry["status"], entry["reason"] = "not_sent", "never written before its deadline"
+                    self.written -= 1
+                    continue
+                entry["status"] = "unknown"
                 try:
                     self._write({"t": "cancel", "id": frame_id})
                 except TransportFailed:
@@ -256,6 +340,9 @@ class TransportProcess:
             self._fail(TransportFailed("transport_hung", "%d frames in a row reached their deadline without an answer" % self.timeouts_in_a_row))
         if self.waiting_for_room_since is not None and now - self.waiting_for_room_since >= HANG_ROOM_SECONDS:
             self._fail(TransportFailed("transport_hung", "frames waited %d seconds for room no ready gave" % HANG_ROOM_SECONDS))
+        if self.down_since is not None and now - self.down_since >= HANG_ROOM_SECONDS:
+            # Also with nothing to send: a transport that cannot hear is started again (B2), not waited on for good.
+            self._fail(TransportFailed("transport_down", "the transport has said down for %d seconds" % HANG_ROOM_SECONDS))
 
     def poll(self, timeout=0.0):
         """What the transport said since last time: a list of ('received', from, frame), ('answer', id) and ('status', state, reason)."""
@@ -298,6 +385,8 @@ class TransportProcess:
                 self._fail(TransportFailed("transport_protocol", "ready with credit and sends_read that do not add up"))
             before = self.room()
             self.credit, self.sends_read = credit, sends_read
+            if self.down_since is None:
+                self.after_down = False
             if self.room() > max(before, 0):
                 self.waiting_for_room_since = None
             return []
@@ -317,7 +406,15 @@ class TransportProcess:
                 self._fail(TransportFailed("transport_protocol", "from is a string of at most 128 characters, or null"))
             return [("received", source, frame)]
         if kind == "status":
-            return [("status", message.get("state"), message.get("reason"))]
+            state = message.get("state")
+            if state == "down":
+                # Room is gone until up and a new ready; the sixty seconds run also with nothing to send.
+                self.after_down = True
+                if self.down_since is None:
+                    self.down_since = self.clock()
+            elif state == "up":
+                self.down_since = None
+            return [("status", state, message.get("reason"))]
         self._fail(TransportFailed("transport_protocol", "an unknown line %r" % kind))
 
 
@@ -326,34 +423,52 @@ class Reassembly:
 
     def __init__(self, clock=time.monotonic):
         self.clock = clock
-        self.groups = {}   # tag -> {"first", "frames": [bytes], "bytes"}
+        self.groups = {}   # tag -> {"first", "frames": {index: bytes}, "bytes"}
+        self.dropped = 0   # groups and frames let go to stay within A10, counted
 
     def add(self, frame):
-        """An envelope when a group is complete, None while it is not; CarryRefused for a frame or a group that cannot be."""
+        """An envelope when a group is complete, None while it is not; CarryRefused for a frame or a group that cannot be.
+
+        A copy of a frame already held is not held again, and room is made before a frame is held,
+        so what is held never passes FRAME_BYTES, whatever comes before anything is verified.
+        """
         now = self.clock()
         for tag in [tag for tag, group in self.groups.items() if now - group["first"] > FRAME_SECONDS]:
             del self.groups[tag]
         if len(frame) < carry.FRAME_HEADER + 1:
             raise carry.CarryRefused("frame_bad_length")
-        tag = frame[3:7]
+        tag, index = frame[3:7], frame[7]
         group = self.groups.get(tag)
+        if group is not None and index in group["frames"]:
+            if group["frames"][index] == frame:
+                return None
+            del self.groups[tag]
+            raise carry.CarryRefused("frame_conflict")
+        if len(frame) > FRAME_BYTES:
+            self.dropped += 1
+            return None
+        while self.groups and (sum(g["bytes"] for g in self.groups.values()) + len(frame) > FRAME_BYTES
+                               or (group is None and len(self.groups) >= FRAME_GROUPS)):
+            oldest = min(self.groups, key=lambda key: self.groups[key]["first"])
+            del self.groups[oldest]
+            self.dropped += 1
+            if oldest == tag:
+                group = None
         if group is None:
-            while self.groups and (len(self.groups) >= FRAME_GROUPS or sum(g["bytes"] for g in self.groups.values()) + len(frame) > FRAME_BYTES):
-                del self.groups[min(self.groups, key=lambda key: self.groups[key]["first"])]
-            group = self.groups[tag] = {"first": now, "frames": [], "bytes": 0}
-        group["frames"].append(frame)
+            group = self.groups[tag] = {"first": now, "frames": {}, "bytes": 0}
+        group["frames"][index] = frame
         group["bytes"] += len(frame)
-        count = frame[8]
-        if len({f[7] for f in group["frames"]}) < count:
+        frames = list(group["frames"].values())
+        if len(frames) < frame[8]:
             try:
-                carry.reassemble(group["frames"])
+                carry.reassemble(frames)
             except carry.CarryRefused as refused:
                 if refused.code != "frame_incomplete":
                     del self.groups[tag]
                     raise
             return None
         del self.groups[tag]
-        return carry.reassemble(group["frames"])
+        return carry.reassemble(frames)
 
 
 def sha256hex(data):

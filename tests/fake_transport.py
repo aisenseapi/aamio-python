@@ -6,6 +6,7 @@ no_room       never gives room, and talks about its status all the while
 late          answers a frame only when it is cancelled, and then says it was sent
 bad_describe  describes itself under another name
 long_line     writes a line longer than the contract allows
+deaf          reads nothing for three seconds after its first ready, then answers every send
 """
 
 import json
@@ -37,8 +38,13 @@ def main():
             say({"t": "describe", "name": "other" if MODE == "bad_describe" else "fake", "version": "0.1.0", "aamio_addon": 3,
                  "medium": "test", "properties": PROPERTIES})
             say({"t": "ready", "credit": 0 if MODE == "no_room" else 4, "sends_read": 0})
+            if MODE == "deaf":
+                time.sleep(3)
         elif kind == "send":
             sends_read += 1
+            if MODE == "deaf":
+                say({"t": "sent", "id": message["id"]})
+                say({"t": "ready", "credit": 4, "sends_read": sends_read})
             if MODE == "loopback":
                 say({"t": "sent", "id": message["id"]})
                 say({"t": "received", "from": "self", "frame": message["frame"]})
