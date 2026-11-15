@@ -169,14 +169,19 @@ class TransportProcess:
         raise failure
 
     def stop(self):
-        """B2: stop, five seconds to go, then killed."""
+        """B2: stop, five seconds to go, then killed.
+
+        The stop line is written also after a failure, as far as the pipe takes
+        it, so a transport that still listens can go at once.
+        """
         if self.process is None:
             return
-        try:
-            if self.process.poll() is None and self.failed is None:
-                self._write({"t": "stop"})
-        except TransportFailed:
-            pass
+        if self.process.poll() is None:
+            try:
+                self.process.stdin.write(b'{"t":"stop"}\n')
+                self.process.stdin.flush()
+            except (OSError, ValueError):
+                pass
         try:
             self.process.wait(timeout=STOP_SECONDS)
         except subprocess.TimeoutExpired:
