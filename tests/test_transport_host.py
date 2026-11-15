@@ -5,7 +5,8 @@ a ready gave and come back whole; a transport that never answers, or never
 gives room while it talks about its status, is hung; a late answer decides
 status after the deadline; a describe under another name and a line that is too
 long stop the transport. Room and answers are also checked on lines put in
-directly, where the order they cross each other in has to be exact.
+directly, where the order they cross each other in has to be exact. A message
+whose tries run out without a receipt is unknown to the Carrier, never confirmed.
 """
 
 import pathlib
@@ -14,7 +15,9 @@ import time
 
 import pytest
 
-from aamio import carry, transport_host
+from aamio import carry, carry_state, transport_host
+from aamio.carrier import Carrier
+from aamio.carry_state import CarryState
 from aamio.crypto import Keys
 from aamio.transport_host import Reassembly, TransportFailed, TransportProcess
 
@@ -196,3 +199,28 @@ def test_reassembly_keeps_within_its_limits():
 def test_the_environment_never_says_where_the_home_is():
     env = transport_host.environment(["AAMIO_HOME", "SIM_PORT"], base={"PATH": "/bin", "AAMIO_HOME": "/home/x/.aamio", "SIM_PORT": "4000", "TOKEN": "t"})
     assert env == {"PATH": "/bin", "SIM_PORT": "4000", "AAMIO_ADDON": "3"}
+
+
+def test_a_message_whose_tries_run_out_without_a_receipt_is_unknown_never_confirmed(tmp_path):
+    clock, now = Clock(), 1_794_700_000
+    profile = carry_state.profile(mode="sealed")
+    at_a, at_b = CarryState(A), CarryState(B)
+    session, ask = at_a.ask(B.public_raw, profile, clock())
+    _, challenge, _ = at_b.deliver(ask, [A.public_raw], profile, clock(), now)
+    _, opened, _ = at_a.deliver(challenge, [B.public_raw], profile, clock(), now)
+    assert at_b.deliver(opened, [A.public_raw], profile, clock(), now)[0] == "accepted"
+    # The loopback gives every frame back to A, which it is not sealed to: no receipt can come.
+    process = start("loopback", tmp_path, clock)
+    try:
+        carrier = Carrier(at_a, process, profile, [B.public_raw], clock=clock, wall=lambda: now, retry_seconds=1.0, tries=3)
+        key = carrier.send(B.public_raw, session, b"hei")
+        assert carrier.outcome(key) == "waiting" and not carrier.confirmed(key)
+        until = time.monotonic() + 20
+        while carrier.outcome(key) == "waiting":
+            assert time.monotonic() < until, "the tries never ran out"
+            clock.now += 0.5
+            carrier.pump(timeout=0.05)
+        assert carrier.outcome(key) == "unknown" and not carrier.confirmed(key)
+        assert carrier.refused and carrier.inbox == [], "its own frames came back and were refused"
+    finally:
+        process.stop()

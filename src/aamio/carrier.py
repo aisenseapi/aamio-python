@@ -8,9 +8,11 @@ into the frames the medium takes and given to the transport within its room.
 
 A message is sent again with the same bytes until its receipt comes, as long
 as its session can still take it; it is never sealed again or moved to another
-session, so a copy is known as one (A4, A7). An ask that no challenge answers
-in time is asked again with a new session, since the old one may be in use at
-the other end. Nothing here decides whether a message is taken: that is the
+session, so a copy is known as one (A4, A7). It is confirmed only when its
+receipt comes: when the tries run out without one, its outcome is unknown, since
+it may still have arrived, and it is never reported as confirmed. An ask that no
+challenge answers in time is asked again with a new session, since the old one
+may be in use at the other end. Nothing here decides whether a message is taken: that is the
 state's, and the transport's word ends at "handed over".
 """
 
@@ -21,6 +23,7 @@ from .carry import CarryRefused
 from .transport_host import Reassembly
 
 UNVERIFIED_PER_SECOND = 20
+OUTCOMES_KEPT = 10_000
 
 
 class Carrier:
@@ -35,10 +38,11 @@ class Carrier:
         self.queue = []          # (frames, to), in order
         self.waiting = {}        # envelope id -> {"envelope", "to", "next", "tries", "kind", "pair"}
         self.asks = {}           # (partner pk, session) -> {"next", "tries"}
-        self.answered = set()    # (partner pk, session) this party may send in
+        self.answered = {}       # (partner pk, session) this party may send in -> None, in the order challenges came
         self.addresses = {}      # partner pk -> the transport address it was last heard from
         self.inbox = []          # (sender pk, session, counter, content), as taken
         self.refused = []        # codes, for a test or a log to read
+        self.outcomes = {}       # envelope id -> "confirmed" or "unknown", the newest OUTCOMES_KEPT
         self.budget, self.budget_at = UNVERIFIED_PER_SECOND, clock()
         self.counter = 0
 
@@ -65,6 +69,14 @@ class Carrier:
     def is_open(self, partner_pk, session):
         return (partner_pk, session) in self.answered
 
+    def open_session(self, partner_pk):
+        """The newest session of this party's with the partner that a challenge has answered, or None."""
+        found = None
+        for pk, session in self.answered:
+            if pk == partner_pk:
+                found = session
+        return found
+
     def send(self, partner_pk, session, content, deadline=0):
         """A message in an open session, sent again with the same bytes until its receipt comes: its id."""
         envelope = self.state.send(partner_pk, session, content, self.profile, deadline=deadline)
@@ -72,7 +84,21 @@ class Carrier:
                            counter=self.state.counter_of(partner_pk, session))
 
     def confirmed(self, key):
-        return key not in self.waiting
+        """True only when the receipt came; never for a message whose tries ran out without one."""
+        return self.outcomes.get(key) == "confirmed"
+
+    def outcome(self, key):
+        """waiting while it is sent again, confirmed when its receipt came, and unknown when the tries
+        ran out without one (it may still have arrived) or the id is no longer remembered."""
+        if key in self.waiting:
+            return "waiting"
+        return self.outcomes.get(key, "unknown")
+
+    def _finish(self, key, outcome):
+        del self.waiting[key]
+        self.outcomes[key] = outcome
+        while len(self.outcomes) > OUTCOMES_KEPT:
+            del self.outcomes[next(iter(self.outcomes))]
 
     # ---------------------------------------------------------- in and out
 
@@ -113,7 +139,7 @@ class Carrier:
         pair = (got.sender, got.session)
         if got.kind == carry.CHALLENGE:
             self.asks.pop(pair, None)
-            self.answered.add(pair)
+            self.answered.setdefault(pair, None)
             # The open is sent again with the same bytes through the challenge window, until the
             # first receipt in the session shows it came: on a medium that loses frames, one try is not enough.
             self._await(reply, source, "open", pair, tries=self._window_tries())
@@ -125,7 +151,7 @@ class Carrier:
             counter = int.from_bytes(got.content[9:13], "big")
             for key, entry in list(self.waiting.items()):
                 if entry["pair"] == pair and (entry["kind"] == "open" or entry["counter"] == counter):
-                    del self.waiting[key]
+                    self._finish(key, "confirmed")
             return
         if got.kind == carry.ASK:
             # The challenge too is sent again with the same bytes until its open comes, or the window is gone.
@@ -142,7 +168,7 @@ class Carrier:
     def _settled(self, pair, kind):
         for key, entry in list(self.waiting.items()):
             if entry["pair"] == pair and entry["kind"] == kind:
-                del self.waiting[key]
+                self._finish(key, "confirmed")
 
     def _resend(self):
         now = self.clock()
@@ -152,7 +178,7 @@ class Carrier:
             if entry["tries"] >= entry["most"]:
                 # The outcome stays unknown; nothing is wrapped again or sent as a new message on its own.
                 self.log("no receipt for %s after %d tries" % (key, entry["tries"]))
-                del self.waiting[key]
+                self._finish(key, "unknown")
                 continue
             entry["tries"] += 1
             entry["next"] = now + self.retry_seconds
