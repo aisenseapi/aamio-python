@@ -140,6 +140,10 @@ def write(keys, recipient_pk, mode, kind, flags, session, counter, deadline, con
     _check_writable(kind, flags, content, binding)
     if len(session) != 8:
         raise ValueError("a session is 8 bytes")
+    for name, value in (("counter", counter), ("deadline", deadline)):
+        # A number outside its four bytes is refused, never cut down to one that fits and means something else.
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 0xFFFFFFFF:
+            raise ValueError("%s is a whole number from 0 to 2^32 - 1, not %r" % (name, value))
     fields = (session + counter.to_bytes(4, "big") + deadline.to_bytes(4, "big")
               + len(content).to_bytes(2, "big") + content)
     sender_hint, recipient_hint = hint(keys.public_raw), hint(recipient_pk)

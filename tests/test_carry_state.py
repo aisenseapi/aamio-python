@@ -80,6 +80,10 @@ def test_a_state_that_cannot_be_read_stops_everything_rather_than_start_from_not
 
 
 EMPTY = {"version": 1, "floor": None, "challenges": 0, "incoming": {}, "used": [], "stored": {}, "outgoing": {}, "outbox": {}}
+PAIR = "aa" * 32 + ":" + "bb" * 8
+SESSION = {"challenged": False, "nonce": None, "highest": 1, "closed": False, "deadline": 1_794_700_300, "opened": None,
+           "closed_at": None, "lifetime": None}
+SENT = {"sha256": "cc" * 32, "envelope": "00", "receipt": False, "tries": 1, "most": 30}
 # What is changed, and what is left out.
 OTHER_SHAPES = {
     "an empty map written as a list": ({"incoming": []}, ()),
@@ -93,7 +97,31 @@ OTHER_SHAPES = {
     "a count that is true": ({"challenges": True}, ()),
     "no outbox": ({}, ("outbox",)),
     "no floor": ({}, ("floor",)),
+    "a field more at the top": ({"extra": 1}, ()),
+    "a session with only closed": ({"used": [PAIR], "incoming": {PAIR: {"closed": False}}}, ()),
+    "a session with a field more": ({"used": [PAIR], "incoming": {PAIR: dict(SESSION, extra=1)}}, ()),
+    "a session whose id is not among the used": ({"incoming": {PAIR: SESSION}}, ()),
+    "a session with a counter past four bytes": ({"used": [PAIR], "incoming": {PAIR: dict(SESSION, highest=2 ** 32)}}, ()),
+    "a closed session without when": ({"used": [PAIR], "incoming": {PAIR: dict(SESSION, closed=True)}}, ()),
+    "a session key that is not hex": ({"used": ["zz" + PAIR[2:]], "incoming": {"zz" + PAIR[2:]: SESSION}}, ()),
+    "a mark of no session kept": ({"stored": {PAIR + ":1": {"sha256": "cc" * 32, "content": None}}}, ()),
+    "content that is not hex": ({"used": [PAIR], "incoming": {PAIR: SESSION}, "stored": {PAIR + ":1": {"sha256": "cc" * 32, "content": "zz"}}}, ()),
+    "a hash of the wrong length": ({"used": [PAIR], "incoming": {PAIR: SESSION}, "stored": {PAIR + ":1": {"sha256": "cc", "content": None}}}, ()),
+    "a receipt with its bytes still kept": ({"outbox": {PAIR + ":1": dict(SENT, receipt=True)}}, ()),
+    "more tries than the budget": ({"outbox": {PAIR + ":1": dict(SENT, tries=31)}}, ()),
+    "a count of challenges past 2^53 - 1": ({"challenges": 2 ** 53}, ()),
+    "an id used twice": ({"used": [PAIR, PAIR]}, ()),
 }
+
+
+def test_a_state_of_the_shape_every_runtime_writes_is_read(tmp_path):
+    path = tmp_path / "carry.json"
+    whole = dict(EMPTY, used=[PAIR], incoming={PAIR: SESSION}, stored={PAIR + ":1": {"sha256": "cc" * 32, "content": "6869"}},
+                 outbox={PAIR + ":1": SENT})
+    path.write_text(json.dumps(whole), encoding="utf-8")
+    state = carry_state.CarryState(Keys(bytes(range(32))), str(path))
+    assert state.pending() == [(PAIR + ":1", bytes.fromhex("aa" * 32), bytes.fromhex("bb" * 8), 1, b"hi")]
+    assert state.outcome(PAIR + ":1") == "waiting"
 
 
 @pytest.mark.parametrize("change, missing", OTHER_SHAPES.values(), ids=OTHER_SHAPES.keys())
@@ -135,3 +163,220 @@ def test_two_parties_over_a_store_that_is_full_refuse_without_deleting(tmp_path,
         receiver.deliver(second, [a.public_raw], one_way, 1, 1_794_700_001)
     assert refused.value.code == "carry_storage_full"
     assert receiver.deliver(first, [a.public_raw], one_way, 2, 1_794_700_002)[0] == "duplicate"
+
+
+# ------------------------------------------------------------------ the review of 2026-11-15, findings 1 to 13
+
+A, B = Keys(bytes(range(32))), Keys(bytes(range(32, 64)))
+T = 1_794_700_000
+ONE_WAY = carry_state.profile(challenge=False, accept_unchallenged=True, mode="readable")
+CHALLENGED = carry_state.profile(mode="readable")
+
+
+def opened(at_a, at_b, profile=CHALLENGED, mono=0.0, now=T):
+    """A asks B for a session, B challenges, A opens: A's session towards B, open at both ends."""
+    session, ask = at_a.ask(B.public_raw, profile, mono)
+    _, challenge, _ = at_b.deliver(ask, [A.public_raw], profile, mono, now)
+    _, opening, _ = at_a.deliver(challenge, [B.public_raw], profile, mono, now)
+    assert at_b.deliver(opening, [A.public_raw], profile, mono, now)[0] == "accepted"
+    return session
+
+
+def refused_with(code, call, *args):
+    with pytest.raises(CarryRefused) as refused:
+        call(*args)
+    assert refused.value.code == code
+    return refused.value
+
+
+def test_a_message_is_kept_with_its_content_until_the_program_says_it_has_it(tmp_path):
+    """Finding 1: the receipt says kept, so the content is kept; a crash before the program has it offers it again."""
+    path = str(tmp_path / "b.json")
+    sender = carry_state.CarryState(A)
+    session = sender.one_way(B.public_raw, T + 300)
+    envelope = sender.send(B.public_raw, session, b"hei", ONE_WAY)
+    result, receipt, _ = carry_state.CarryState(B, path).deliver(envelope, [A.public_raw], ONE_WAY, 0, T)
+    assert result == "accepted" and receipt is not None
+    key = carry_state.mark(A.public_raw, session, 1)
+    again = carry_state.CarryState(B, path)
+    assert again.pending() == [(key, A.public_raw, session, 1, b"hei")]
+    assert again.pending() == [(key, A.public_raw, session, 1, b"hei")], "reading is not taking"
+    again.handed_over(key)
+    after = carry_state.CarryState(B, path)
+    assert after.pending() == []
+    result, receipt, _ = after.deliver(envelope, [A.public_raw], ONE_WAY, 0, T)
+    assert (result, receipt is not None, after.pending()) == ("duplicate", True, []), "the mark stays: a copy gets its receipt, and is not offered again"
+
+
+def test_a_message_sent_keeps_its_bytes_and_tries_until_its_receipt_and_a_late_receipt_still_counts(tmp_path):
+    """Finding 1, the sender: the same bytes and the tries left after a restart; used up is unknown, a late receipt confirms."""
+    path = str(tmp_path / "a.json")
+    at_a, receiver = carry_state.CarryState(A, path), carry_state.CarryState(B)
+    session = at_a.one_way(B.public_raw, T + 300)
+    envelope = at_a.send(B.public_raw, session, b"hei", ONE_WAY, most=3)
+    key = carry_state.mark(B.public_raw, session, 1)
+    again = carry_state.CarryState(A, path)
+    assert (again.outcome(key), again.unconfirmed()) == ("waiting", [(key, B.public_raw, session, 1, envelope)])
+    assert again.tried(key) and again.tried(key)
+    assert carry_state.CarryState(A, path).durable["outbox"][key]["tries"] == 3, "a restart gives back no tries"
+    assert not again.tried(key)
+    assert (again.outcome(key), again.unconfirmed(), again.durable["outbox"][key]["envelope"]) == ("unknown", [], None)
+    _, receipt, _ = receiver.deliver(envelope, [A.public_raw], ONE_WAY, 0, T)
+    assert again.deliver(receipt, [B.public_raw], ONE_WAY, 0, T)[0] == "accepted"
+    assert carry_state.CarryState(A, path).outcome(key) == "confirmed"
+
+
+def test_after_a_write_fails_nothing_is_answered_until_the_state_is_read_again(tmp_path):
+    """Finding 2: a failed write never turns into a duplicate with a receipt for what was never kept."""
+    receiver = carry_state.CarryState(B, str(tmp_path / "in-the-way" / "carry.json"))
+    (tmp_path / "in-the-way").write_text("not a folder", encoding="utf-8")
+    envelope = carry.write(A, B.public_raw, carry.READABLE, carry.MESSAGE, 0, bytes(8), 1, T + 300, b"hei")
+    for _ in range(2):
+        refused_with("carry_storage_failed", receiver.deliver, envelope, [A.public_raw], ONE_WAY, 0, T)
+    refused_with("carry_storage_failed", receiver.prune, T)
+
+
+def test_the_time_floor_is_kept_also_when_what_came_is_refused(tmp_path):
+    """Finding 3: a higher floor is kept before the answer, so a passed deadline never comes back after a restart."""
+    path = str(tmp_path / "b.json")
+    at_b = carry_state.CarryState(B, path)
+    at_b.prune(T)
+    sender = carry_state.CarryState(A)
+    session = sender.one_way(B.public_raw, T + 300)
+    envelope = sender.send(B.public_raw, session, b"sent", ONE_WAY)
+    refused_with("carry_deadline_passed", at_b.deliver, envelope, [A.public_raw], ONE_WAY, 0, T + 421)
+    again = carry_state.CarryState(B, path)
+    assert again.durable["floor"] == T + 421
+    refused_with("carry_deadline_passed", again.deliver, envelope, [A.public_raw], ONE_WAY, 0, T)
+    # A clock that jumps ahead within one second of the monotonic clock: kept at once, even for bytes that are no envelope.
+    refused_with("carry_bad_magic", again.deliver, b"XXXX" + bytes(200), [A.public_raw], ONE_WAY, 0, T + 900)
+    assert carry_state.CarryState(B, path).durable["floor"] == T + 900
+
+
+def test_sixty_messages_a_minute_from_one_partner_copies_too(tmp_path):
+    """Finding 7: A10 has no exception for copies, since each is answered with a receipt."""
+    at_b, sender = carry_state.CarryState(B), carry_state.CarryState(A)
+    session = sender.one_way(B.public_raw, T + 3000)
+    first = sender.send(B.public_raw, session, b"0", ONE_WAY)
+    assert at_b.deliver(first, [A.public_raw], ONE_WAY, 0.0, T)[0] == "accepted"
+    for _ in range(59):
+        assert at_b.deliver(first, [A.public_raw], ONE_WAY, 0.5, T)[0] == "duplicate"
+    refused_with("carry_rate_limited", at_b.deliver, first, [A.public_raw], ONE_WAY, 0.5, T)
+    second = sender.send(B.public_raw, session, b"1", ONE_WAY)
+    refused_with("carry_rate_limited", at_b.deliver, second, [A.public_raw], ONE_WAY, 59.9, T)
+    assert at_b.deliver(second, [A.public_raw], ONE_WAY, 60.0, T)[0] == "accepted", "the first went out of the minute"
+
+
+def test_256_kib_a_minute_from_one_partner(tmp_path):
+    at_b, sender = carry_state.CarryState(B), carry_state.CarryState(A)
+    session = sender.one_way(B.public_raw, T + 3000)
+    envelopes = [sender.send(B.public_raw, session, bytes([n]) * 60_000, ONE_WAY) for n in range(5)]
+    for envelope in envelopes[:4]:
+        assert at_b.deliver(envelope, [A.public_raw], ONE_WAY, 1.0, T)[0] == "accepted"
+    assert sum(len(envelope) for envelope in envelopes[:5]) > carry_state.BYTES_PER_MINUTE >= sum(len(envelope) for envelope in envelopes[:4])
+    refused_with("carry_rate_limited", at_b.deliver, envelopes[4], [A.public_raw], ONE_WAY, 2.0, T)
+
+
+def test_ten_asks_a_minute_from_one_partner(tmp_path):
+    at_a, at_b = carry_state.CarryState(A), carry_state.CarryState(B)
+    for n in range(10):
+        opened(at_a, at_b, mono=float(n))
+    _, ask = at_a.ask(B.public_raw, CHALLENGED, 10.0)
+    refused_with("carry_rate_limited", at_b.deliver, ask, [A.public_raw], CHALLENGED, 10.0, T)
+    _, ask = at_a.ask(B.public_raw, CHALLENGED, 61.0)
+    assert at_b.deliver(ask, [A.public_raw], CHALLENGED, 61.0, T)[0] == "accepted"
+
+
+def test_challenges_used_or_past_their_window_do_not_fill_the_limit(tmp_path):
+    """Finding 8: only challenges that wait, inside their window, count against 8 per partner and 64 in all."""
+    at_a, at_b = carry_state.CarryState(A), carry_state.CarryState(B)
+    for n in range(9):
+        _, ask = at_a.ask(B.public_raw, CHALLENGED, 100.0 * n)
+        assert at_b.deliver(ask, [A.public_raw], CHALLENGED, 100.0 * n, T)[0] == "accepted"
+    for n in range(8):
+        _, ask = at_a.ask(B.public_raw, CHALLENGED, 1000.0)
+        at_b.deliver(ask, [A.public_raw], CHALLENGED, 1000.0, T)
+    _, ask = at_a.ask(B.public_raw, CHALLENGED, 1000.0)
+    refused_with("carry_rate_limited", at_b.deliver, ask, [A.public_raw], CHALLENGED, 1000.0, T)
+
+
+def test_a_spent_challenge_has_its_own_code_while_it_is_remembered_and_is_unknown_after(tmp_path):
+    """Finding 8: 64 spent challenges are remembered per partner; an open for one forgotten is nonce_unknown, refused either way."""
+    at_a, at_b = carry_state.CarryState(A), carry_state.CarryState(B)
+    session, ask = at_a.ask(B.public_raw, CHALLENGED, 0.0)
+    _, challenge, _ = at_b.deliver(ask, [A.public_raw], CHALLENGED, 0.0, T)
+    _, opening, _ = at_a.deliver(challenge, [B.public_raw], CHALLENGED, 0.0, T)
+    refused_with("carry_nonce_expired", at_b.deliver, opening, [A.public_raw], CHALLENGED, 61.0, T)
+    for n in range(1, carry_state.SPENT_KEPT_PER_PARTNER + 1):
+        _, ask = at_a.ask(B.public_raw, CHALLENGED, 61.0 * n)
+        at_b.deliver(ask, [A.public_raw], CHALLENGED, 61.0 * n, T)
+    refused_with("carry_nonce_expired", at_b.deliver, opening, [A.public_raw], CHALLENGED, 61.0 * 65, T)
+    _, ask = at_a.ask(B.public_raw, CHALLENGED, 61.0 * 66)
+    at_b.deliver(ask, [A.public_raw], CHALLENGED, 61.0 * 66, T)
+    refused_with("carry_nonce_unknown", at_b.deliver, opening, [A.public_raw], CHALLENGED, 61.0 * 66, T)
+    assert carry_state._pair(A.public_raw, session) in at_b.used, "the session id stays used"
+
+
+def test_the_count_of_challenges_stops_at_two_to_the_fifty_three_less_one(tmp_path):
+    """Finding 10: the last value is reached, the next is refused, never rounded or wrapped."""
+    path = tmp_path / "b.json"
+    path.write_text(json.dumps(dict(EMPTY, challenges=carry_state.SAFE - 1)), encoding="utf-8")
+    at_a, at_b = carry_state.CarryState(A), carry_state.CarryState(B, str(path))
+    _, ask = at_a.ask(B.public_raw, CHALLENGED, 0.0)
+    assert at_b.deliver(ask, [A.public_raw], CHALLENGED, 0.0, T)[0] == "accepted"
+    assert json.loads(path.read_text(encoding="utf-8"))["challenges"] == carry_state.SAFE
+    _, ask = at_a.ask(B.public_raw, CHALLENGED, 1.0)
+    refused_with("carry_storage_full", at_b.deliver, ask, [A.public_raw], CHALLENGED, 1.0, T)
+    assert carry_state.CarryState(B, str(path)).durable["challenges"] == carry_state.SAFE
+
+
+@pytest.mark.parametrize("counter, deadline", [(2 ** 32, 0), (-1, 0), (1, 2 ** 32), (True, 0), (1, 1.5)])
+def test_numbers_outside_their_four_bytes_are_refused_not_cut_down(counter, deadline):
+    """Finding 11."""
+    with pytest.raises(ValueError):
+        carry.write(A, B.public_raw, carry.READABLE, carry.MESSAGE, 0, bytes(8), counter, deadline, b"x")
+
+
+def test_a_deadline_outside_its_four_bytes_changes_nothing_in_the_state():
+    at_a, at_b = carry_state.CarryState(A), carry_state.CarryState(B)
+    session = opened(at_a, at_b)
+    with pytest.raises(ValueError):
+        at_a.send(B.public_raw, session, b"x", CHALLENGED, deadline=2 ** 32)
+    assert (at_a.counter_of(B.public_raw, session), at_a.durable["outbox"]) == (0, {})
+
+
+def test_the_first_message_without_a_challenge_needs_room_for_its_three_records(tmp_path, monkeypatch):
+    """Finding 12: the session, its used id and the message's mark."""
+    sender = carry_state.CarryState(A)
+    session = sender.one_way(B.public_raw, T + 300)
+    envelope = sender.send(B.public_raw, session, b"hei", ONE_WAY)
+    monkeypatch.setattr(carry_state, "MAX_RECORDS", 2)
+    at_b = carry_state.CarryState(B, str(tmp_path / "b.json"))
+    refused_with("carry_storage_full", at_b.deliver, envelope, [A.public_raw], ONE_WAY, 0, T)
+    assert at_b.durable["incoming"] == {} and at_b.used == set()
+    monkeypatch.setattr(carry_state, "MAX_RECORDS", 3)
+    assert at_b.deliver(envelope, [A.public_raw], ONE_WAY, 0, T)[0] == "accepted"
+
+
+def test_a_session_keeps_the_lifetime_it_was_opened_with(tmp_path):
+    """Finding 13: a profile changed later can shorten the lifetime, never lengthen it."""
+    short, long_ = carry_state.profile(mode="readable", lifetime=600), carry_state.profile(mode="readable", lifetime=86_400)
+    at_a, at_b = carry_state.CarryState(A), carry_state.CarryState(B)
+    session = opened(at_a, at_b, short, mono=0.0)
+    envelope = at_a.send(B.public_raw, session, b"x", short)
+    refused_with("carry_session_expired", at_b.deliver, envelope, [A.public_raw], long_, 601.0, T)
+    session = opened(at_a, at_b, long_, mono=1000.0)
+    envelope = at_a.send(B.public_raw, session, b"y", long_)
+    refused_with("carry_session_expired", at_b.deliver, envelope, [A.public_raw], short, 1601.0, T)
+    assert at_b.deliver(envelope, [A.public_raw], long_, 1601.0, T)[0] == "accepted"
+
+
+def test_a_sealed_receipt_for_the_same_message_has_the_same_bytes_every_time():
+    """So on a medium that loses frames, the frames of several copies of the receipt add up; another message, another receipt."""
+    sealed = carry_state.profile(mode="sealed", challenge=False, accept_unchallenged=True)
+    sender, at_b = carry_state.CarryState(A), carry_state.CarryState(B)
+    session = sender.one_way(B.public_raw, T + 300)
+    first, second = (sender.send(B.public_raw, session, text, sealed) for text in (b"en", b"to"))
+    receipts = [at_b.deliver(first, [A.public_raw], sealed, 0.0, T)[1], at_b.deliver(first, [A.public_raw], sealed, 1.0, T)[1]]
+    assert receipts[0] == receipts[1]
+    assert at_b.deliver(second, [A.public_raw], sealed, 2.0, T)[1] != receipts[0]
