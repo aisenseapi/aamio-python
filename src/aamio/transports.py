@@ -44,6 +44,9 @@ WAIT_DEFAULT = 30
 # How often a running carrier's list of whom it takes messages from is read again: a partner removed meanwhile, over MCP
 # or by another runtime on the same home, is taken from no longer than this after.
 KNOWN_REFRESH = 2.0
+# How often a file under transports/ is tried again while another reader holds it, as the transports' own thread
+# does on Windows for a moment, and how long between: a replace that met a reader is not a file that cannot be written.
+HELD_TRIES, HELD_PAUSE = 20, 0.05
 # What a carried message is filed under when the partner it came from is no longer bound to a transport.
 UNBOUND_CHANNEL = "carry"
 _PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
@@ -146,13 +149,24 @@ class Config:
 
     def _read(self, name, field):
         path = os.path.join(self.dir, name)
-        try:
-            with open(path, "rb") as handle:
-                value = json.loads(handle.read().decode("utf-8"))
-        except FileNotFoundError:
-            return {}
-        except (OSError, ValueError):
-            value = None
+        value = None
+        for attempt in range(HELD_TRIES):
+            try:
+                with open(path, "rb") as handle:
+                    value = json.loads(handle.read().decode("utf-8"))
+                break
+            except FileNotFoundError:
+                return {}
+            except PermissionError:
+                # Windows: the file is being replaced this moment. Read as unreadable it stopped a send, and a running
+                # transport took messages from no one until the next look.
+                if attempt == HELD_TRIES - 1:
+                    value = None
+                    break
+                time.sleep(HELD_PAUSE)
+            except (OSError, ValueError):
+                value = None
+                break
         if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get(field), dict):
             raise CodedRuntimeError("transport_config_unreadable", "%s could not be read. Which partners go over a transport is not known while it cannot, so nothing is sent to a partner until it is repaired or moved away" % path)
         return value[field]
@@ -164,7 +178,15 @@ class Config:
             json.dump({"version": 1, field: value}, handle, ensure_ascii=False, separators=(",", ":"))
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(path + ".tmp", path)
+        for attempt in range(HELD_TRIES):
+            try:
+                os.replace(path + ".tmp", path)
+                break
+            except PermissionError:
+                # Windows: a reader holds the file for a moment, as the transports' own thread reading the bindings.
+                if attempt == HELD_TRIES - 1:
+                    raise CodedRuntimeError("not_saved", "%s could not be replaced: another reader holds it. Nothing changed; try again." % path) from None
+                time.sleep(HELD_PAUSE)
         storage.sync_dir(self.dir)
 
     def profiles(self):

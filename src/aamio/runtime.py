@@ -1859,8 +1859,11 @@ class Runtime:
         if service is not None:
             try:
                 service.config.unbind(known["key"])
-            except (LookupError, RuntimeError, OSError):
+            except LookupError:
                 pass
+            except (RuntimeError, OSError) as error:
+                # Said, not swallowed: what is left in bindings.json opens nothing, and it is not what the user asked for.
+                self._note_trouble("transports", "binding_left", "the binding of %s to a transport could not be removed: %s. Nothing is taken from the key, which has left the address book; aamio transport unbind %s takes the binding out." % (known["name"], error, known["key"]))
         return self._inbox_after_change("partner %s was removed" % known["name"], {"partner": known["name"], "known": True})
 
     def _save_partners(self, partners):

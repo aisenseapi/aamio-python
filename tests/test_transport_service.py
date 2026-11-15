@@ -256,6 +256,33 @@ def test_a_transport_that_keeps_crashing_is_started_again_and_then_left_down(lan
         a.close()
 
 
+def test_a_reader_of_the_bindings_never_makes_a_change_fail_or_the_file_look_unreadable(tmp_path):
+    """The transports' own thread reads bindings.json while the runtime changes it: on Windows a replace that meets a
+    reader failed, and a read that met a replace said the file could not be read (the full run of 15 November 2026)."""
+    config = transports.Config(str(tmp_path / "home"))
+    key = "A" * 43
+    config.bind(key, "lan", "sealed")
+    stop, seen = threading.Event(), []
+
+    def read_all_the_time():
+        while not stop.is_set():
+            try:
+                config.bindings()
+            except Exception as error:  # what the reader met, kept for the assertion
+                seen.append(error)
+
+    reader = threading.Thread(target=read_all_the_time, daemon=True)
+    reader.start()
+    try:
+        for _ in range(60):
+            config.unbind(key)
+            config.bind(key, "lan", "sealed")
+    finally:
+        stop.set()
+        reader.join(timeout=5)
+    assert seen == [] and config.routes(key) == [{"transport": "lan", "profile": "sealed"}], seen[:3]
+
+
 def test_profiles_are_checked_and_one_in_use_is_neither_changed_nor_removed(lan_env):
     a, b = homes(lan_env)
     b.close()
