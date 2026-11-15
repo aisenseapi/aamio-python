@@ -11,8 +11,9 @@ message arrives once, from the partner, with its receipt, and nothing is refused
 but late copies and a message ahead of its open.
 
 Then each state is read by the other runtimes found here, as when one takes the
-home over: it is written back unchanged, and a copy of the message it took is a
-duplicate with its receipt. PHP and Node are found on the path or through
+home over: it is written back unchanged, a copy of the message it took is a
+duplicate with its receipt, what it holds for the program is still there, and
+its count of challenges stops at 2^53 - 1 the same way. PHP and Node are found on the path or through
 AAMIO_TEST_PHP and AAMIO_TEST_NODE (a JSON list: the program and its options); a
 pair whose runtime is not found here is skipped and says so.
 """
@@ -30,6 +31,7 @@ import time
 
 import pytest
 
+from aamio import carry_state
 from aamio.crypto import Keys
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -44,6 +46,7 @@ SEEDS = {"first": bytes(range(32)), "second": bytes(range(32, 64))}
 PAIRS = [("python", "php"), ("php", "node"), ("node", "python")]
 POOR = {"AAMIO_SIM_LOSS": "0.2", "AAMIO_SIM_DUPLICATE": "0.2", "AAMIO_SIM_REORDER": "0.3", "AAMIO_SIM_MAX_FRAME": "32"}
 PEER_SECONDS = 150
+SAFE = carry_state.SAFE
 # What two honest parties refuse of each other on a medium that copies and reorders: late copies of an open
 # (the nonce is used) or of a challenge (its session is open already), a copy of an ask, a challenge or open
 # that comes after its window, and a message that overtook the open of its session. Anything else means the
@@ -194,15 +197,28 @@ def test_two_runtimes_exchange_a_message_each_way_once_with_its_receipt(first, s
     for role, other in (("first", "second"), ("second", "first")):
         for reader in sorted(set(found) - {names[role]}):
             base = {"seed": SEEDS[role].hex(), "partner": keys[other].public_raw.hex(), "mode": mode, "now": states[role]["floor"]}
-            folder = tmp_path / ("%s-resaved-by-%s" % (role, reader))
-            copy = folder / "carry.json"
-            folder.mkdir()
-            shutil.copyfile(tmp_path / role / "carry.json", copy)
-            assert task(reader, found[reader], folder / "task", dict(base, task="resave", state=str(copy))) == {"resaved": True}
-            assert json.loads(copy.read_text(encoding="utf-8")) == states[role], "%s wrote back what %s kept otherwise" % (reader, names[role])
-            folder = tmp_path / ("%s-replayed-by-%s" % (role, reader))
-            copy = folder / "carry.json"
-            folder.mkdir()
-            shutil.copyfile(tmp_path / role / "carry.json", copy)
-            replayed = task(reader, found[reader], folder / "task", dict(base, task="replay", state=str(copy), envelope=sent[other]))
-            assert replayed == {"replayed": "duplicate", "receipt": True}, "%s took over from %s: %s" % (reader, names[role], replayed)
+            where = "%s took over what %s kept" % (reader, names[role])
+
+            def copy(label, change=None):
+                folder = tmp_path / ("%s-%s-by-%s" % (role, label, reader))
+                folder.mkdir()
+                kept = dict(states[role], **(change or {}))
+                (folder / "carry.json").write_text(json.dumps(kept), encoding="utf-8")
+                return folder, str(folder / "carry.json")
+
+            folder, path = copy("resaved")
+            assert task(reader, found[reader], folder / "task", dict(base, task="resave", state=path)) == {"resaved": True}
+            assert json.loads(pathlib.Path(path).read_text(encoding="utf-8")) == states[role], where + ", and wrote it back otherwise"
+            folder, path = copy("replayed")
+            replayed = task(reader, found[reader], folder / "task", dict(base, task="deliver", state=path, envelope=sent[other]))
+            assert replayed["result"] == "duplicate" and replayed["receipt"], "%s: a copy of what it took is %s" % (where, replayed)
+            folder, path = copy("pending")
+            assert task(reader, found[reader], folder / "task", dict(base, task="pending", state=path)) == {"pending": [texts[other]]}, where
+            # The count of challenges at its last value but one: the next ask takes it, the one after is refused, in any runtime.
+            folder, path = copy("count", {"challenges": SAFE - 1})
+            asker = carry_state.CarryState(Keys(SEEDS[other]))
+            asks = [asker.ask(keys[role].public_raw, carry_state.profile(mode=mode), 0.0)[1] for _ in range(2)]
+            first_ask = task(reader, found[reader], folder / "task", dict(base, task="deliver", state=path, envelope=asks[0].hex()))
+            assert (first_ask["result"], first_ask["challenges"]) == ("accepted", SAFE), "%s: %s" % (where, first_ask)
+            second_ask = task(reader, found[reader], folder / "again", dict(base, task="deliver", state=path, envelope=asks[1].hex()))
+            assert (second_ask["result"], second_ask["challenges"]) == ("carry_storage_full", SAFE), "%s: %s" % (where, second_ask)

@@ -9,14 +9,14 @@ sends; the second waits for that message, then opens one of its own and
 answers. Each prints one JSON line with done when its part is over, keeps going
 so the other's receipts still come, and prints a last line when the stop file
 appears, with what it received, the envelope it sent, and the codes of what it
-refused, counted.
+refused, counted. Nothing is taken from the state: what came stays pending.
 
-Two more tasks read a state another runtime wrote, as when it takes the home
+Three more tasks read a state another runtime wrote, as when it takes the home
 over: resave reads it and writes it back unchanged (through prune at the time
-floor, which deletes nothing then), and replay delivers an envelope that state
-has taken already, which must be a duplicate with its receipt. Both take now,
-the time floor of the state. The same peer is written for aamio-php and
-aamio-js, so any two of them can be paired.
+floor, which deletes nothing then), deliver gives it one envelope and says what
+came of it, and pending says what the state still holds for the program. Each
+takes now, the time floor of the state. The same peer is written for aamio-php
+and aamio-js, so any two of them can be paired.
 """
 
 import collections
@@ -46,13 +46,18 @@ def resave(config, keys):
     return 0
 
 
-def replay(config, keys, partner):
+def deliver(config, keys, partner):
     state = CarryState(keys, config["state"])
     try:
         result, reply, _ = state.deliver(bytes.fromhex(config["envelope"]), [partner], carry_state.profile(mode=config["mode"]), 0.0, config["now"])
     except CarryRefused as refused:
         result, reply = refused.code, None
-    say({"replayed": result, "receipt": reply is not None})
+    say({"result": result, "receipt": reply is not None, "challenges": state.durable["challenges"]})
+    return 0
+
+
+def pending(config, keys):
+    say({"pending": [content.decode("utf-8") for _key, _pk, _session, _counter, content in CarryState(keys, config["state"]).pending()]})
     return 0
 
 
@@ -80,7 +85,7 @@ def exchange(config, keys, partner):
                     stage = "opening"
                 elif stage == "opening" and opened is not None:
                     sent = carrier.send(partner, opened, config["text"].encode())
-                    envelope = carrier.waiting[sent]["envelope"]
+                    envelope = carrier.messages[sent]["envelope"]
                     stage = "sending"
                 elif stage == "sending" and carrier.confirmed(sent) and carrier.inbox:
                     stage = "settling"
@@ -90,7 +95,7 @@ def exchange(config, keys, partner):
                     stage = "opening"
                 elif stage == "opening" and opened is not None:
                     sent = carrier.send(partner, opened, config["text"].encode())
-                    envelope = carrier.waiting[sent]["envelope"]
+                    envelope = carrier.messages[sent]["envelope"]
                     stage = "sending"
                 elif stage == "sending" and carrier.confirmed(sent):
                     stage = "settling"
@@ -111,8 +116,10 @@ def main():
     task = config.get("task", "exchange")
     if task == "resave":
         return resave(config, keys)
-    if task == "replay":
-        return replay(config, keys, partner)
+    if task == "deliver":
+        return deliver(config, keys, partner)
+    if task == "pending":
+        return pending(config, keys)
     return exchange(config, keys, partner)
 
 
