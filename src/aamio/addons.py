@@ -37,6 +37,7 @@ import importlib
 import json
 import os
 import re
+import sys
 import time
 from importlib import metadata
 
@@ -44,7 +45,7 @@ from . import storage
 from .runtime import home_dir
 
 from . import addon_process
-from .addon_process import AddonError, Manifest, RESERVED, enable_note, probe, read_manifest
+from .addon_process import AddonError, Manifest, RESERVED, TransportManifest, enable_note, probe, read_manifest, transport_note
 
 GROUP = "aamio.addons"
 ENABLED_FILE = "addons.json"
@@ -232,11 +233,12 @@ def _well_formed(module, fix):
 
 
 def _bring(point, module_name, distribution, fix):
-    """The add-on as the registry holds it: its manifest, read without running it, on contract 2; the imported module with its hooks on contract 1.
+    """The add-on as the registry holds it: its manifest, read without running it, on contracts 2 and 3; the imported module with its hooks on contract 1.
 
     A module that says CONTRACT is something else and carries no manifest is
-    refused: the contracts this aamio knows are 1, in this process, and 2, in a
-    process of the add-on's own, and 2 is declared in the manifest.
+    refused: the contracts this aamio knows are 1, in this process, 2, in a
+    process of the add-on's own for each call, and 3, a transport, and 2 and 3
+    are declared in the manifest.
     """
     manifest = read_manifest(module_name, distribution, fix, dist=point.dist if point is not None else None)
     if manifest is not None:
@@ -245,7 +247,7 @@ def _bring(point, module_name, distribution, fix):
     _hooks(module, fix)
     number = getattr(module, "CONTRACT", 1)
     if number != 1:
-        raise AddonError("the add-on %s says it is written for contract %s of aamio's add-ons and carries no %s, which contract 2 and later have. This aamio knows 1 and 2. Reinstall it, or %s to go on without it." % (module.__name__, number, addon_process.MANIFEST_FILE, fix))
+        raise AddonError("the add-on %s says it is written for contract %s of aamio's add-ons and carries no %s, which contract 2 and later have. This aamio knows 1, 2 and 3. Reinstall it, or %s to go on without it." % (module.__name__, number, addon_process.MANIFEST_FILE, fix))
     return module
 
 
@@ -312,6 +314,7 @@ def enable(which, given=None):
         names = enabled(given)
         contract = 1
         probed = False
+        transport = said = None
         if not any(_normal(name) == _normal(distribution) for name in names):
             for module in _load(os.environ.get("AAMIO_ADDONS") or "", names + [distribution]):
                 if isinstance(module, Manifest) and module.distribution is not None and _normal(module.distribution) == _normal(distribution):
@@ -320,11 +323,26 @@ def enable(which, given=None):
                     probe(module)
                     contract = 2
                     probed = True
+                if isinstance(module, TransportManifest) and module.distribution is not None and _normal(module.distribution) == _normal(distribution):
+                    if not module.runs_here():
+                        raise AddonError("the transport %s runs on %s, and this is %s. Nothing was recorded." % (module.NAME, ", ".join(module.platforms), sys.platform))
+                    from . import transports
+
+                    # Before anything is recorded: it starts, describes itself as its manifest says, and stops (contract 3, B2).
+                    said = transports.probe(module, home(given))
+                    contract = 3
+                    transport = module
             _write_enabled(given, names + [distribution])
         else:
             contract = next((row.get("contract", 1) for row in describe(given)["addons"] if row.get("distribution") is not None and _normal(row["distribution"]) == _normal(distribution)), 1)
     answer = describe(given)
-    if contract == 2:
+    if contract == 3 and transport is None:
+        transport = next((module for module in loaded(given) if isinstance(module, TransportManifest) and module.distribution is not None and _normal(module.distribution) == _normal(distribution)), None)
+    if contract == 3 and transport is not None:
+        from . import transports
+
+        answer["note"] = transport_note(distribution, transport, transports.working_folder(home(given), transport.NAME, make=False), said) + " " + RESTART
+    elif contract == 2:
         row = next((row for row in answer["addons"] if row.get("distribution") is not None and _normal(row["distribution"]) == _normal(distribution)), {})
         answer["note"] = enable_note(distribution, row.get("environment") or [], probed) + " " + RESTART
     else:
@@ -368,7 +386,14 @@ def _running(module):
     said = {"version": module.__version__, "contract": getattr(module, "CONTRACT", 1), "module": module.__name__, "commands": commands_of(module), "mcp_tools": [tool["name"] for tool in module.TOOLS]}
     if getattr(module, "environment", None):
         said["environment"] = list(module.environment)
+    if isinstance(module, TransportManifest):
+        said.update(_transport_fields(module))
     return said
+
+
+def _transport_fields(manifest):
+    """What a transport says of itself in its manifest, shown before it is enabled: the medium, where it runs and what it uses."""
+    return {"medium": manifest.medium, "platforms": list(manifest.platforms), "permissions": list(manifest.permissions)}
 
 
 def describe(given=None):
@@ -392,10 +417,12 @@ def describe(given=None):
         # manifest for a contract this aamio does not know is this row's error.
         try:
             manifest = read_manifest(row["module"].split(":")[0], row["distribution"], "aamio addon disable %s" % row["distribution"], dist=row["point"].dist)
-            entry["contract"] = 2 if manifest is not None else 1
+            entry["contract"] = manifest.CONTRACT if manifest is not None else 1
             if manifest is not None and manifest.environment:
                 # Said before the add-on is enabled: which variables it asks for, by name.
                 entry["environment"] = list(manifest.environment)
+            if isinstance(manifest, TransportManifest):
+                entry.update(_transport_fields(manifest))
         except AddonError as failure:
             entry["error"] = str(failure)
         module = running.get(row["name"])

@@ -1852,6 +1852,15 @@ class Runtime:
         # check of 12 November 2026).
         partners = [p for p in self.partners if p["name"] != known["name"]]
         self._save_partners(partners)
+        # The bindings go with the partner. A transport takes nothing from a key
+        # that is not in the book whatever the file says, so one left behind,
+        # as by another runtime that removed the partner, opens nothing.
+        service = self.transport_service()
+        if service is not None:
+            try:
+                service.config.unbind(known["key"])
+            except (LookupError, RuntimeError, OSError):
+                pass
         return self._inbox_after_change("partner %s was removed" % known["name"], {"partner": known["name"], "known": True})
 
     def _save_partners(self, partners):
@@ -3271,6 +3280,10 @@ class Runtime:
         messages this is about.
         """
         check_re(answers)
+        # A partner bound to a transport goes over it, and never over HTTPS instead.
+        bound = self._bound_partner(to)
+        if bound is not None:
+            return self._send_carried(bound, text, data, answers)
         w, key, partner = self._recipient(to)
         return self._send(w, key, partner, text, data, reply_to, answers=answers)
 
@@ -5026,6 +5039,7 @@ class Runtime:
                 self.log("the inbox could not be opened yet: %s. The listener tries again, and a call that needs the inbox says so." % error)
             self.listener = threading.Thread(target=self._listen, daemon=True)
             self.listener.start()
+            self._start_transports()
         return self
 
     def read(self, wait=0, limit=50, max_bytes=None):
@@ -5040,10 +5054,29 @@ class Runtime:
     def _read_held(self, wait, limit, max_bytes):
         """read, as one read for the archive."""
         if self.listener is None:
-            # No background listener: poll directly.
-            self.ensure_inbox()
-            self.publish_presence()
+            # No background listener: poll directly. What came over a transport
+            # is read too, and while this waits the transports run (B2). With a
+            # transport the inbox is one way among others, so an inbox that
+            # cannot be reached is said, and the rest is read.
+            carried_service = self._carried_service()
             collected = []
+            online = True
+            if carried_service is not None:
+                if wait:
+                    carried_service.start(background=True)
+                ready = self._carried_ready(self._carried_entries(carried_service))
+                collected.extend(ready[:limit])
+                if len(ready) > limit:
+                    self._note_trouble("read", "more_carried", "%d more that came over a transport wait for the next read, in the order they came." % (len(ready) - limit))
+                try:
+                    self.ensure_inbox()
+                    self.publish_presence()
+                except (RuntimeError, OSError) as error:
+                    online = False
+                    self._note_trouble("inbox", "unreachable", "the inbox could not be reached: %s. What came over a transport is read all the same; nothing on the service was." % error)
+            else:
+                self.ensure_inbox()
+                self.publish_presence()
             left_waiting = 0
             held_back = []
             held_here = []
@@ -5085,7 +5118,7 @@ class Runtime:
             # waiting on a private thread sat behind a quiet inbox for the
             # whole wait, until 30 September 2026.
             answered = []
-            for channel in list(self.channels.values()):
+            for channel in (list(self.channels.values()) if online else []):
                 # A channel that answered 410 or nothing at all never gets the
                 # wait: it used to eat it, so a read with wait 25 came back at
                 # once and the inbox was only ever asked with wait 0. A gone
@@ -5099,7 +5132,9 @@ class Runtime:
             # asked once more when it ends, so what reached them meanwhile comes
             # with this answer, at the end of the wait: only the first channel
             # can end the wait early.
-            if not collected and wait and answered:
+            if not collected and wait and carried_service is not None:
+                self._wait_with_transports(carried_service, collected, limit, int(wait), answered, ask, not_asked_after)
+            elif not collected and wait and answered:
                 ask(answered[0], wait, not_asked_after)
                 for channel in answered[1:]:
                     ask(channel, 0, not_asked_after)
@@ -5135,6 +5170,7 @@ class Runtime:
             said = [part for part in (limit_said, budget_said, here_said) if part]
             if said:
                 self._note_trouble("read", "more", " ".join([said[0]] + [part[0].upper() + part[1:] for part in said[1:]]))
+            self._carried_handed_over(collected)
             return collected
         # With a listener running, the messages are already here: it fetched them
         # on its own polls, which belong to every caller and cannot take one
@@ -5191,6 +5227,9 @@ class Runtime:
             if self._withheld_since(entry):
                 self._release_receipt(entry)
                 continue
+            if entry.get("mark") is not None and self.partner_by_key(entry["from_key"]) is None:
+                self._carried_withheld(entry)
+                continue
 
             if max_bytes is not None:
                 where = entry.get("w") or entry.get("channel")
@@ -5236,6 +5275,7 @@ class Runtime:
             labels = ", ".join(dict.fromkeys(entry.get("channel") or entry.get("w") for entry in held))
             self._note_trouble("read", "more", "this read stopped at the byte budget it asked for on %s, %d bytes of messages per channel. The rest is here in the order it arrived and the next read hands it over; nothing was dropped and nothing changed places." % (labels, max_bytes))
 
+        self._carried_handed_over(collected)
         return collected
 
     # ---------------------------------------------------------- receipt --
@@ -5344,6 +5384,7 @@ class Runtime:
             return
         self.closed = True
         self.stop.set()
+        self._stop_transports()
         self._wait_for_threads()
         try:
             self.save_state()
@@ -5369,5 +5410,187 @@ class Runtime:
 
     def release(self):
         """Lets go of the home without saving, for a command that saved what it changed as it went."""
-        self._let_go()
-        self._release_lock()
+        try:
+            self._stop_transports()
+        finally:
+            self._let_go()
+            self._release_lock()
+
+    # ------------------------------------------------------- transports --
+    #
+    # A partner bound to a transport (aamio transport bind) is reached over it,
+    # and over nothing else: transports.py has the profiles, the bindings and
+    # the service. Only the owner of the home runs a transport (B2), and a
+    # runtime is the owner while it lives: serve starts them with the listener,
+    # and a send or a read that waits starts them for as long as it runs.
+
+    # How long a read on the command line waits on the inbox at a time, while
+    # transports run beside it: what comes over one is not held behind the wait.
+    CARRIED_SLICE = 5
+    CARRIED_NOTES = {
+        "confirmed": "The partner's aamio took it in over %(via)s and said so with a receipt.",
+        "handed_over": "Every frame went out over %(via)s, and no receipt came within %(wait)d seconds. It is sent again with the same bytes while an aamio owns this home, and aamio transport list says how it ends.",
+        "queued": "It waits in the outbox for room on %(via)s, and goes while an aamio owns this home. aamio transport list says how it ends.",
+        "unknown": "No receipt came over %(via)s and its tries are used, so it may or may not have arrived. It is not sent again.",
+    }
+
+    def transport_service(self):
+        """The transports of this home (transports.py), made at first use; None for a runtime built without a home, as a test or a wrapper may build one."""
+        service = self.__dict__.get("transport_service_")
+        if service is None:
+            if not isinstance(self.__dict__.get("home"), str) or "keys" not in self.__dict__:
+                return None
+            from .transports import Service
+
+            with self.__dict__.get("lock") or threading.RLock():
+                service = self.__dict__.setdefault("transport_service_", Service(self))
+        return service
+
+    def _bound_partner(self, to):
+        """The partner to names when a transport is bound to it, or None.
+
+        A write address is a thread at the service, and goes there as before.
+        transport_config_unreadable when the bindings cannot be read: which
+        partners go over a transport is not known then, so nothing is sent.
+        """
+        if isinstance(to, str) and re.fullmatch(r"[a-z2-7]{20}", to):
+            return None
+        service = self.transport_service()
+        if service is None:
+            return None
+        partner = self.partner_by_key(to) if is_key(str(to)) else self.partner_by_name(to)
+        if partner is None:
+            return None
+        return partner if service.config.routes(partner["key"]) else None
+
+    def _send_carried(self, partner, text, data, answers):
+        """A message to a partner bound to a transport: the body HTTPS carries, without reply_to, and sealed by the carrier."""
+        body = {"from": self.keys.hash[:8]}
+        if text is not None:
+            body["text"] = str(text)
+        if data is not None:
+            body["data"] = data
+        body.update(self._conversation(partner["key"], answers))
+        content = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        from .transports import WAIT_DEFAULT
+
+        budget = getattr(self, "work_budget", None)
+        wait = WAIT_DEFAULT if budget is None else max(1, min(WAIT_DEFAULT, int(budget)))
+        result = self.transport_service().send(unb64url(partner["key"]), content, wait=wait)
+        sent = dict({"to": partner["name"]}, **result)
+        sent["note"] = self.CARRIED_NOTES[result["status"]] % {"via": result["via"], "wait": wait}
+        archive_error = self._archive_sent({"kind": "sent", "at": time.time(), "to": partner["name"], "via": result["via"], "profile": result["profile"],
+                                            "mark": result["mark"], "status": result["status"], "body": body})
+        if archive_error is not None:
+            sent["archive_error"] = archive_error
+        return sent
+
+    def _start_transports(self):
+        """With the listener: the transports bound to partners run, and what comes over them goes where read takes it."""
+        try:
+            service = self.transport_service()
+            if service is not None and service.bound():
+                service.start(background=True, offer=self._offer_carried)
+        except Exception as error:
+            self._note_trouble("transports", "not_started", "the transports could not be started: %s: %s. Nothing goes over them in this process, and partners bound to them are not sent to." % (error.__class__.__name__, error))
+
+    def _stop_transports(self):
+        """What the carriers have queued goes out for a moment, and then the transports stop (B2)."""
+        service = self.__dict__.get("transport_service_")
+        if service is None:
+            return
+        try:
+            service.drain()
+        finally:
+            service.stop()
+
+    def _carried_service(self):
+        """The transport service when a partner is bound to a transport, else None; a binding file that cannot be read is said."""
+        service = self.transport_service()
+        if service is None:
+            return None
+        try:
+            return service if service.bound() else None
+        except RuntimeError as error:
+            self._note_trouble("transports", "unreadable", "%s. What came over a transport waits in the home until then." % error)
+            return None
+
+    def _carried_entries(self, service, skip=()):
+        """What came over a transport, as read hands it over: archived is said when it is handed over."""
+        entries = service.entries(skip)
+        for entry in entries:
+            entry["archived"] = False
+            if not self.archive_enabled:
+                entry["archive_off"] = True
+        return entries
+
+    def _offer_carried(self, entry):
+        """For the listener's read: a message that came over a transport, in the queue the read takes from."""
+        entry["archived"] = False
+        if not self.archive_enabled:
+            entry["archive_off"] = True
+        self.inbound.put(entry)
+
+    def _carried_ready(self, entries):
+        """What may be handed over: a message from a key that has left the address book is not, and that is said."""
+        ready = []
+        for entry in entries:
+            if self.partner_by_key(entry["from_key"]) is None:
+                self._carried_withheld(entry)
+            else:
+                ready.append(entry)
+        return ready
+
+    def _carried_withheld(self, entry):
+        """A message that came over a transport from a key no longer in the address book: archived when the archive is kept, and not handed over."""
+        archived = self._archive_carried(entry)
+        try:
+            self.transport_service().taken([entry["mark"]])
+        except Exception as error:
+            self.log("transports: %s could not be marked as dealt with: %s" % (entry["mark"], error))
+        self._note_trouble(entry["channel"], "removed_key", "A message came over %s from a key that has since left the address book. It is not handed over%s." % (
+            entry["channel"], "; the archive has it" if archived else ""))
+
+    def _archive_carried(self, entry):
+        """The row of a message that came over a transport, as read writes one for a message over HTTPS: True when it was written."""
+        if not self.archive_enabled:
+            return False
+        try:
+            return self.archive("transport-%s" % entry["channel"], dict(entry, kind="received")) is not False
+        except Exception as error:
+            self._note_trouble(entry["channel"], "archive_failed", "a message that came over %s was handed over and could not be written to the archive: %s: %s. The archive does not have it." % (
+                entry["channel"], error.__class__.__name__, error))
+            return False
+
+    def _carried_handed_over(self, collected):
+        """What a read hands over that came over a transport: written to the archive, and then taken out of the carrier state."""
+        marks = []
+        for entry in collected:
+            if entry.get("mark") is None:
+                continue
+            entry["archived"] = self._archive_carried(entry)
+            marks.append(entry["mark"])
+        if not marks:
+            return
+        try:
+            self.transport_service().taken(marks)
+        except Exception as error:
+            self._note_trouble("transports", "not_taken", "%d message(s) that came over a transport were handed over and could not be marked as taken: %s: %s. They may come again, with the same mark." % (
+                len(marks), error.__class__.__name__, error))
+
+    def _wait_with_transports(self, service, collected, limit, wait, answered, ask, not_asked_after):
+        """A read that waits, on the command line, with transports running: the inbox in short waits, and what came over a transport between them."""
+        until = time.monotonic() + wait
+        while not collected:
+            left = until - time.monotonic()
+            if left <= 0:
+                break
+            piece = max(1, min(self.CARRIED_SLICE, int(left)))
+            state = ask(answered[0], piece, not_asked_after) if answered else None
+            if state not in ("ok", "gone"):
+                service._wait(lambda: bool(service.carry().pending()), time.monotonic() + min(left, piece))
+            taken = {entry["mark"] for entry in collected if entry.get("mark")}
+            collected.extend(self._carried_ready(self._carried_entries(service, skip=taken))[: max(0, limit - len(collected))])
+        for channel in answered[1:]:
+            ask(channel, 0, not_asked_after)
+

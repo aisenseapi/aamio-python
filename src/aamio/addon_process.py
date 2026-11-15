@@ -43,7 +43,7 @@ from .crypto import key_hash
 from .storage import HOME_ENCODING
 
 MANIFEST_FILE = "aamio-addon.json"
-KNOWN_CONTRACTS = (1, 2)
+KNOWN_CONTRACTS = (1, 2, 3)
 DEADLINE_DEFAULT = 30
 DEADLINE_MAX = 120
 PROBE_DEADLINE = 20
@@ -64,6 +64,9 @@ MAX_ANSWER_BYTES = 1_000_000
 MAX_STDERR_BYTES = 65_536
 # How long a stopped process gets to go away before it is given up on.
 STOP_WAIT = 5.0
+# What a transport may say it uses (contract 3, B1): shown before enable, never enforced, the ground for consent.
+TRANSPORT_PERMISSIONS = ("network_local", "network_internet", "bluetooth", "serial", "microphone", "speaker", "camera", "screen", "radio")
+TRANSPORT_PLATFORMS = ("linux", "darwin", "win32")
 # Names an add-on may not ask for in its environment list.
 NEVER_PASSED = ("AAMIO_HOME", "AAMIO_ADDONS", "AAMIO_ADDON")
 # What the process gets of the environment: what the interpreter, the path, a
@@ -106,6 +109,12 @@ _LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _NUMERIC = re.compile(r"[0-9]+")
 _KEY = re.compile(r"[A-Za-z0-9_-]{43}")
 _HASH = re.compile(r"[0-9a-f]{64}")
+
+
+def known_contracts():
+    """The contracts this aamio knows, as the three runtimes say them: 1, 2 and 3."""
+    names = [str(number) for number in KNOWN_CONTRACTS]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
 class AddonError(RuntimeError):
@@ -195,7 +204,9 @@ def read_manifest(module, distribution, fix, dist=None):
     number = data.get("aamio_addon") if isinstance(data, dict) else None
     if number == 2:
         return Manifest(distribution, name, path, data, fix)
-    raise AddonError("the add-on %s is written for contract %s of aamio's add-ons, and this aamio (%s) knows %s. Upgrade aamio, or install a version of the add-on for this one; %s goes on without it." % (name, json.dumps(number), CORE_VERSION, " and ".join(str(n) for n in KNOWN_CONTRACTS), fix))
+    if number == 3:
+        return TransportManifest(distribution, name, path, data, fix)
+    raise AddonError("the add-on %s is written for contract %s of aamio's add-ons, and this aamio (%s) knows %s. Upgrade aamio, or install a version of the add-on for this one; %s goes on without it." % (name, json.dumps(number), CORE_VERSION, known_contracts(), fix))
 
 
 class Manifest:
@@ -365,6 +376,108 @@ class Manifest:
 
     def dispatch(self, runtime, name, arguments, ask):
         return dispatch(self, runtime, name, arguments, ask)
+
+
+class TransportManifest:
+    """What a contract-3 add-on is: a transport the owner of the home starts and speaks to in lines (contract 3, part B).
+
+    It stands where a contract-1 module stands in the registry, as Manifest
+    does, and has no commands and no tools of its own: what it offers is a
+    medium, used through aamio transport. Nothing of it runs to read this.
+    """
+
+    CONTRACT = 3
+
+    def __init__(self, distribution, module, path, data, fix):
+        self.distribution = distribution
+        self.module = module
+        self.__name__ = module
+        self.path = path
+        self.fix = fix
+        self.data = data
+        self.NAME = data.get("name")
+        self.__version__ = data.get("version")
+        self.description = data.get("description")
+        self.environment = data.get("environment") or []
+        transport = data.get("transport")
+        self.transport = transport if isinstance(transport, dict) else None
+        start = (self.transport or {}).get("start")
+        self.start = start if isinstance(start, dict) else None
+        self.start_module = (self.start or {}).get("python")
+        self.medium = (self.transport or {}).get("medium")
+        self.platforms = (self.transport or {}).get("platforms")
+        self.permissions = (self.transport or {}).get("permissions")
+        self.TOOLS = []
+        self._validate()
+
+    def _wrong(self, what):
+        raise AddonError("%s cannot be used as a transport: %s. Reinstall it, or %s to go on without it." % (self.module, what, self.fix))
+
+    def _validate(self):
+        if not isinstance(self.NAME, str) or _NAME.fullmatch(self.NAME) is None:
+            self._wrong("its manifest has no name of 1 to 32 characters of a-z, 0-9, dash and underscore")
+        if self.NAME in RESERVED:
+            raise AddonError("%s cannot be called %s: that is a command of aamio addon itself. To go on without it: %s." % (self.module, self.NAME, self.fix))
+        if _DEVICE.fullmatch(self.NAME) is not None:
+            self._wrong("its manifest's name, %s, is one Windows keeps for a device, and it names the transport's working folder" % self.NAME)
+        if not isinstance(self.__version__, str) or not self.__version__:
+            self._wrong("its manifest has no version")
+        for field in ("process", "commands", "tools", "hosts"):
+            if field in self.data:
+                self._wrong("its manifest has %s, which is contract 2's: a transport has transport and nothing of that kind" % field)
+        if self.description is not None and not isinstance(self.description, str):
+            self._wrong("description in its manifest is not text")
+        if self.transport is None:
+            self._wrong("its manifest has no transport object")
+        if not isinstance(self.medium, str) or _NAME.fullmatch(self.medium) is None:
+            self._wrong("transport.medium in its manifest is not a name of a-z, 0-9, dash and underscore")
+        if self.start is None:
+            self._wrong("transport.start in its manifest is not an object")
+        if not isinstance(self.start_module, str) or _MODULE.fullmatch(self.start_module) is None:
+            # exec, a program inside the package, is for a transport in another language; this aamio starts one of its own.
+            self._wrong("transport.start.python in its manifest names no Python module, and this aamio starts a transport with its own interpreter")
+        if not isinstance(self.platforms, list) or not self.platforms or any(platform not in TRANSPORT_PLATFORMS for platform in self.platforms):
+            self._wrong("transport.platforms in its manifest is not a list of %s" % ", ".join(TRANSPORT_PLATFORMS))
+        if not isinstance(self.permissions, list) or any(permission not in TRANSPORT_PERMISSIONS for permission in self.permissions):
+            self._wrong("transport.permissions in its manifest is not a list of %s" % ", ".join(TRANSPORT_PERMISSIONS))
+        if not isinstance(self.environment, list) or any(not isinstance(name, str) or _VARIABLE.fullmatch(name) is None for name in self.environment):
+            self._wrong("environment in its manifest is not a list of variable names in A-Z, 0-9 and underscore")
+        if any(name in NEVER_PASSED for name in self.environment):
+            self._wrong("environment in its manifest asks for %s, which no add-on gets" % ", ".join(name for name in self.environment if name in NEVER_PASSED))
+
+    def runs_here(self, platform=None):
+        return (sys.platform if platform is None else platform) in self.platforms
+
+    # The four hooks, as the registry and the command line call them. A transport has nothing to dispatch.
+
+    def add_commands(self, parser):
+        parser.description = "%s: a transport over %s. aamio transport list shows it, and aamio transport bind PARTNER %s sends to that partner over it." % (
+            self.description or self.NAME, self.medium, self.NAME)
+
+    def early(self, args):
+        return None
+
+    def command(self, args, runtime):
+        from .cli import out
+
+        out({"name": self.NAME, "version": self.__version__, "contract": 3, "medium": self.medium, "permissions": list(self.permissions),
+             "note": "%s is a transport. aamio transport list shows it with the partners bound to it; aamio transport bind PARTNER %s sends to a partner over it." % (self.NAME, self.NAME)})
+        return 0
+
+    def dispatch(self, runtime, name, arguments, ask):
+        return None
+
+
+def transport_note(distribution, manifest, folder, said=None):
+    """What enable says of a transport: who starts it, where it runs, what it gets, and what it says it uses."""
+    asked = (" and %s, which its manifest asks for" % ", ".join(manifest.environment)) if manifest.environment else ""
+    uses = ", ".join(manifest.permissions) if manifest.permissions else "nothing it names"
+    heard = (" When it was started just now it said: %s." % said) if said else ""
+    return ("%s is a transport here from now on, over %s. Only the process that owns this home starts it: aamio serve, and aamio send or "
+            "aamio read --wait while they run. It runs in a process of its own, in %s, outside the home, and gets the frames to send and gives "
+            "back the frames it heard: never the home's key, the home or the address book. Its environment is the short list of contract 2%s. "
+            "It says it uses %s; aamio cannot hold it to that, and it runs with your own permissions. Nothing goes over it until a partner is "
+            "bound to it: aamio transport bind PARTNER %s.%s" % (distribution, manifest.medium, folder, asked, uses, manifest.NAME, heard))
 
 
 def _dest(name):

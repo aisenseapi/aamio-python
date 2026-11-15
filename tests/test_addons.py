@@ -812,17 +812,17 @@ def test_contract_two_over_mcp_asks_the_user_for_a_website(process_site, monkeyp
 
 
 def test_a_contract_this_aamio_does_not_know_is_said_and_can_be_taken_out(process_site, monkeypatch, tmp_path):
-    ran, _ = process_site(manifest=dict(manifest_for("demo2", "demo2_pkg"), aamio_addon=3))
+    ran, _ = process_site(manifest=dict(manifest_for("demo2", "demo2_pkg"), aamio_addon=4))
     code, out, _ = main(["addon", "list"], monkeypatch)
     row = json.loads(out)["addons"][0]
-    assert code == 0 and row["enabled"] is False and "contract 3" in row["error"] and "knows 1 and 2" in row["error"] and "contract" not in row
+    assert code == 0 and row["enabled"] is False and "contract 4" in row["error"] and "knows 1, 2 and 3" in row["error"] and "contract" not in row
     code, _, err = main(["addon", "enable", "demo2"], monkeypatch)
-    assert code == 2 and "contract 3" in err and not ran.exists() and not (tmp_path / "home" / "addons.json").exists()
+    assert code == 2 and "contract 4" in err and not ran.exists() and not (tmp_path / "home" / "addons.json").exists()
     # Enabled by an older aamio, say: the list says what is wrong, and disable works.
     (tmp_path / "home").mkdir(exist_ok=True)
     (tmp_path / "home" / "addons.json").write_text('{"enabled": ["demo2-pkg"]}', encoding="utf-8")
     code, out, _ = main(["addon", "list"], monkeypatch)
-    assert code == 1 and "contract 3" in json.loads(out)["error"]
+    assert code == 1 and "contract 4" in json.loads(out)["error"]
     assert main(["addon", "disable", "demo2"], monkeypatch)[0] == 0 and enabled_in(tmp_path) == {"enabled": []} and not ran.exists()
 
 

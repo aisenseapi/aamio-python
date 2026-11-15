@@ -311,6 +311,11 @@ def check_usage(args):
         args.wait = _whole(args.wait, "--wait", 0, 25)
         args.limit = _whole(args.limit, "--limit", 1, 200)
         args.max_bytes = _whole(args.max_bytes, "--max-bytes", 512)
+    elif command == "transport":
+        if args.transport_command == "profile" and args.profile_command == "add":
+            args.lifetime = _whole(args.lifetime, "--lifetime", 11, 86400)
+            args.window = _whole(args.window, "--window", 10, 600)
+            args.max_content = _whole(args.max_content, "--max-content", 0, 65431)
     elif command == "receipt":
         if not args.channel:
             raise Usage("--channel names a channel, as a message's channel field does: inbox, board or an older generation.")
@@ -517,6 +522,25 @@ def main(argv=None):
     ofg.add_argument("id")
 
     sub.add_parser("serve")
+    p = sub.add_parser("transport", help="transports beside HTTPS: security profiles, which partner goes over which, and what was carried")
+    ts = p.add_subparsers(dest="transport_command", required=True)
+    ts.add_parser("list", help="the transports enabled here, the profiles, the bindings, and the outbox of what was carried")
+    tp = ts.add_parser("profile", help="a security profile: sealed or readable, a session's lifetime, the challenge window")
+    tps = tp.add_subparsers(dest="profile_command", required=True)
+    tpa = tps.add_parser("add", help="add a profile, or change one no partner is bound to")
+    tpa.add_argument("name")
+    tpa.add_argument("--readable", action="store_true", help="signed and not sealed: everyone who hears the medium can read it. Only by choice")
+    tpa.add_argument("--lifetime", default=None, help="seconds a session lives, 600 if left out")
+    tpa.add_argument("--window", default=None, help="seconds a challenge waits for its open, 60 if left out")
+    tpa.add_argument("--max-content", default=None, dest="max_content", help="the most bytes a message carries")
+    tps.add_parser("remove").add_argument("name")
+    tb = ts.add_parser("bind", help="send to a partner over a transport, and take its messages from it")
+    tb.add_argument("partner", help="a partner's name or key")
+    tb.add_argument("transport", help="an enabled transport, as lan")
+    tb.add_argument("--profile", default=None, help="a profile's name, sealed if left out")
+    tu = ts.add_parser("unbind", help="a partner over HTTPS again, or over its next transport")
+    tu.add_argument("partner")
+    tu.add_argument("transport", nargs="?", default=None)
 
     # What is installed beyond the core, each under its short name. An add-on
     # that cannot be used stops here with the reason: a broken install is not a
@@ -759,6 +783,19 @@ def run(args, runtime):
             out({"retried": runtime.outbox_retry(args.id)})
         else:
             out(runtime.outbox_forget(args.id))
+    elif args.command == "transport":
+        from . import transports
+
+        if args.transport_command == "list":
+            out(transports.listing(runtime))
+        elif args.transport_command == "profile" and args.profile_command == "add":
+            out(transports.profile_add(runtime, args.name, args.readable, args.lifetime, args.window, args.max_content))
+        elif args.transport_command == "profile":
+            out(transports.profile_remove(runtime, args.name))
+        elif args.transport_command == "bind":
+            out(transports.bind(runtime, args.partner, args.transport, args.profile))
+        else:
+            out(transports.unbind(runtime, args.partner, args.transport))
     elif args.command == "serve":
         from .mcp_server import serve
 

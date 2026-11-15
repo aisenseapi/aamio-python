@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# A transport under contract 3: aamio over the local network, each frame one
+# UDP datagram. It lives in the aamio-python repository and is tested with the
+# core. It is not published yet.
+name = "aamio-lan"
+dynamic = ["version"]
+description = "aamio over the local network: a transport under contract 3 that sends each frame as one UDP datagram, to an address or to everyone on the network."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "AI SENSE AS" }]
+dependencies = []
+keywords = ["aamio", "agents", "transport", "lan", "udp"]
+
+[project.entry-points."aamio.addons"]
+lan = "aamio_lan"
+
+[tool.setuptools.dynamic]
+version = { attr = "aamio_lan.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+aamio_lan = ["aamio-addon.json"]

@@ -1,0 +1,13 @@
+{
+  "aamio_addon": 3,
+  "name": "lan",
+  "version": "0.1.0",
+  "description": "aamio over the local network: each frame one UDP datagram, to an address or to everyone on the network. The core seals and verifies; the network sees that frames go.",
+  "transport": {
+    "medium": "lan",
+    "start": {"python": "aamio_lan.transport", "php": "transport.php", "node": "transport.js"},
+    "platforms": ["linux", "darwin", "win32"],
+    "permissions": ["network_local"]
+  },
+  "environment": ["AAMIO_LAN_PORT", "AAMIO_LAN_BIND", "AAMIO_LAN_BROADCAST", "AAMIO_LAN_PEERS"]
+}
