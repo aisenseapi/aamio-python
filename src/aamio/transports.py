@@ -574,7 +574,11 @@ class Service:
         return carrier.usable_session(pk, profile["lifetime"] - profile["challenge_window"])
 
     def send(self, pk, content, wait=WAIT_DEFAULT):
-        """content to pk over its first transport, in an open session or in a new one: its mark and how far it came.
+        """content to pk over its first transport, in an open session or in a new one: its mark, the sha256 of its
+        envelope and how far it came, and for the trace its size and whether it went sealed.
+
+        The sha256 is the one the partner's runtime reads it under and names as
+        seen once it has read it.
 
         status is confirmed when the receipt came, handed_over when every frame
         of a try was given to the medium and no receipt came within wait,
@@ -611,6 +615,9 @@ class Service:
                 key = carrier.send(pk, self._session(carrier, pk), content)
             except CarryRefused as refused:
                 raise CodedValueError(refused.code, "%s. Nothing was sent." % refused) from None
+            # What went, as the outbox keeps it: the envelope, and its sha256.
+            written = self.carry().durable["outbox"][key]
+            envelope = bytes.fromhex(written["envelope"])
         state = self.carry()
         self._wait(lambda: state.outcome(key) != "waiting", until)
         with self.lock:
@@ -619,7 +626,8 @@ class Service:
             handed = current is not None and current.handed_over(key)
         if outcome == "waiting":
             outcome = "handed_over" if handed else "queued"
-        return {"via": name, "profile": route["profile"], "mark": key, "status": outcome}
+        return {"via": name, "profile": route["profile"], "mark": key, "status": outcome, "sha256": written["sha256"],
+                "bytes": len(envelope), "sealed": envelope[len(carry.MAGIC)] == carry.SEALED}
 
     def outbox(self):
         """What was sent over a transport, as aamio transport list shows it: mark and outcome, oldest first."""

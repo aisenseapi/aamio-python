@@ -37,7 +37,7 @@ sys.path.insert(0, "tests")
 from aamio import mcp_server
 from aamio.crypto import Keys, thread_signing_input
 from aamio.gate import GateStop
-from aamio.runtime import Runtime, SendFailed, normalize_traces
+from aamio.runtime import Runtime, SendFailed, normalize_traces, trace_view
 
 
 class Service:
@@ -716,3 +716,41 @@ def test_an_answer_on_the_board_that_failed_says_the_trace_that_could_not_be_wri
     assert "trace.json: OSError" in (failed.value.trace_error or "")
     a.close()
     b.close()
+
+
+def carried(number, outcome="confirmed", sealed=True):
+    """A send over a transport as the trace records one: the mark, via and the sha256 of the envelope, and no status."""
+    return {"message_id": "%s:%016x:1" % ("ab" * 32, number), "at": 1_794_852_000 + number, "outcome": outcome,
+            "sha256": hashlib.sha256(b"%d" % number).hexdigest(), "sealed": sealed, "via": "lan", "bytes": 300,
+            "fields": ["from", "text"], "text_chars": 10}
+
+
+def test_a_send_over_a_transport_is_matched_by_its_envelope_and_said_in_words_of_its_own():
+    """A send over a transport has no answer from the service. It arrived when a receipt came or a claim of theirs names
+    it, and what is said of a send over HTTPS is not said of it (the exchange over one local network of 16 November 2026)."""
+    named = carried(2, outcome="handed_over")
+    book = {"sent": [carried(1), named, carried(3, outcome="handed_over")],
+            "received": [{"at": 1_794_852_100, "channel": "lan", "sha256": hashlib.sha256(b"10").hexdigest(), "seen": named["sha256"],
+                          "encrypted": True, "format": "json", "fields": ["from", "seen", "text"]}],
+            "last_read": None}
+    view = trace_view(book, 50)
+    assert [row["seen_by_them"] for row in view["sent"]] == [None, True, None], "a claim names the second, whose receipt had not come"
+    assert view["no_read_claim"] == [carried(1)["message_id"]], "the one a receipt confirmed and nothing names"
+    assert view["received"][0]["acknowledges"]["sha256"] == named["sha256"]
+    note = view["note"]
+    assert note.startswith("2 delivered, and their runtime says it read and opened 1 of them."), note
+    assert "For 1 sent over a transport no receipt had come when the send answered" in note and "aamio transport list" in note, note
+    assert "retry it from the outbox" not in note and "the service stored it" not in note, note
+    key = Keys(bytes(range(32))).public
+    assert normalize_traces({key: book}, 50, 100)[key]["sent"] == book["sent"], "via is kept when the file is read back"
+
+
+def test_a_send_over_a_transport_under_a_readable_profile_is_not_said_to_be_sealed():
+    nothing = trace_view({"sent": [carried(1, outcome="unknown", sealed=False)], "received": [], "last_read": None}, 50)["note"]
+    assert nothing.startswith("No message here has an answer from the service that confirms it was stored, or a receipt from their runtime over a transport."), nothing
+    assert "For 1 sent over a transport no receipt had come" in nothing
+    unnamed = trace_view({"sent": [carried(1, sealed=False)], "received": [], "last_read": None}, 50)["note"]
+    assert unnamed.startswith("Nothing has come back from them, so each is unknown, not unread."), unnamed
+    assert "every message here is sealed" not in unnamed and "the envelope a transport carried" in unnamed, unnamed
+    sealed = trace_view({"sent": [carried(1)], "received": [], "last_read": None}, 50)["note"]
+    assert "every message here is sealed to their key" in sealed

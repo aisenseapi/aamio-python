@@ -693,6 +693,8 @@ def message_shape(body, envelope):
 TRACE_SENT_FIELDS = {
     "message_id": str, "at": int, "w": str, "status": int, "outcome": str, "seq": int, "sha256": "hash",
     "sealed": bool, "bytes": int, "fields": list, "text_chars": int, "re": "hash", "seen": "hash",
+    # The transport a send went over. A send over HTTPS has none.
+    "via": str,
 }
 TRACE_RECEIVED_FIELDS = {
     "at": int, "channel": str, "w": str, "seq": int, "sha256": "hash", "encrypted": bool, "format": str,
@@ -758,6 +760,12 @@ def normalize_traces(traces, keep, keys):
     return books
 
 
+def sent_over(row):
+    """The transport a send in the trace went over, or None for a send over HTTPS."""
+    via = row.get("via")
+    return via if isinstance(via, str) and via else None
+
+
 def trace_view(book, limit):
     """One counterpart's record, with each message sent next to what came back about it.
 
@@ -766,19 +774,36 @@ def trace_view(book, limit):
     ones sent before it, not another channel's. The first version read one seen
     as covering every earlier send, so a side channel nobody had read showed as
     read (finding R1). A message nothing names is unknown, never unread.
+
+    A send over a transport is matched the same way, by the sha256 of the
+    envelope it carried, which is the sha256 their runtime reads it under.
     """
     sent_rows = [row for row in book.get("sent") or [] if isinstance(row, dict)]
     received_rows = [row for row in book.get("received") or [] if isinstance(row, dict)]
     claimed = {row["seen"] for row in received_rows if is_message_hash(row.get("seen"))}
     answered = {row["re"] for row in received_rows if is_message_hash(row.get("re"))}
     mine = {row["sha256"]: row for row in sent_rows if is_message_hash(row.get("sha256"))}
-    delivered = [row for row in sent_rows if row.get("status") == 201 and is_message_hash(row.get("sha256"))]
+
+    def arrived(row):
+        # Over HTTPS, the service's answer that it stored the message. A send
+        # over a transport has no such answer: it arrived when their runtime
+        # gave a receipt before the send answered, or when a message of theirs
+        # names it since. Its sha256 is known either way, since it is of the
+        # envelope this side wrote.
+        digest = row.get("sha256")
+        if not is_message_hash(digest):
+            return False
+        if sent_over(row):
+            return row.get("outcome") == "confirmed" or digest in claimed or digest in answered
+        return row.get("status") == 201
+
+    delivered = [row for row in sent_rows if arrived(row)]
     no_claim = [row.get("message_id") for row in delivered if row["sha256"] not in claimed]
     sent = []
 
     for record in sent_rows[-limit:]:
         row = dict(record)
-        stored = record.get("sha256") if record.get("status") == 201 and is_message_hash(record.get("sha256")) else None
+        stored = record.get("sha256") if arrived(record) else None
         row["seen_by_them"] = True if stored is not None and stored in claimed else None
         row["answered_by_them"] = True if stored is not None and stored in answered else None
         sent.append(row)
@@ -813,22 +838,41 @@ def trace_note(sent, received, delivered, no_claim, elsewhere):
     text again as new bytes, which is a second message. A claim naming such a
     send was put down to a message older than the record or sent from elsewhere.
     R5 of the follow-up review of 25 September 2026.
+
+    A send over a transport has no answer from the service. It has a receipt
+    from their runtime, or a claim of theirs that names it, and its sha256 is
+    of the envelope the transport carried. Such sends were not recorded at all
+    until the exchange over one local network of 16 November 2026 showed that
+    seen never named one, and what is said of a send over HTTPS is not said of
+    them.
     """
     if not sent:
         return "Nothing sent to them is recorded here."
 
+    carried = [row for row in sent if sent_over(row)]
     named = any(is_message_hash(row.get("seen")) for row in received)
-    turned_away = sum(1 for row in sent if row.get("outcome") == "refused" and row.get("status") != 201)
-    unsettled = len(sent) - len(delivered) - turned_away
+    turned_away = sum(1 for row in sent if not sent_over(row) and row.get("outcome") == "refused" and row.get("status") != 201)
+    unsettled = len(sent) - len(carried) - sum(1 for row in delivered if not sent_over(row)) - turned_away
+    without_receipt = len(carried) - sum(1 for row in delivered if sent_over(row))
 
     if not delivered:
         note = "No message here has an answer from the service that confirms it was stored."
+
+        if carried:
+            note = "No message here has an answer from the service that confirms it was stored, or a receipt from their runtime over a transport."
     elif not named:
         said = "Nothing from them has named a message of yours as read" if received else "Nothing has come back from them"
+        # A transport's profile can be readable, and then not every message is sealed.
+        sealed = not any(row.get("sealed") is False for row in sent)
         note = (said + ", so each is unknown, not unread. A client that does not send seen says nothing, and neither does one "
-                "that cannot open what it gets: every message here is sealed to their key, so a reader without it sees an "
-                "envelope and no text. The sha256 of each message is what the service stored, byte for byte; ask them for "
-                "the sha256 they read.")
+                "that cannot open what it gets" + (": every message here is sealed to their key, so a reader without it sees an "
+                                                   "envelope and no text." if sealed else "."))
+
+        if carried:
+            note += (" The sha256 of each message is of the bytes that went, byte for byte: what the service stored, or the "
+                     "envelope a transport carried; ask them for the sha256 they read.")
+        else:
+            note += " The sha256 of each message is what the service stored, byte for byte; ask them for the sha256 they read."
     else:
         note = "%d delivered, and their runtime says it read and opened %d of them." % (len(delivered), len(delivered) - len(no_claim))
 
@@ -837,13 +881,18 @@ def trace_note(sent, received, delivered, no_claim, elsewhere):
                      "the last of yours it had read when it was written, and this record keeps fifty each way." % len(no_claim))
 
     if elsewhere:
-        note += (" They named %d message(s) this record cannot match to a send the service confirmed: older than this record, "
-                 "sent from elsewhere, or sent from here without an answer that confirmed it." % len(elsewhere))
+        note += (" They named %d message(s) this record cannot match to a send %s: older than this record, "
+                 "sent from elsewhere, or sent from here without an answer that confirmed it." % (len(elsewhere), "recorded here" if carried else "the service confirmed"))
 
     if unsettled:
         note += (" For %d no answer settled whether the service stored it, so it may be stored already. Check each one's status "
                  "and outcome first, and if it must go again, retry it from the outbox: the same bytes are marked a replay "
                  "where the first arrived, and new bytes would be a second message." % unsettled)
+
+    if without_receipt:
+        note += (" For %d sent over a transport no receipt had come when the send answered, and nothing of theirs names it since. "
+                 "aamio transport list says how each stands now. The carrier sends the same bytes again by itself while its tries "
+                 "last, and sending the text again would be a second message." % without_receipt)
 
     if turned_away:
         note += " The service turned away %d; the status of each says why." % turned_away
@@ -4540,7 +4589,7 @@ class Runtime:
                 # weighing let 1310 bytes through a budget of 716 (a review of
                 # 10 November 2026).
                 if applying and entry["verified"] and sender_key:
-                    self._trace_safely("received", self._trace_received, channel, entry)
+                    self._trace_safely("received", self._trace_received, channel.label, channel.w, entry)
             entries.append(entry)
             # Received, readable, archived and handled are four different
             # things, and a failure at one must not be reported as the others.
@@ -4844,16 +4893,39 @@ class Runtime:
         if isinstance(entry.get("shape"), dict):
             record.update(entry["shape"])
 
-        record = trace_row(record, TRACE_SENT_FIELDS)
+        self._keep_sent(key, trace_row(record, TRACE_SENT_FIELDS), on)
 
+    def _trace_carried(self, key, result, body, on=None):
+        """One send over a transport, as the transport service answered it.
+
+        The mark names it, via says which transport it went over, and the
+        sha256 is of the envelope the transport carries: the sha256 their
+        runtime reads it under, and the one its seen names once it has read it.
+        There is no status, since there is no answer from the service.
+        """
+        record = {
+            "message_id": result.get("mark"),
+            "at": int(time.time()),
+            "outcome": result.get("status"),
+            "sha256": result.get("sha256"),
+            "sealed": result.get("sealed"),
+            "via": result.get("via"),
+        }
+        record.update(message_shape(body, b""))
+        record["bytes"] = result.get("bytes")
+        self._keep_sent(key, trace_row(record, TRACE_SENT_FIELDS), on)
+
+    def _keep_sent(self, key, record, on=None):
+        """A send in the record of its key, in place of an earlier row for the same message."""
         with self.lock:
             book = self._trace_book(key)
             kept = [r for r in book["sent"] if r.get("message_id") != record.get("message_id")]
             book["sent"] = (kept + [record])[-self.TRACE_KEEP:]
             self._save_trace(on)
 
-    def _trace_received(self, channel, entry, on=None):
-        """One verified message from a key, as it arrived here. Called under the lock.
+    def _trace_received(self, label, w, entry, on=None):
+        """One verified message from a key, as it arrived here: over HTTPS on the channel label and address w, or over a
+        transport, under the transport's name and with no address. Called under the lock.
 
         Recorded whether or not it could be opened, since one that could not is
         what a trace is for. Taken as read only when it could: last_read is what
@@ -4870,8 +4942,8 @@ class Runtime:
         body = entry["body"] if opened and isinstance(entry.get("body"), dict) else {}
         row = trace_row({
             "at": entry.get("at"),
-            "channel": channel.label,
-            "w": channel.w,
+            "channel": label,
+            "w": w,
             "seq": entry.get("seq"),
             "sha256": entry.get("sha256"),
             "encrypted": entry.get("encrypted"),
@@ -4891,7 +4963,7 @@ class Runtime:
         book["received"] = (book["received"] + [row])[-self.TRACE_KEEP:]
 
         if opened and entry.get("verified") is True and is_message_hash(entry.get("sha256")):
-            book["last_read"] = trace_row({"sha256": entry["sha256"], "seq": entry.get("seq"), "w": channel.w, "at": entry.get("at")}, TRACE_READ_FIELDS)
+            book["last_read"] = trace_row({"sha256": entry["sha256"], "seq": entry.get("seq"), "w": w, "at": entry.get("at")}, TRACE_READ_FIELDS)
 
         self._save_trace(on)
 
@@ -4899,8 +4971,9 @@ class Runtime:
         """What was sent to one counterpart and what came back, as hashes and shapes.
 
         who is a partner name, a key or a write address; without it, one line per
-        counterpart. Nothing here is content: the sha256 is what the service stored,
-        byte for byte, so the other side can hold its own trace against this one.
+        counterpart. Nothing here is content: the sha256 is of the bytes that went,
+        what the service stored or the envelope a transport carried, byte for byte,
+        so the other side can hold its own trace against this one.
         """
         limit = max(1, min(int(limit or 20), self.TRACE_KEEP))
         key = None if who is None else self._trace_key(who)
@@ -5502,13 +5575,18 @@ class Runtime:
         budget = getattr(self, "work_budget", None)
         wait = WAIT_DEFAULT if budget is None else max(1, min(WAIT_DEFAULT, int(budget)))
         result = self.transport_service().send(unb64url(partner["key"]), content, wait=wait)
-        sent = dict({"to": partner["name"]}, **result)
+        # The sha256 is of the envelope the transport carries: what their
+        # runtime reads it under and names as seen, as the sha256 of a send
+        # over HTTPS is what the service stored.
+        sent = {"to": partner["name"]}
+        sent.update((field, result[field]) for field in ("via", "profile", "mark", "sha256", "status"))
         sent["note"] = self.CARRIED_NOTES[result["status"]] % {"via": result["via"], "wait": wait}
         archive_error = self._archive_sent({"kind": "sent", "at": time.time(), "to": partner["name"], "via": result["via"], "profile": result["profile"],
                                             "mark": result["mark"], "status": result["status"],
                                             "body": body if archived_data is None else dict(body, data=archived_data)})
         if archive_error is not None:
             sent["archive_error"] = archive_error
+        self._trace_safely("sent", self._trace_carried, partner["key"], result, body, on=sent)
         return sent
 
     def _start_transports(self):
@@ -5662,13 +5740,23 @@ class Runtime:
             return False
 
     def _carried_handed_over(self, collected):
-        """What a read hands over that came over a transport: written to the archive, and then taken out of the carrier state."""
+        """What a read hands over that came over a transport: written to the archive and the trace, and then taken out of
+        the carrier state.
+
+        The trace is where the next message to that partner takes its seen
+        from, as poll records a message over HTTPS there. A message over a
+        transport went past it, so seen never named one, and aamio trace showed
+        nothing of it (the exchange over one local network of 16 November 2026).
+        """
         marks = []
         for entry in collected:
             if entry.get("mark") is None:
                 continue
             entry["archived"] = self._archive_carried(entry)
             marks.append(entry["mark"])
+            if entry.get("verified") is True and entry.get("from_key"):
+                with self.lock:
+                    self._trace_safely("received", self._trace_received, entry["channel"], None, entry)
         if not marks:
             return
         try:

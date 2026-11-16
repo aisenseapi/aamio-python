@@ -5,7 +5,9 @@ a UDP port of its own on 127.0.0.1 with the other named as its peer and
 broadcast off, so nothing leaves the machine, and the service is at
 http://127.0.0.1:9, where nobody answers. One home reads and waits, the other
 sends, and then the other way round: the same datagrams, the same carrier
-envelope and the same receipt, whichever runtime made them. PHP and Node are
+envelope and the same receipt, whichever runtime made them. The sender and the
+reader name the message by the same sha256, that of its envelope, and the
+answer names the first message as seen by it (B6 of contract 3). PHP and Node are
 found on the path or through AAMIO_TEST_PHP and AAMIO_TEST_NODE, as the other
 tests across runtimes find them; a pair whose runtime is not found here is
 skipped and says so.
@@ -107,6 +109,7 @@ def test_two_runtimes_exchange_a_message_each_way_over_the_local_network(tmp_pat
         assert bound[0] == 0 and bound[1]["routes"] == [{"transport": "lan", "profile": "sealed"}], bound[2]
     ports = dict(zip((first, second), free_ports(2)))
     env = {name: homes[name].lan(ports[name], ports[second if name == first else first]) for name in homes}
+    sent = {}
     for sender, receiver in ((first, second), (second, first)):
         reader, said, up = reading(homes[receiver], env[receiver])
         try:
@@ -120,6 +123,11 @@ def test_two_runtimes_exchange_a_message_each_way_over_the_local_network(tmp_pat
             assert [m["body"].get("text") for m in read["messages"]] == [text], (read, "".join(said))
             message = read["messages"][0]
             assert message["channel"] == "lan" and message["sender"] == sender and message["verified"] is True and message["encrypted"] is True
+            # Each runtime names it by the sha256 of its envelope, and an answer names as seen what its sender read. seen
+            # never named a message over a transport (the exchange over one local network of 16 November 2026).
+            assert message["sha256"] == answer["sha256"], (message, answer)
+            assert message["body"].get("seen") == sent.get(receiver), (message["body"], sent)
+            sent[sender] = answer["sha256"]
         finally:
             if reader.poll() is None:
                 reader.kill()

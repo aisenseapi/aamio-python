@@ -28,7 +28,7 @@ sys.path.insert(0, str(LAN))
 from aamio import addons, cli, mcp_server, transports
 from aamio.addon_process import AddonError, TransportManifest
 from aamio.errors import CodedLookupError, CodedRuntimeError, CodedValueError
-from aamio.runtime import Runtime
+from aamio.runtime import Runtime, is_message_hash
 
 NOWHERE = "http://127.0.0.1:9"
 
@@ -448,6 +448,58 @@ def test_a_scope_shared_over_a_transport_is_kept_and_its_key_is_never_shown_or_a
         sent = [json.loads(line) for line in archive_of(lan_env, "a").splitlines() if json.loads(line).get("kind") == "sent"]
         assert [row["body"]["data"] for row in sent] == [{"aamio_scope": {"name": "review", "access": "read"}}], "what was shared and with whom, never the key"
         assert key not in archive_of(lan_env, "a")
+    finally:
+        a.close()
+        b.close()
+
+
+@pytest.mark.parametrize("listener", [True, False], ids=["as serve reads", "as the command line reads"])
+def test_what_is_read_over_a_transport_is_named_as_seen_and_the_sender_sees_it_in_its_trace(lan_env, listener):
+    """seen never named a message that came over a transport: what was read over one went past the trace, where seen is
+    taken from, and a send over one was not recorded there either. In all three runtimes (the exchange over one local
+    network of 16 November 2026)."""
+    a, b = homes(lan_env)
+    got = []
+    try:
+        if listener:
+            b.start(require_inbox=False)
+        else:
+            reader = threading.Thread(target=lambda: got.extend(b.read(wait=25)), daemon=True)
+            reader.start()
+            until(lambda: b.transport_service().status().get("lan") == "up", what="the reader's transport never came up")
+        first = a.send("b", "første over nettet")
+        assert first["status"] == "confirmed" and is_message_hash(first["sha256"]), first
+        if listener:
+            got.extend(b.read(wait=10))
+        else:
+            reader.join(30)
+        assert [message["sha256"] for message in got] == [first["sha256"]], "both sides name it by the sha256 of its envelope"
+        assert "seen" not in got[0]["body"], "a had read nothing of b's"
+
+        back = b.send("a", "svar over nettet", answers=got[0]["sha256"])
+        assert back["status"] == "confirmed" and is_message_hash(back["sha256"]) and back["sha256"] != first["sha256"], back
+        answers = a.read(wait=10)
+        assert [(m["body"].get("seen"), m["body"].get("re")) for m in answers] == [(first["sha256"], first["sha256"])], "b read it, and says so"
+        assert answers[0]["sha256"] == back["sha256"]
+
+        mine = a.trace("b")
+        assert [(row["message_id"], row["via"], row["sha256"], row["outcome"], row["seen_by_them"], row["answered_by_them"]) for row in mine["sent"]] == [
+            (first["mark"], "lan", first["sha256"], "confirmed", True, True)], mine
+        sent = mine["sent"][0]
+        assert sent["sealed"] is True and sent["bytes"] > len("første over nettet") and sent["fields"] == ["from", "text"], sent
+        assert "status" not in sent and "w" not in sent and "seq" not in sent, "there is no answer from the service to tell of"
+        assert [(row["channel"], row["sha256"], row["seen"], row["re"]) for row in mine["received"]] == [("lan", back["sha256"], first["sha256"], first["sha256"])]
+        assert mine["received"][0]["acknowledges"]["sha256"] == first["sha256"] and mine["received"][0]["answers"]["sha256"] == first["sha256"]
+        assert mine["no_read_claim"] == [] and mine["note"].startswith("1 delivered, and their runtime says it read and opened 1 of them."), mine["note"]
+        assert mine["last_read"]["sha256"] == back["sha256"], "a has read b's answer, and its next message names it"
+
+        theirs = b.trace("a")
+        assert [(row["channel"], row["sha256"]) for row in theirs["received"]] == [("lan", first["sha256"])]
+        assert [(row["via"], row["sha256"], row["seen_by_them"]) for row in theirs["sent"]] == [("lan", back["sha256"], None)]
+        assert "unknown, not unread" in theirs["note"] and "the envelope a transport carried" in theirs["note"], theirs["note"]
+        assert "is what the service stored" not in theirs["note"]
+        listed = {row["with"]: (row["sent"], row["received"], row["no_read_claim"]) for row in a.trace()["counterparts"]}
+        assert listed == {"b": (1, 1, 0)}, listed
     finally:
         a.close()
         b.close()
