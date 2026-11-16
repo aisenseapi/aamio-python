@@ -509,3 +509,26 @@ def test_a_try_that_waits_for_room_is_not_begun_once_the_profile_is_of_another_m
     carrier.pump()
     assert medium.given == [] and carrier.queue == [] and key not in carrier.messages
     assert carrier.outcome(key) == "unknown" and len(said) == 1 and "not sent again" in said[0]
+
+
+def test_no_try_is_counted_or_sent_once_the_profile_is_of_another_mode(tmp_path):
+    """Finding 2, at the next try: the first try went readable, the profile became sealed, and the next try sent the
+    same readable bytes."""
+    clock = Clock()
+    profiles = {"readable": carry_state.profile(mode="readable"), "sealed": carry_state.profile(mode="sealed")}
+    now = {"mode": "readable"}
+    at_a, _at_b, session = opened_pair(profiles["readable"])
+    medium, said = Medium(room=1000), []
+    carrier = Carrier(at_a, medium, lambda pk: profiles[now["mode"]], [B.public_raw], clock=clock, wall=lambda: NOW, retry_seconds=2.0, tries=5, note=said.append)
+    key = carrier.send(B.public_raw, session, b"lesbar")
+    carrier.pump()
+    first = len(medium.given)
+    assert first > 0 and at_a.durable["outbox"][key]["tries"] == 1
+    now["mode"] = "sealed"
+    for _ in range(3):
+        clock.now += 2.1
+        carrier.pump()
+    assert len(medium.given) == first, "nothing went out after the profile became sealed"
+    assert at_a.durable["outbox"][key]["tries"] == 1 and key not in carrier.messages, "and no try was counted"
+    assert carrier.outcome(key) == "unknown" and at_a.durable["outbox"][key]["envelope"] is None
+    assert len(said) == 1 and key in said[0] and "not sent again" in said[0]

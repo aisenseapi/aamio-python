@@ -604,6 +604,92 @@ def test_a_message_written_readable_is_given_up_and_said_when_the_partner_is_bou
         a.close()
 
 
+def test_a_carrier_state_closed_after_a_failed_write_is_said_and_the_read_goes_on(lan_env):
+    """Finding 4, through the runtime: after a write of the carrier state failed, the next read answered from memory,
+    where the message was taken, and said nothing, while the file said it still waited. Now the read says the state is
+    closed and goes on with the rest, and a restart reads the file again."""
+    a = taken_in_unread(lan_env, ["taken in before the disk failed"])
+    b = Runtime(home=str(lan_env / "b"), host=NOWHERE, archive=False)
+    try:
+        in_the_way = pathlib.Path(b.transport_service().config.state_path() + ".tmp")
+        in_the_way.mkdir()
+        first = b.read(wait=0)
+        first_states = [note["state"] for note in b.attention_taken()]
+        second = b.read(wait=0)
+        notes = {(note["channel"], note["state"]): note["what"] for note in b.attention_taken()}
+        in_the_way.rmdir()
+        assert [m["body"]["text"] for m in first] == ["taken in before the disk failed"] and "not_taken" in first_states, (first, first_states)
+        assert second == [], "nothing is answered from memory once a write has failed"
+        assert "carry_storage_failed" in notes[("transports", "carry_unreadable")], notes
+    finally:
+        b.close()
+    # What could not be marked as taken comes again after a restart, with the same mark: the file never said it was taken.
+    b = Runtime(home=str(lan_env / "b"), host=NOWHERE, archive=False)
+    try:
+        again = b.read(wait=0)
+        assert [m["body"]["text"] for m in again] == ["taken in before the disk failed"] and again[0]["mark"] == first[0]["mark"]
+    finally:
+        a.close()
+        b.close()
+
+
+@pytest.mark.parametrize("bound", [True, False], ids=["bound", "after the last unbind"])
+def test_a_carrier_state_that_cannot_be_read_is_said_and_the_read_goes_on(lan_env, bound):
+    """Findings 4 and 7: a carrier state that cannot be read failed the whole read while a partner was bound, and with
+    none bound nothing said that something might wait in it."""
+    a, b = homes(lan_env)
+    a.close()
+    try:
+        if not bound:
+            transports.unbind(b, "a")
+        path = pathlib.Path(b.transport_service().config.state_path())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        if bound:
+            assert b.read(wait=0) == []
+        else:
+            # With nothing bound the read goes on as one without transports does, and here the service is out of reach.
+            with pytest.raises(CodedRuntimeError) as failed:
+                b.read(wait=0)
+            assert failed.value.error_code == "inbox_unavailable"
+        notes = {(note["channel"], note["state"]): note["what"] for note in b.attention_taken()}
+        assert "carry_state_unreadable" in notes.get(("transports", "carry_unreadable"), ""), notes
+    finally:
+        b.close()
+
+
+def test_a_transport_whose_carrier_cannot_be_made_stays_down_with_the_reason_and_its_process_is_stopped(lan_env, monkeypatch):
+    """Finding 4, in the service: with a carrier state that cannot be read the transport's process started and no carrier
+    could be made for it. It is stopped and left down with the reason, rather than left running or started every second."""
+    children = []
+
+    class Watched(transports.TransportProcess):
+        def start(self, *args, **kwargs):
+            try:
+                return super().start(*args, **kwargs)
+            finally:
+                children.append(self.process)
+
+    monkeypatch.setattr(transports, "TransportProcess", Watched)
+    a, b = homes(lan_env)
+    a.close()
+    try:
+        path = pathlib.Path(b.transport_service().config.state_path())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        service = b.transport_service()
+        service.start(background=False)
+        said = service.status()["lan"]
+        assert said.startswith("down: ") and "carry_state_unreadable" in said and "stays down" in said, said
+        assert len(children) == 1 and service.running["lan"]["process"] is None and service.running["lan"]["carrier"] is None
+        until(lambda: children[0].poll() is not None, what="the transport process lived on with no carrier")
+        for _ in range(3):
+            service.pump()
+        assert service.status()["lan"] == said and len(children) == 1, "it is not started again"
+    finally:
+        b.close()
+
+
 # ------------------------------------------------------------------ the health check of 2026-11-16
 
 from aamio.addon_process import Manifest
