@@ -27,7 +27,12 @@ from . import storage
 from .client import AamioClient, DEFAULT_HOST, is_scope_address, is_scope_key, make_scope_key, normalize_allow, scope_address
 from .gate import GateStop, board_advised_bits, describe as describe_seconds, plan as gate_plan, solve as gate_solve, solve_board
 from .errors import CodedLookupError, CodedRuntimeError, CodedValueError
+from .carry import CarryRefused
 from .crypto import Keys, board_delete_signing_input, board_signing_input, check_message, is_envelope, is_key, key_hash, presence_signing_input, sha256hex, thread_signing_input, unb64url
+
+# What asking the transports for what they hold can raise: bindings that cannot be read, or a carrier state that cannot
+# be read or was closed after a write that failed. A read says it and goes on with what it can still reach.
+CARRY_ERRORS = (RuntimeError, CarryRefused)
 
 INBOX_TTL = 3600
 # The board's own default, mirrored here so an ordinary post gets the same
@@ -2131,9 +2136,21 @@ class Runtime:
         if partner is None:
             raise CodedValueError("unknown_partner", "a scope is shared only with a partner in your address book, by name. Never with an address, which can be anyone's")
         share = {"name": entry["name"], "key": entry["key"]} if access == "read" else {"name": entry["name"], "address": entry["address"]}
-        w, key = self.address_for(partner["name"])
+        text = "Scope %s, shared to %s." % (entry["name"], "read and post" if access == "read" else "post only")
         # The archive keeps what was shared and with whom, never the key.
-        sent = self._send(w, key, partner["name"], "Scope %s, shared to %s." % (entry["name"], "read and post" if access == "read" else "post only"), {"aamio_scope": share}, archived_data={"aamio_scope": {"name": entry["name"], "access": access}})
+        archived = {"aamio_scope": {"name": entry["name"], "access": access}}
+        # A partner bound to a transport gets it there, as every message to it goes, and never over HTTPS instead.
+        # Under a readable profile it does not go at all: everyone who hears the medium would read the key, and the
+        # partner's runtime takes a scope only when it comes sealed.
+        bound = self._bound_partner(partner["key"])
+        if bound is not None:
+            profile = self.transport_service().profile_for(unb64url(bound["key"]))
+            if profile["mode"] != "sealed":
+                raise CodedValueError("scope_needs_sealed", "%s is bound to a transport under a readable profile, and a scope is only shared sealed: everyone who hears the medium would read it, and %s's aamio takes a scope only when it comes sealed. Bind %s under a sealed profile first: aamio transport unbind, then aamio transport bind" % (bound["name"], bound["name"], bound["name"]))
+            sent = self._send_carried(bound, text, {"aamio_scope": share}, None, archived_data=archived)
+            return dict(sent, scope=entry["name"], access=access)
+        w, key = self.address_for(partner["name"])
+        sent = self._send(w, key, partner["name"], text, {"aamio_scope": share}, archived_data=archived)
         return dict(sent, scope=entry["name"], access=access)
 
     def _shared_scope_name(self, partner, name):
@@ -5064,13 +5081,13 @@ class Runtime:
             carried_service = self._carried_service()
             collected = []
             online = True
+            # What came over a transport is on this machine already, so its byte budget is kept here, for each
+            # transport as for each channel: what this read has handed over of each so far, across its waits.
+            carried_budget = {"max_bytes": max_bytes, "used": {}, "taken": {}, "full": []}
             if carried_service is not None:
                 if wait:
                     carried_service.start(background=True)
-                ready = self._carried_ready(self._carried_entries(carried_service))
-                collected.extend(ready[:limit])
-                if len(ready) > limit:
-                    self._note_trouble("read", "more_carried", "%d more that came over a transport wait for the next read, in the order they came." % (len(ready) - limit))
+                self._carried_take(self._carried_ready(self._carried_entries(carried_service)), collected, limit, carried_budget)
                 try:
                     self.ensure_inbox()
                     self.publish_presence()
@@ -5136,7 +5153,7 @@ class Runtime:
             # with this answer, at the end of the wait: only the first channel
             # can end the wait early.
             if not collected and wait and carried_service is not None:
-                self._wait_with_transports(carried_service, collected, limit, int(wait), answered, ask, not_asked_after)
+                self._wait_with_transports(carried_service, collected, limit, int(wait), answered, ask, not_asked_after, carried_budget)
             elif not collected and wait and answered:
                 ask(answered[0], wait, not_asked_after)
                 for channel in answered[1:]:
@@ -5466,8 +5483,13 @@ class Runtime:
             return None
         return partner if service.config.routes(partner["key"]) else None
 
-    def _send_carried(self, partner, text, data, answers):
-        """A message to a partner bound to a transport: the body HTTPS carries, without reply_to, and sealed by the carrier."""
+    def _send_carried(self, partner, text, data, answers, archived_data=None):
+        """A message to a partner bound to a transport: the body HTTPS carries, without reply_to, and sealed by the carrier.
+
+        archived_data stands in for data in the archive, as it does over HTTPS:
+        a scope shared this way left its key in the archive of the one who
+        shared it (the follow-up check of 15 November 2026).
+        """
         body = {"from": self.keys.hash[:8]}
         if text is not None:
             body["text"] = str(text)
@@ -5483,7 +5505,8 @@ class Runtime:
         sent = dict({"to": partner["name"]}, **result)
         sent["note"] = self.CARRIED_NOTES[result["status"]] % {"via": result["via"], "wait": wait}
         archive_error = self._archive_sent({"kind": "sent", "at": time.time(), "to": partner["name"], "via": result["via"], "profile": result["profile"],
-                                            "mark": result["mark"], "status": result["status"], "body": body})
+                                            "mark": result["mark"], "status": result["status"],
+                                            "body": body if archived_data is None else dict(body, data=archived_data)})
         if archive_error is not None:
             sent["archive_error"] = archive_error
         return sent
@@ -5492,7 +5515,8 @@ class Runtime:
         """With the listener: the transports bound to partners run, and what comes over them goes where read takes it."""
         try:
             service = self.transport_service()
-            if service is not None and service.bound():
+            # Also with nothing bound: what came over a transport before the last unbind is still to be read.
+            if service is not None and (service.bound() or service.has_pending()):
                 service.start(background=True, offer=self._offer_carried)
         except Exception as error:
             self._note_trouble("transports", "not_started", "the transports could not be started: %s: %s. Nothing goes over them in this process, and partners bound to them are not sent to." % (error.__class__.__name__, error))
@@ -5508,27 +5532,97 @@ class Runtime:
             service.stop()
 
     def _carried_service(self):
-        """The transport service when a partner is bound to a transport, else None; a binding file that cannot be read is said."""
+        """The transport service when a partner is bound to a transport or something that came over one waits to be
+        read, else None; a binding file or a carrier state that cannot be read is said.
+
+        What has come is read whatever is bound now: asked only whether a
+        partner was bound, a message that came before the last unbind was not
+        read, while unbind said it still would be (the follow-up check of 15
+        November 2026).
+        """
         service = self.transport_service()
         if service is None:
             return None
         try:
-            return service if service.bound() else None
+            bound = service.bound()
         except RuntimeError as error:
             self._note_trouble("transports", "unreadable", "%s. What came over a transport waits in the home until then." % error)
             return None
+        try:
+            return service if bound or service.has_pending() else None
+        except CARRY_ERRORS as error:
+            self._note_trouble("transports", "carry_unreadable", "%s. What came over a transport waits in the home until then." % error)
+            return None
 
     def _carried_entries(self, service, skip=()):
-        """What came over a transport, as read hands it over: archived is said when it is handed over."""
-        entries = service.entries(skip)
+        """What came over a transport, as read hands it over: archived is said when it is handed over.
+
+        A carrier state closed after a write that failed answers nothing from
+        memory: said, and the rest of the read goes on.
+        """
+        try:
+            entries = service.entries(skip)
+        except CARRY_ERRORS as error:
+            self._note_trouble("transports", "carry_unreadable", "%s. What came over a transport waits in the home until then." % error)
+            return []
         for entry in entries:
             entry["archived"] = False
             if not self.archive_enabled:
                 entry["archive_off"] = True
         return entries
 
+    def _carried_scope(self, entry, weigh=False):
+        """A scope in a message that came over a transport, taken as one over HTTPS is: kept when it came sealed from a
+        partner in the address book, and its key out of the message either way, before the message is weighed, shown or
+        archived. Once for each entry: what it leaves in the message is no share to take again."""
+        with self.lock:
+            self._take_scope_share(entry, apply=self.partner_by_key(entry["from_key"]) is not None, weigh=weigh)
+
+    def _carried_weight(self, entry):
+        """The bytes of a carried message as this read would hand it over, on a copy and keeping nothing: the listener's measure."""
+        shown = copy.deepcopy(entry)
+        self._carried_scope(shown, weigh=True)
+        return len(json.dumps(shown, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+    def _carried_take(self, ready, collected, limit, budget):
+        """Carried messages into a read's answer in the order they came, within its limit and its byte budget for each transport.
+
+        Only what goes into the answer is taken; the rest stays in the home for
+        the next read. Whole messages: one that is larger than the whole budget
+        and first on its transport is handed over on its own and said, as a
+        message already on this machine is everywhere else, rather than kept
+        back for ever. Three messages of 600 characters came whole on a budget
+        of 512, and nothing said so (the follow-up check of 15 November 2026).
+        """
+        max_bytes, used, taken, full = budget["max_bytes"], budget["used"], budget["taken"], budget["full"]
+        past_limit = 0
+        for entry in ready:
+            where = entry["channel"]
+            if len(collected) >= limit:
+                past_limit += 1
+                continue
+            if max_bytes is not None:
+                if where in full:
+                    continue
+                weight = self._carried_weight(entry)
+                if taken.get(where) and used.get(where, 0) + weight > max_bytes:
+                    full.append(where)
+                    continue
+                if not taken.get(where) and weight > max_bytes:
+                    self._note_trouble(where, "over_budget", "a message that came over %s is %d bytes as handed over here, larger than the whole byte budget of %d this read asked for. It was already on this machine, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose." % (where, weight, max_bytes))
+                used[where] = used.get(where, 0) + weight
+                taken[where] = taken.get(where, 0) + 1
+            self._carried_scope(entry)
+            collected.append(entry)
+        if past_limit:
+            self._note_trouble("read", "more_carried", "%d more that came over a transport wait for the next read, in the order they came." % past_limit)
+        if full:
+            self._note_trouble("read", "more_carried_bytes", "this read stopped at the byte budget it asked for on %s, %d bytes of messages for each transport. The rest waits in the home in the order it came, and the next read hands it over; nothing was dropped." % (", ".join(dict.fromkeys(full)), max_bytes))
+
     def _offer_carried(self, entry):
-        """For the listener's read: a message that came over a transport, in the queue the read takes from."""
+        """For the listener's read: a message that came over a transport, in the queue the read takes from, with a scope
+        in it taken as the listener takes one over HTTPS: before the message waits where a read weighs it."""
+        self._carried_scope(entry)
         entry["archived"] = False
         if not self.archive_enabled:
             entry["archive_off"] = True
@@ -5539,6 +5633,8 @@ class Runtime:
         ready = []
         for entry in entries:
             if self.partner_by_key(entry["from_key"]) is None:
+                # The key of a scope in it comes out before it goes to the archive, and nothing is kept from it.
+                self._carried_scope(entry)
                 self._carried_withheld(entry)
             else:
                 ready.append(entry)
@@ -5581,9 +5677,17 @@ class Runtime:
             self._note_trouble("transports", "not_taken", "%d message(s) that came over a transport were handed over and could not be marked as taken: %s: %s. They may come again, with the same mark." % (
                 len(marks), error.__class__.__name__, error))
 
-    def _wait_with_transports(self, service, collected, limit, wait, answered, ask, not_asked_after):
+    def _wait_with_transports(self, service, collected, limit, wait, answered, ask, not_asked_after, budget):
         """A read that waits, on the command line, with transports running: the inbox in short waits, and what came over a transport between them."""
         until = time.monotonic() + wait
+
+        def something_came():
+            # A carrier state closed after a write that failed has nothing to say: the wait runs out, and the read says why.
+            try:
+                return bool(service.carry().pending())
+            except CARRY_ERRORS:
+                return False
+
         while not collected:
             left = until - time.monotonic()
             if left <= 0:
@@ -5591,9 +5695,9 @@ class Runtime:
             piece = max(1, min(self.CARRIED_SLICE, int(left)))
             state = ask(answered[0], piece, not_asked_after) if answered else None
             if state not in ("ok", "gone"):
-                service._wait(lambda: bool(service.carry().pending()), time.monotonic() + min(left, piece))
+                service._wait(something_came, time.monotonic() + min(left, piece))
             taken = {entry["mark"] for entry in collected if entry.get("mark")}
-            collected.extend(self._carried_ready(self._carried_entries(service, skip=taken))[: max(0, limit - len(collected))])
+            self._carried_take(self._carried_ready(self._carried_entries(service, skip=taken)), collected, limit, budget)
         for channel in answered[1:]:
             ask(channel, 0, not_asked_after)
 

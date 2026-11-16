@@ -102,7 +102,7 @@ class Radio:
             message = json.loads(line)
             kind = message.get("t")
             if kind == "hello":
-                self.say({"t": "describe", "name": NAME, "version": VERSION, "aamio_addon": 3, "medium": "simulated radio",
+                self.say({"t": "describe", "name": NAME, "version": VERSION, "aamio_addon": 3, "medium": "sim-radio",
                           "properties": {"max_frame_up": self.max_frame, "max_frame_down": self.max_frame, "rate_up": self.rate,
                                          "rate_down": self.rate, "direction": "duplex", "addressing": "device", "link_ack": False,
                                          "airtime": None, "metadata_visible_to": "range", "medium_encrypts": False}})

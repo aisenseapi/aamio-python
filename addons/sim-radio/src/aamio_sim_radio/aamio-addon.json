@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "A simulated radio over UDP on 127.0.0.1, with small frames, a slow rate, and frames that are lost, doubled or put out of order. For tests; nothing leaves this machine.",
   "transport": {
-    "medium": "simulated radio",
+    "medium": "sim-radio",
     "start": {"python": "aamio_sim_radio.transport"},
     "platforms": ["linux", "darwin", "win32"],
     "permissions": ["network_local"]

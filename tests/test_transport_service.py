@@ -388,3 +388,242 @@ def test_enable_reads_the_transport_from_its_manifest_probes_it_and_says_what_it
     assert code == 2 and "--lifetime is a whole number" in err
     code, out, _ = cli_main(["--home", home, "transport", "unbind", "other"], monkeypatch)
     assert code == 0 and json.loads(out)["routes"] == [] and "over HTTPS again" in json.loads(out)["note"]
+
+
+# ------------------------------------------------------------------ the follow-up check of 2026-11-15, findings 1, 2, 6, 7 and 8
+
+from aamio import carry_state
+
+
+def until(condition, seconds=15, what="it never came"):
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, what
+        time.sleep(0.05)
+
+
+def archive_of(tmp_path, home):
+    return "".join(path.read_text(encoding="utf-8") for path in (tmp_path / home / "archive").glob("*.jsonl"))
+
+
+def taken_in_unread(tmp_path, texts):
+    """Homes a and b after a sent the texts and b took them in without anybody reading them: b is closed, a is still open."""
+    a, b = homes(tmp_path)
+    try:
+        b.start(require_inbox=False)
+        for text in texts:
+            assert a.send("b", text)["status"] == "confirmed"
+    finally:
+        b.close()
+    return a
+
+
+@pytest.mark.parametrize("listener", [True, False], ids=["as serve reads", "as the command line reads"])
+def test_a_scope_shared_over_a_transport_is_kept_and_its_key_is_never_shown_or_archived(lan_env, listener):
+    """Finding 1: a scope that came over a transport went past the scope handling: the key was shown to the reader and
+    written to the archive, and no scope was kept. And the one who shared it kept the key in its archive of what it sent."""
+    a, b = homes(lan_env)
+    got = []
+    try:
+        a.scope_new("review")
+        key = a.scope_key("review")["key"]
+        if listener:
+            b.start(require_inbox=False)
+        else:
+            reader = threading.Thread(target=lambda: got.extend(b.read(wait=25)), daemon=True)
+            reader.start()
+            until(lambda: b.transport_service().status().get("lan") == "up", what="the reader's transport never came up")
+        shared = a.scope_share("review", "b", "read")
+        assert shared["status"] == "confirmed" and shared["via"] == "lan" and (shared["scope"], shared["access"]) == ("review", "read"), shared
+        if listener:
+            got.extend(b.read(wait=10))
+        else:
+            reader.join(30)
+        assert len(got) == 1, got
+        view = got[0]["body"]["data"]["aamio_scope"]
+        assert view["kept"] is True and view["shared_as"] == "review" and view["can_read"] is True and "key" not in view, view
+        assert key not in json.dumps(got), "the key never reaches whoever reads the message"
+        assert [scope["name"] for scope in b.scope_list()] == ["a.review"] and b.scope_key("a.review")["key"] == key
+        assert got[0]["archived"] is True and key not in archive_of(lan_env, "b"), "the archive has the message, and not the key"
+        sent = [json.loads(line) for line in archive_of(lan_env, "a").splitlines() if json.loads(line).get("kind") == "sent"]
+        assert [row["body"]["data"] for row in sent] == [{"aamio_scope": {"name": "review", "access": "read"}}], "what was shared and with whom, never the key"
+        assert key not in archive_of(lan_env, "a")
+    finally:
+        a.close()
+        b.close()
+
+
+def test_a_scope_is_not_shared_under_a_readable_profile_and_one_that_comes_readable_is_not_kept(lan_env):
+    """Finding 1: under a readable profile everyone who hears the medium would read the key, so it does not go; and a
+    message that carries one all the same has it taken out, and nothing is kept from it."""
+    a, b = homes(lan_env)
+    try:
+        for runtime, partner in ((a, "b"), (b, "a")):
+            transports.unbind(runtime, partner)
+            transports.profile_add(runtime, "open", readable=True)
+            transports.bind(runtime, partner, "lan", "open")
+        a.scope_new("review")
+        key = a.scope_key("review")["key"]
+        with pytest.raises(CodedValueError) as refused:
+            a.scope_share("review", "b", "read")
+        assert refused.value.error_code == "scope_needs_sealed" and "readable" in str(refused.value)
+        assert a.transport_service().outbox() == [] and a.outbox == {}, "nothing went, over the transport or over HTTPS"
+        b.start(require_inbox=False)
+        assert a.send("b", "by hand", {"aamio_scope": {"name": "review", "key": key}})["status"] == "confirmed"
+        got = b.read(wait=10)
+        assert len(got) == 1 and got[0]["encrypted"] is False, got
+        view = got[0]["body"]["data"]["aamio_scope"]
+        assert view["kept"] is False and "sealed" in view["note"] and key not in json.dumps(got), view
+        assert b.scope_list() == [] and key not in archive_of(lan_env, "b")
+    finally:
+        a.close()
+        b.close()
+
+
+def test_the_byte_budget_holds_for_what_came_over_a_transport_and_only_what_is_handed_over_is_taken(lan_env):
+    """Finding 6: three messages of 600 characters came whole on a budget of 512, all three were taken, and nothing said so."""
+    a = taken_in_unread(lan_env, ["%d %s" % (n, "x" * 600) for n in range(3)])
+    b = Runtime(home=str(lan_env / "b"), host=NOWHERE, archive=False)
+    try:
+        first = b.read(wait=0, max_bytes=512)
+        assert [m["body"]["text"][:2] for m in first] == ["0 "], "one larger than the whole budget comes on its own, as a message already here does"
+        notes = {note["state"]: note for note in b.attention_taken()}
+        assert notes["over_budget"]["channel"] == "lan" and "512" in notes["over_budget"]["what"], notes
+        assert "lan" in notes["more_carried_bytes"]["what"] and "nothing was dropped" in notes["more_carried_bytes"]["what"], notes
+        assert len(b.transport_service().carry().pending()) == 2, "only what was handed over is taken"
+        rest = b.read(wait=0, max_bytes=4096)
+        assert [m["body"]["text"][:2] for m in rest] == ["1 ", "2 "], "whole messages within the budget, in the order they came"
+        assert "more_carried_bytes" not in {note["state"] for note in b.attention_taken()}
+        assert b.transport_service().carry().pending() == [] and b.read(wait=0, max_bytes=512) == []
+    finally:
+        a.close()
+        b.close()
+
+
+def test_a_budget_two_messages_fit_under_leaves_the_third_for_the_next_read(lan_env):
+    a = taken_in_unread(lan_env, ["%d %s" % (n, "x" * 600) for n in range(3)])
+    b = Runtime(home=str(lan_env / "b"), host=NOWHERE, archive=False)
+    try:
+        weight = len(json.dumps(b.transport_service().entries()[0], ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        got = b.read(wait=0, max_bytes=2 * weight + 100)
+        assert [m["body"]["text"][:2] for m in got] == ["0 ", "1 "]
+        states = {note["state"] for note in b.attention_taken()}
+        assert "more_carried_bytes" in states and "over_budget" not in states
+        assert [m["body"]["text"][:2] for m in b.read(wait=0)] == ["2 "]
+    finally:
+        a.close()
+        b.close()
+
+
+@pytest.mark.parametrize("listener", [True, False], ids=["as serve reads", "as the command line reads"])
+def test_what_came_before_the_last_unbind_is_still_read(lan_env, listener):
+    """Finding 7: read asked whether a partner was bound before it looked at what had come, so after the last unbind
+    a message that waited was not read, while unbind said it still would be."""
+    a = taken_in_unread(lan_env, ["before the unbind"])
+    b = Runtime(home=str(lan_env / "b"), host=NOWHERE, archive=False)
+    try:
+        said = transports.unbind(b, "a")
+        assert said["routes"] == [] and "is still read" in said["note"]
+        if listener:
+            b.start(require_inbox=False)
+        got = b.read(wait=3 if listener else 0)
+        assert [m["body"]["text"] for m in got] == ["before the unbind"], got
+        assert got[0]["channel"] == transports.UNBOUND_CHANNEL and got[0]["sender"] == "a" and got[0]["profile"] is None
+        assert b.transport_service().carry().pending() == []
+        assert b.transport_service().status() == {}, "nothing is bound, so no transport was started to read it"
+    finally:
+        a.close()
+        b.close()
+
+
+def test_a_message_from_a_key_that_left_the_book_is_still_withheld_after_the_last_unbind(lan_env):
+    """Finding 7 keeps the check against the address book: what waits from a key no longer in it is not handed over."""
+    a = taken_in_unread(lan_env, ["from one who left"])
+    b = Runtime(home=str(lan_env / "b"), host=NOWHERE, archive=False)
+    try:
+        b.partner_remove("a")
+        assert transports.Config(str(lan_env / "b")).bindings() == {}
+        assert b.read(wait=0) == []
+        assert any(note["state"] == "removed_key" for note in b.attention_taken())
+        assert b.transport_service().carry().pending() == []
+    finally:
+        a.close()
+        b.close()
+
+
+def test_a_transport_no_partner_is_bound_to_any_more_is_stopped_and_one_bound_again_is_started(lan_env):
+    """Finding 8: after the only partner was removed the transport ran on, held its port and would have been started
+    again after a crash."""
+    port_a, port_b = free_ports(2)
+    a, b = homes(lan_env, (port_a, port_b))
+    try:
+        b.start(require_inbox=False)
+        service = b.transport_service()
+        until(lambda: service.status().get("lan") == "up", what="the transport never came up")
+        child = service.running["lan"]["process"].process
+        assert child.poll() is None
+        b.partner_remove("a")
+        until(lambda: "lan" not in service.status(), what="the transport was not taken out of what runs")
+        until(lambda: child.poll() is not None, what="the transport process lived on")
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.bind(("127.0.0.1", port_b))
+        b.partner_add("a", a.keys.public)
+        transports.bind(b, "a", "lan")
+        until(lambda: service.status().get("lan") == "up", what="a transport bound again was not started")
+        assert a.send("b", "after the new binding")["status"] == "confirmed"
+        assert [m["body"]["text"] for m in b.read(wait=10)] == ["after the new binding"]
+    finally:
+        a.close()
+        b.close()
+
+
+def test_a_message_written_readable_is_given_up_and_said_when_the_partner_is_bound_sealed(lan_env):
+    """Finding 2, through the runtime: the owner takes the outbox up, gives the readable message up, and says so in attention."""
+    a, b = homes(lan_env)
+    b.close()
+    try:
+        readable = transports.checked(transports.profile_record("open", mode="readable"))
+        state, other, now = a.transport_service().carry(), carry_state.CarryState(b.keys), int(time.time())
+        session, ask = state.ask(b.keys.public_raw, readable, 0.0)
+        _, challenge, _ = other.deliver(ask, [a.keys.public_raw], readable, 0.0, now)
+        state.deliver(challenge, [b.keys.public_raw], readable, 0.0, now)
+        state.send(b.keys.public_raw, session, b"readable", readable)
+        mark = carry_state.mark(b.keys.public_raw, session, 1)
+        service = a.transport_service()
+        service.start(background=False)
+        deadline = time.monotonic() + 15
+        while service.status().get("lan") != "up":
+            assert time.monotonic() < deadline, service.status()
+            service.pump()
+        for _ in range(5):
+            service.pump()
+        assert service.outbox() == [{"mark": mark, "outcome": "unknown"}]
+        notes = [note for note in a.attention_taken() if note["state"] == "not_sent_again"]
+        assert len(notes) == 1 and notes[0]["channel"] == "lan" and mark in notes[0]["what"] and "sealed" in notes[0]["what"], notes
+    finally:
+        a.close()
+
+
+# ------------------------------------------------------------------ the health check of 2026-11-16
+
+from aamio.addon_process import Manifest
+
+OWN_MANIFESTS = sorted((ROOT / "addons").glob("*/src/*/aamio-addon.json"))
+
+
+@pytest.mark.parametrize("path", OWN_MANIFESTS, ids=lambda path: path.parent.name)
+def test_every_add_on_in_this_repository_has_a_manifest_the_core_takes(path):
+    """The simulated radio named its medium in two words, and the rule that a medium is a name refused the add-on
+    outright: with it on the path, nothing that loads the add-ons got as far as its arguments."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    read = {2: Manifest, 3: TransportManifest}[data["aamio_addon"]]
+    manifest = read("aamio-" + data["name"], path.parent.name, str(path), data, "fix")
+    assert manifest.NAME == data["name"]
+    if data["aamio_addon"] == 3:
+        # What it says in describe is what its manifest says, or enable refuses it at the probe.
+        source = (path.parent / "transport.py").read_text(encoding="utf-8")
+        assert '"medium": "%s"' % manifest.medium in source, "describe names another medium than the manifest"
+
+
+def test_there_are_manifests_to_check():
+    assert {path.parent.name for path in OWN_MANIFESTS} >= {"aamio_lan", "aamio_sim_radio"}

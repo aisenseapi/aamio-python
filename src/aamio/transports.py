@@ -44,9 +44,18 @@ WAIT_DEFAULT = 30
 # How often a running carrier's list of whom it takes messages from is read again: a partner removed meanwhile, over MCP
 # or by another runtime on the same home, is taken from no longer than this after.
 KNOWN_REFRESH = 2.0
-# How often a file under transports/ is tried again while another reader holds it, as the transports' own thread
+# How often a file under transports/ is tried again while another program holds it, as an indexer or a sync client
 # does on Windows for a moment, and how long between: a replace that met a reader is not a file that cannot be written.
-HELD_TRIES, HELD_PAUSE = 20, 0.05
+# Within this process readers and writers take turns under a lock of the folder's own, so they never meet.
+HELD_TRIES, HELD_PAUSE = 100, 0.05
+_LOCKS = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _folder_lock(folder):
+    """One lock per transports/ folder in this process, whichever Config reads or writes it."""
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(os.path.normcase(os.path.abspath(folder)), threading.RLock())
 # What a carried message is filed under when the partner it came from is no longer bound to a transport.
 UNBOUND_CHANNEL = "carry"
 _PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
@@ -146,8 +155,15 @@ class Config:
     def __init__(self, home):
         self.home = home
         self.dir = os.path.join(home, "transports")
+        # The transports' own thread reads these files while the runtime may change them: on Windows a replace that met
+        # a reader failed, also after a second of tries under load (the follow-up check of 15 November 2026).
+        self.lock = _folder_lock(self.dir)
 
     def _read(self, name, field):
+        with self.lock:
+            return self._read_held(name, field)
+
+    def _read_held(self, name, field):
         path = os.path.join(self.dir, name)
         value = None
         for attempt in range(HELD_TRIES):
@@ -172,6 +188,10 @@ class Config:
         return value[field]
 
     def _write(self, name, field, value):
+        with self.lock:
+            self._write_held(name, field, value)
+
+    def _write_held(self, name, field, value):
         storage.make_private_dir(self.dir)
         path = os.path.join(self.dir, name)
         with storage.open_private(path + ".tmp") as handle:
@@ -311,6 +331,13 @@ class Service:
         """Whether some partner in the address book is bound to a transport; transport_config_unreadable when that cannot be known."""
         return any(self.runtime.partner_by_key(key) is not None for key in self.config.bindings())
 
+    def has_pending(self):
+        """Whether something came over a transport and waits for a read, whatever is bound now: an unbind leaves it to be read."""
+        if not os.path.exists(self.config.state_path()):
+            return False
+        with self.lock:
+            return bool(self.carry().pending())
+
     def wanted(self):
         """Every transport a partner in the address book is bound to, in the order first named."""
         names = []
@@ -346,13 +373,7 @@ class Service:
         with self.lock:
             if offer is not None:
                 self.offer = offer
-            manifests = self.manifests()
-            for name in self.wanted():
-                if name not in self.running:
-                    self.running[name] = {"manifest": manifests.get(name), "process": None, "carrier": None, "crashes": [], "next": 0.0, "down": None}
-                    if manifests.get(name) is None:
-                        self.running[name]["down"] = "%s is bound to a partner and is not an enabled transport here: aamio addon enable %s" % (name, name)
-                        self.runtime.log("transport %s: %s" % (name, self.running[name]["down"]))
+            self._add(self.wanted())
             self._start_due()
             if self.offer is not None:
                 self._offer()
@@ -361,6 +382,51 @@ class Service:
             self.thread = threading.Thread(target=self._loop, daemon=True)
             self.thread.start()
         return self
+
+    def _add(self, names):
+        """Transports to run, each once, with the manifests read only when one is new."""
+        manifests = None
+        for name in names:
+            if name in self.running:
+                continue
+            manifests = self.manifests() if manifests is None else manifests
+            self.running[name] = {"manifest": manifests.get(name), "process": None, "carrier": None, "crashes": [], "next": 0.0, "down": None}
+            if manifests.get(name) is None:
+                self.running[name]["down"] = "%s is bound to a partner and is not an enabled transport here: aamio addon enable %s" % (name, name)
+                self.runtime.log("transport %s: %s" % (name, self.running[name]["down"]))
+
+    def _say(self, name, text):
+        """What a carrier has to tell the user, in attention under the transport's name: added to what waits there unread."""
+        runtime = self.runtime
+        note = getattr(runtime, "_note_trouble", None)
+        if note is None:
+            runtime.log("transport %s: %s" % (name, text))
+            return
+        with runtime.lock:
+            earlier = (getattr(runtime, "attention", None) or {}).get((name, "not_sent_again"))
+        note(name, "not_sent_again", text if earlier is None else "%s %s" % (earlier["what"], text))
+
+    def _refresh(self):
+        """Who each running carrier takes messages from, read again; a transport no partner is bound to any more is
+        stopped, so it no longer holds its port, and one bound meanwhile is started (the follow-up check of 15 November)."""
+        try:
+            wanted = self.wanted()
+        except RuntimeError as error:
+            # Whom to take messages from is not known while the bindings cannot be read: no one, then, and nothing stopped.
+            for name, entry in self.running.items():
+                if entry["carrier"] is not None:
+                    entry["carrier"].known = []
+            self.runtime.log("transports: %s" % error)
+            return
+        for name in [name for name in self.running if name not in wanted]:
+            entry = self.running.pop(name)
+            if entry["process"] is not None:
+                entry["process"].stop()
+            self.runtime.log("transport %s: stopped, since no partner in the address book is bound to it any more" % name)
+        self._add(wanted)
+        for name, entry in self.running.items():
+            if entry["carrier"] is not None:
+                entry["carrier"].known = self.known_for(name)
 
     def _start_due(self):
         now = time.monotonic()
@@ -373,12 +439,19 @@ class Service:
                                        environment_for(manifest, folder, base=self.environ), log=self.runtime.log)
             try:
                 process.start(CORE_VERSION, "python", folder)
-                entry["carrier"] = Carrier(self.carry(), process, self.profile_for, self.known_for(name), log=self.runtime.log)
+                entry["carrier"] = Carrier(self.carry(), process, self.profile_for, self.known_for(name), log=self.runtime.log,
+                                           note=lambda text, name=name: self._say(name, text))
                 entry["process"] = process
                 self.runtime.log("transport %s: up" % name)
             except (TransportFailed, OSError) as error:
                 process.stop()
                 self._crashed(name, error)
+            except (CarryRefused, ValueError, LookupError, RuntimeError) as error:
+                # Not the transport: the carrier state is closed after a write failed, or a profile cannot be read. It
+                # stays down with the reason rather than start again every second.
+                process.stop()
+                entry["down"] = "%s. It stays down until that is put right and aamio starts again" % error
+                self.runtime.log("transport %s: down: %s" % (name, entry["down"]))
 
     def _crashed(self, name, error):
         entry = self.running[name]
@@ -400,14 +473,7 @@ class Service:
             now = time.monotonic()
             if now - self.known_at >= KNOWN_REFRESH:
                 self.known_at = now
-                for name, entry in self.running.items():
-                    if entry["carrier"] is not None:
-                        try:
-                            entry["carrier"].known = self.known_for(name)
-                        except RuntimeError as error:
-                            # Whom to take messages from is not known while the bindings cannot be read: no one, then.
-                            entry["carrier"].known = []
-                            self.runtime.log("transport %s: %s" % (name, error))
+                self._refresh()
             for name, entry in list(self.running.items()):
                 if entry["carrier"] is None:
                     continue
