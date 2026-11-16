@@ -47,6 +47,10 @@ def test_every_scenario_step_by_step(scenario, tmp_path):
         if op == "restart":
             party["state"] = carry_state.CarryState(state.keys, state.path)
         elif op == "prune":
+            # The scenarios are about the guard against replays, and no program in them takes a message. A session with
+            # a message nobody has taken is kept whatever its age, so the program takes what has come before it tidies.
+            for key, *_ in state.pending():
+                state.handed_over(key)
             state.prune(step["now"])
         elif op == "ask":
             session, envelope = state.ask(pk(step["to"]), profile, step["mono"], session=bytes.fromhex(step["session"]),
@@ -385,3 +389,103 @@ def test_a_sealed_receipt_for_the_same_message_has_the_same_bytes_every_time():
     receipts = [at_b.deliver(first, [A.public_raw], sealed, 0.0, T)[1], at_b.deliver(first, [A.public_raw], sealed, 1.0, T)[1]]
     assert receipts[0] == receipts[1]
     assert at_b.deliver(second, [A.public_raw], sealed, 2.0, T)[1] != receipts[0]
+
+
+# ------------------------------------------------------------------ the follow-up check of 2026-11-15, findings 2, 3, 4 and 10
+
+def test_a_message_nobody_has_taken_outlives_the_guard_against_replays(tmp_path):
+    """Finding 3: tidying takes what guards against a replay when its time is up, never a message the program has not taken."""
+    path = str(tmp_path / "b.json")
+    sender = carry_state.CarryState(A)
+    session = sender.one_way(B.public_raw, T + 300)
+    envelope = sender.send(B.public_raw, session, b"hei", ONE_WAY)
+    at_b = carry_state.CarryState(B, path)
+    assert at_b.deliver(envelope, [A.public_raw], ONE_WAY, 0, T)[0] == "accepted"
+    key = carry_state.mark(A.public_raw, session, 1)
+    at_b.prune(T + 300 + carry_state.SKEW)
+    assert carry_state.CarryState(B, path).pending() == [(key, A.public_raw, session, 1, b"hei")]
+    at_b.prune(T + 300 + carry_state.SKEW + 1)
+    again = carry_state.CarryState(B, path)
+    assert again.pending() == [(key, A.public_raw, session, 1, b"hei")], "the receipt said it was kept, and the program has not said it has it"
+    assert again.deliver(envelope, [A.public_raw], ONE_WAY, 0, T + 300 + carry_state.SKEW + 1)[0] == "duplicate", "kept with its session, so a copy is still known as one"
+    again.handed_over(key)
+    again.prune(T + 300 + carry_state.SKEW + 1)
+    after = carry_state.CarryState(B, path)
+    assert (after.pending(), after.durable["incoming"], after.durable["stored"]) == ([], {}, {}), "taken, it goes with its session at the next tidying"
+    refused_with("carry_deadline_passed", after.deliver, envelope, [A.public_raw], ONE_WAY, 0, T)
+
+
+def test_after_a_write_fails_nothing_is_read_from_memory_either(tmp_path):
+    """Finding 4: a receipt whose save failed is not shown as confirmed; outcome, unconfirmed, pending and kept refuse as deliver does."""
+    path = tmp_path / "a.json"
+    at_a, receiver = carry_state.CarryState(A, str(path)), carry_state.CarryState(B)
+    session = at_a.one_way(B.public_raw, T + 300)
+    envelope = at_a.send(B.public_raw, session, b"hei", ONE_WAY)
+    key = carry_state.mark(B.public_raw, session, 1)
+    _, receipt, _ = receiver.deliver(envelope, [A.public_raw], ONE_WAY, 0, T)
+    (tmp_path / "a.json.tmp").mkdir()
+    refused_with("carry_storage_failed", at_a.deliver, receipt, [B.public_raw], ONE_WAY, 0, T)
+    for call, args in ((at_a.outcome, (key,)), (at_a.unconfirmed, ()), (at_a.pending, ()), (at_a.kept, (key,)), (at_a.give_up, (key,))):
+        refused_with("carry_storage_failed", call, *args)
+    (tmp_path / "a.json.tmp").rmdir()
+    assert carry_state.CarryState(A, str(path)).outcome(key) == "waiting", "what the file holds: the receipt never reached it"
+    at_a.restart()
+    assert at_a.outcome(key) == "waiting" and at_a.deliver(receipt, [B.public_raw], ONE_WAY, 0, T)[0] == "accepted"
+    assert carry_state.CarryState(A, str(path)).outcome(key) == "confirmed"
+
+
+def test_a_message_that_was_not_kept_is_not_listed_as_waiting_after_the_write_failed(tmp_path):
+    """Finding 4, the receiver: deliver refuses with carry_storage_failed, and pending shows nothing of what never reached the file."""
+    receiver = carry_state.CarryState(B, str(tmp_path / "in-the-way" / "carry.json"))
+    (tmp_path / "in-the-way").write_text("not a folder", encoding="utf-8")
+    envelope = carry.write(A, B.public_raw, carry.READABLE, carry.MESSAGE, 0, bytes(8), 1, T + 300, b"hei")
+    refused_with("carry_storage_failed", receiver.deliver, envelope, [A.public_raw], ONE_WAY, 0, T)
+    refused_with("carry_storage_failed", receiver.pending)
+
+
+def test_a_message_given_up_keeps_its_mark_for_a_late_receipt(tmp_path):
+    """Finding 2, in the state: given up, the bytes go and the outcome is unknown; the hash stays, so a late receipt confirms it."""
+    path = str(tmp_path / "a.json")
+    at_a, receiver = carry_state.CarryState(A, path), carry_state.CarryState(B)
+    session = at_a.one_way(B.public_raw, T + 300)
+    envelope = at_a.send(B.public_raw, session, b"hei", ONE_WAY)
+    key = carry_state.mark(B.public_raw, session, 1)
+    assert at_a.give_up(key) and not at_a.give_up(key)
+    again = carry_state.CarryState(A, path)
+    assert (again.outcome(key), again.unconfirmed(), again.durable["outbox"][key]["envelope"]) == ("unknown", [], None)
+    assert not again.tried(key), "never sent again"
+    _, receipt, _ = receiver.deliver(envelope, [A.public_raw], ONE_WAY, 0, T)
+    assert again.deliver(receipt, [B.public_raw], ONE_WAY, 0, T)[0] == "accepted" and again.outcome(key) == "confirmed"
+
+
+def test_every_challenge_waits_in_the_window_it_was_given_under(tmp_path):
+    """Finding 10: the 64 in all are counted with each challenge's own window, not with the window of the one who asks now."""
+    wide = carry_state.profile(mode="readable", challenge_window=600, lifetime=3600)
+    narrow = carry_state.profile(mode="readable", challenge_window=60, lifetime=600)
+    partners = [Keys(bytes([n]) * 32) for n in range(1, 10)]
+    ninth = partners[8]
+    known = [partner.public_raw for partner in partners]
+    at_b = carry_state.CarryState(B)
+    profile_of = lambda sender: narrow if sender == ninth.public_raw else wide
+    openings = []
+    for partner in partners[:8]:
+        state = carry_state.CarryState(partner)
+        for _ in range(carry_state.MAX_WAITING_PER_PARTNER):
+            _, ask = state.ask(B.public_raw, wide, 0.0)
+            result, challenge, _ = at_b.deliver(ask, known, profile_of, 0.0, T)
+            assert result == "accepted"
+        openings.append((state, challenge))
+    late = carry_state.CarryState(ninth)
+    _, ask = late.ask(B.public_raw, narrow, 100.0)
+    refused_with("carry_rate_limited", at_b.deliver, ask, known, profile_of, 100.0, T)
+    # The 64 still wait: an open for one of them is taken at the same moment.
+    state, challenge = openings[0]
+    _, opening, _ = state.deliver(challenge, [B.public_raw], wide, 100.0, T)
+    assert at_b.deliver(opening, known, profile_of, 100.0, T)[0] == "accepted"
+    # One is used now, so there is room for one more.
+    _, ask = late.ask(B.public_raw, narrow, 100.0)
+    assert at_b.deliver(ask, known, profile_of, 100.0, T)[0] == "accepted"
+    # And past their own window the old ones no longer count, whatever window the asker has.
+    for n in range(carry_state.MAX_WAITING_PER_PARTNER - 1):
+        _, ask = late.ask(B.public_raw, narrow, 700.0)
+        assert at_b.deliver(ask, known, profile_of, 700.0, T)[0] == "accepted"

@@ -370,3 +370,142 @@ def test_a_carrier_on_the_same_home_after_a_restart_sends_the_same_bytes_with_th
         assert carrier.outcome(key) == "waiting"
     finally:
         process.stop()
+
+
+# ------------------------------------------------------------------ the follow-up check of 2026-11-15, findings 2 and 5
+
+class Medium:
+    """What a Carrier needs of a transport, with the room in the test's hands and every frame given kept."""
+
+    name = "medium"
+
+    def __init__(self, room=0, frame=64):
+        self.properties = {"max_frame_up": frame}
+        self.credit, self.given, self.events = room, [], []
+
+    def poll(self, timeout=0):
+        events, self.events = self.events, []
+        return events
+
+    def room(self):
+        return self.credit
+
+    def send(self, frame, to=None):
+        if self.credit < 1:
+            return None
+        self.credit -= 1
+        self.given.append(frame)
+        return "f-%d" % len(self.given)
+
+    def status(self, frame_id):
+        return "sent"
+
+    def check_time(self):
+        pass
+
+    def waiting_for_room(self, waiting):
+        self.waits = waiting
+
+
+def test_no_try_is_counted_while_the_first_waits_for_room_and_none_goes_after_the_tries_are_used(tmp_path):
+    """Finding 5: with a budget of two and no room, three rounds used both tries and left two copies in the queue, which
+    went out when room came, after unknown had been said."""
+    clock, profile = Clock(), carry_state.profile(mode="readable")
+    at_a, _at_b, session = opened_pair(profile)
+    medium = Medium(room=0)
+    carrier = Carrier(at_a, medium, profile, [B.public_raw], clock=clock, wall=lambda: NOW, retry_seconds=2.0, tries=2)
+    key = carrier.send(B.public_raw, session, b"hei")
+    for step in (0.0, 2.1, 2.1):
+        clock.now += step
+        carrier.pump()
+    assert (carrier.outcome(key), at_a.durable["outbox"][key]["tries"], len(carrier.queue), medium.given) == ("waiting", 1, 1, [])
+    medium.credit = 1000
+    carrier.pump()
+    first = len(medium.given)
+    assert first > 0 and carrier.queue == [], "the one try went when there was room"
+    clock.now += 2.1
+    carrier.pump()
+    assert len(medium.given) == 2 * first and at_a.durable["outbox"][key]["tries"] == 2, "the second try, counted as it began"
+    clock.now += 2.1
+    carrier.pump()
+    assert carrier.outcome(key) == "unknown" and at_a.durable["outbox"][key]["envelope"] is None
+    for _ in range(3):
+        clock.now += 2.1
+        carrier.pump()
+    assert len(medium.given) == 2 * first, "nothing goes after the tries are used"
+
+
+def test_a_try_that_waits_for_room_is_not_begun_once_its_receipt_has_come(tmp_path):
+    """Finding 5: a try that has not begun is not begun after the message is over."""
+    clock, profile = Clock(), carry_state.profile(mode="readable")
+    at_a, at_b, session = opened_pair(profile)
+    medium = Medium(room=1000)
+    carrier = Carrier(at_a, medium, profile, [B.public_raw], clock=clock, wall=lambda: NOW, retry_seconds=2.0, tries=5)
+    key = carrier.send(B.public_raw, session, b"hei")
+    carrier.pump()
+    first = len(medium.given)
+    medium.credit = 0
+    clock.now += 2.1
+    carrier.pump()
+    assert carrier._queued(key) and at_a.durable["outbox"][key]["tries"] == 2
+    _, receipt, _ = at_b.deliver(at_a_envelope(at_a, key), [A.public_raw], profile, 1.0, NOW)
+    medium.events = [("received", None, frame) for frame in carry.split(receipt, 64)]
+    carrier.pump()
+    assert carrier.confirmed(key)
+    medium.credit = 1000
+    carrier.pump()
+    assert len(medium.given) == first and carrier.queue == [], "the copy that waited was not sent after the receipt"
+
+
+def at_a_envelope(state, key):
+    """The bytes of a message as its sender keeps them, before its receipt."""
+    return next(envelope for mark, _pk, _session, _counter, envelope in state.unconfirmed() if mark == key)
+
+
+def test_bytes_written_readable_are_not_taken_up_under_a_sealed_profile(tmp_path):
+    """Finding 2: a new owner compared only the partner's key, and sent the old readable bytes though the profile said sealed."""
+    clock = Clock()
+    readable, sealed = carry_state.profile(mode="readable"), carry_state.profile(mode="sealed")
+    path = str(tmp_path / "a.json")
+    at_a, at_b = CarryState(A, path), CarryState(B)
+    session, ask = at_a.ask(B.public_raw, readable, 0.0)
+    _, challenge, _ = at_b.deliver(ask, [A.public_raw], readable, 0.0, NOW)
+    at_a.deliver(challenge, [B.public_raw], readable, 0.0, NOW)
+    envelope = at_a.send(B.public_raw, session, b"lesbar tekst", readable, most=5)
+    key = carry_state.mark(B.public_raw, session, 1)
+    assert envelope[4] == carry.READABLE and b"lesbar tekst" in envelope
+    medium, said = Medium(room=1000), []
+    carrier = Carrier(CarryState(A, path), medium, sealed, [B.public_raw], clock=clock, wall=lambda: NOW, tries=5, note=said.append)
+    assert key not in carrier.messages
+    for _ in range(4):
+        clock.now += 3
+        carrier.pump()
+    assert medium.given == [], "nothing readable went out under the sealed profile"
+    kept = CarryState(A, path)
+    assert (kept.outcome(key), kept.durable["outbox"][key]["envelope"]) == ("unknown", None), "given up, with its mark and hash kept"
+    assert len(said) == 1 and key in said[0] and "readable" in said[0] and "sealed" in said[0] and "not sent again" in said[0]
+    # The same mode is taken up as before. One state at a time on the file, as one owner has the home.
+    session, ask = kept.ask(B.public_raw, sealed, 10.0)
+    _, challenge, _ = at_b.deliver(ask, [A.public_raw], sealed, 10.0, NOW)
+    kept.deliver(challenge, [B.public_raw], sealed, 10.0, NOW)
+    kept.send(B.public_raw, session, b"forseglet", sealed, most=5)
+    carrier = Carrier(CarryState(A, path), Medium(room=1000), sealed, [B.public_raw], clock=clock, wall=lambda: NOW, tries=5, note=said.append)
+    assert list(carrier.messages) == [carry_state.mark(B.public_raw, session, 1)] and len(said) == 1
+
+
+def test_a_try_that_waits_for_room_is_not_begun_once_the_profile_is_of_another_mode(tmp_path):
+    """Finding 2, while it runs: the profile changed while a try waited for room, and the try is not begun."""
+    clock = Clock()
+    profiles = {"readable": carry_state.profile(mode="readable"), "sealed": carry_state.profile(mode="sealed")}
+    now = {"mode": "readable"}
+    at_a, _at_b, session = opened_pair(profiles["readable"])
+    medium, said = Medium(room=0), []
+    carrier = Carrier(at_a, medium, lambda pk: profiles[now["mode"]], [B.public_raw], clock=clock, wall=lambda: NOW, retry_seconds=2.0, note=said.append)
+    key = carrier.send(B.public_raw, session, b"lesbar")
+    carrier.pump()
+    assert carrier._queued(key)
+    now["mode"] = "sealed"
+    medium.credit = 1000
+    carrier.pump()
+    assert medium.given == [] and carrier.queue == [] and key not in carrier.messages
+    assert carrier.outcome(key) == "unknown" and len(said) == 1 and "not sent again" in said[0]

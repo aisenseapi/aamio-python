@@ -36,12 +36,14 @@ UNVERIFIED_PER_SECOND = 20
 
 class Carrier:
     def __init__(self, state, process, profile, known, clock=time.monotonic, wall=time.time, log=None,
-                 retry_seconds=2.0, ask_retry_seconds=5.0, tries=carry_state.TRIES_DEFAULT):
+                 retry_seconds=2.0, ask_retry_seconds=5.0, tries=carry_state.TRIES_DEFAULT, note=None):
         self.state, self.process, self.profile, self.known = state, process, profile, list(known)
         # One profile for every partner, or a function from a partner's key to its own (B5).
         self.profile_of = profile if callable(profile) else (lambda pk: profile)
         self.clock, self.wall = clock, wall
         self.log = log or (lambda line: None)
+        # What the user is to hear, as a message that is not sent again: where the runtime keeps attention, or the log.
+        self.note = note or self.log
         self.retry_seconds, self.ask_retry_seconds, self.tries = retry_seconds, ask_retry_seconds, tries
         self.reassembly = Reassembly(clock)
         self.frame_limit = process.properties["max_frame_up"]
@@ -58,11 +60,32 @@ class Carrier:
         self.counter = 0
         known_set = set(self.known)
         for key, pk, session, _counter, envelope in state.unconfirmed():
-            # Sent before this process started: taken up with the same bytes and the tries that are left.
-            if pk in known_set:
+            # Sent before this process started: taken up with the same bytes and the tries that are left, when they
+            # were written as the partner's profile says now (B5).
+            if pk in known_set and self._fits_profile(key, pk, envelope):
                 self.messages[key] = {"envelope": envelope, "pair": (pk, session), "next": clock()}
 
     # ---------------------------------------------------------- out
+
+    def _fits_profile(self, key, pk, envelope):
+        """Whether bytes written earlier may go on under the partner's profile now, given up and said when they may not.
+
+        Readable bytes taken up after the partner's profile became sealed went out readable (the follow-up check of 15
+        November 2026). A message is never sealed again under its mark, so it is given up: its mark and hash stay for a
+        late receipt, and its outcome is unknown, since an earlier try may have arrived.
+        """
+        mode = carry.SEALED if self.profile_of(pk)["mode"] == "sealed" else carry.READABLE
+        if envelope[4] == mode:
+            return True
+        self.state.give_up(key)
+        self.note("%s was written %s, and the profile for that partner is %s now, so it is not sent again: B5 sends no message under another mode. "
+                  "Its outcome is unknown, since an earlier try may have arrived; send it again as a new message to have it go %s."
+                  % (key, "readable" if envelope[4] == carry.READABLE else "sealed", self.profile_of(pk)["mode"], self.profile_of(pk)["mode"]))
+        return False
+
+    def _queued(self, key):
+        """Whether a try at the message waits in the queue, not one frame of it given to the transport yet."""
+        return any(item[2] == key and not item[3] for item in self.queue)
 
     def _queue(self, envelope, to, key=None):
         self.queue.append([carry.split(envelope, self.frame_limit), to, key, []])
@@ -209,10 +232,20 @@ class Carrier:
         for key, entry in list(self.messages.items()):
             if now < entry["next"]:
                 continue
+            if self._queued(key):
+                # The last try still waits for room: a try is counted when it can be given to the transport, not while
+                # copies pile up behind one that has not gone.
+                entry["next"] = now + self.retry_seconds
+                continue
+            if not self._fits_profile(key, entry["pair"][0], entry["envelope"]):
+                del self.messages[key]
+                continue
             # The try is counted in the state before it goes, so a restart never gives back tries that were used.
             if not self.state.tried(key):
                 self.log("no receipt for %s, and its tries are used" % key)
                 del self.messages[key]
+                # A try that never started is not sent after the message is over (A7): it went out after unknown was said.
+                self.queue = [item for item in self.queue if not (item[2] == key and not item[3])]
                 continue
             entry["next"] = now + self.retry_seconds
             self._queue(entry["envelope"], self.addresses.get(entry["pair"][0]), key)
@@ -237,6 +270,15 @@ class Carrier:
     def _flush(self):
         while self.queue and self.process.room() > 0:
             frames, to, key, ids = self.queue[0]
+            if key is not None and not ids:
+                # A try at a message begins here, so here is where it may still be stopped: when the message is over
+                # (its receipt came, or its tries are used), or when the partner's profile is of another mode now than
+                # the bytes were written under. Queued earlier, it went out all the same once there was room.
+                entry = self.messages.get(key)
+                if entry is None or not self._fits_profile(key, entry["pair"][0], entry["envelope"]):
+                    self.messages.pop(key, None)
+                    self.queue.pop(0)
+                    continue
             frame = frames.pop(0)
             frame_id = self.process.send(frame, to=to)
             if frame_id is None:

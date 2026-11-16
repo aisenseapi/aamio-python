@@ -235,7 +235,7 @@ class CarryState:
             raise CarryRefused("carry_storage_failed", "a write of %s failed, so nothing is taken or sent until restart has read it again" % self.path)
 
     def _forget_the_clock(self):
-        self.waiting = {}    # pair -> {"nonce", "t0", "used"}
+        self.waiting = {}    # pair -> {"nonce", "t0", "used", "window"}: the window of the profile it was given under
         self.anchors = {}    # pair of a session with a challenge -> t0 on this party's monotonic clock
         self.asked_at = {}   # pair of an outgoing session -> when this party asked
         self.messages_seen = collections.defaultdict(collections.deque)  # pk hex -> (mono, bytes) of messages in the last minute
@@ -344,7 +344,12 @@ class CarryState:
 
     def outcome(self, key):
         """waiting while the bytes are kept for another try, confirmed when the receipt came, and unknown otherwise:
-        the tries ran out, so it may or may not have arrived, or nothing is known of it here."""
+        the tries ran out, so it may or may not have arrived, or nothing is known of it here.
+
+        After a write failed nothing is answered from memory: what is held there may be what never reached the file,
+        as a receipt taken in whose save failed (the follow-up check of 15 November 2026).
+        """
+        self._check()
         entry = self.durable["outbox"].get(key)
         if entry is None:
             return "unknown"
@@ -370,8 +375,21 @@ class CarryState:
         self._save()
         return True
 
+    def give_up(self, key):
+        """A message that cannot go on as it was written, as one sealed under a profile the partner no longer has: its
+        bytes go, as when the tries are used, and its mark and hash stay, so a receipt that comes late still confirms
+        it. It is never sealed again under its mark (B5, A7). True when there was something to give up."""
+        self._check()
+        entry = self.durable["outbox"].get(key)
+        if entry is None or entry["receipt"] or entry["envelope"] is None:
+            return False
+        entry["envelope"] = None
+        self._save()
+        return True
+
     def unconfirmed(self):
         """What was sent and waits for its receipt, oldest first: (mark, partner pk, session, counter, envelope)."""
+        self._check()
         return [(key,) + _parts(key) + (bytes.fromhex(entry["envelope"]),) for key, entry in self.durable["outbox"].items()
                 if entry["envelope"] is not None and not entry["receipt"]]
 
@@ -385,11 +403,13 @@ class CarryState:
         """Messages taken and kept that the program has not said it has, in the order they came:
         (mark, sender pk, session, counter, content). Reading them takes nothing: a crash before
         handed_over offers them again, so the program can use the mark to do nothing twice."""
+        self._check()
         return [(key,) + _parts(key) + (bytes.fromhex(entry["content"]),) for key, entry in self.durable["stored"].items()
                 if entry["content"] is not None]
 
     def kept(self, key):
         """What is kept of a message taken in: sha256, whether it came sealed, and when (the time floor's clock), or None."""
+        self._check()
         entry = self.durable["stored"].get(key)
         return None if entry is None else {"sha256": entry["sha256"], "sealed": entry["sealed"], "at": entry["at"]}
 
@@ -437,7 +457,9 @@ class CarryState:
             if pair in self.used or pair in outgoing:
                 raise CarryRefused("carry_session_in_use")
             prefix, window = pk.hex() + ":", profile_in["challenge_window"]
-            waiting = [key for key, entry in self.waiting.items() if not entry["used"] and mono - entry["t0"] <= window]
+            # Each challenge waits in the window of the profile it was given under: counted with this ask's window, one
+            # still open in a longer window of another partner's was counted as gone (the follow-up check of 15 November).
+            waiting = [key for key, entry in self.waiting.items() if not entry["used"] and mono - entry["t0"] <= entry["window"]]
             if sum(1 for key in waiting if key.startswith(prefix)) >= MAX_WAITING_PER_PARTNER or len(waiting) >= MAX_WAITING:
                 raise CarryRefused("carry_rate_limited", "too many challenges wait")
             asks = self._minute(self.asks_seen[pk.hex()], mono)
@@ -454,8 +476,8 @@ class CarryState:
             self.used.add(pair)
             self._save()
             asks.append((mono, 0))
-            self.waiting[pair] = {"nonce": nonce, "t0": mono, "used": False}
-            self._forget_spent(prefix, mono, window)
+            self.waiting[pair] = {"nonce": nonce, "t0": mono, "used": False, "window": window}
+            self._forget_spent(prefix, mono)
             return "accepted", self._write(pk, profile_in, carry.CHALLENGE, 0, session, 0, 0, nonce, rnd=seal_rnd), got
 
         if kind == carry.CHALLENGE:
@@ -513,12 +535,12 @@ class CarryState:
             seen.popleft()
         return seen
 
-    def _forget_spent(self, prefix, mono, window):
-        """Challenges used or past their window are remembered for their own code, nonce_used or nonce_expired,
+    def _forget_spent(self, prefix, mono):
+        """Challenges used or past their own window are remembered for their own code, nonce_used or nonce_expired,
         at most SPENT_KEPT_PER_PARTNER per partner; an open for one that is forgotten is nonce_unknown. Either way
         it is refused, and nothing kept against a replay goes with it."""
         spent = sorted((entry["t0"], key) for key, entry in self.waiting.items()
-                       if key.startswith(prefix) and (entry["used"] or mono - entry["t0"] > window))
+                       if key.startswith(prefix) and (entry["used"] or mono - entry["t0"] > entry["window"]))
         for _, key in spent[:max(0, len(spent) - SPENT_KEPT_PER_PARTNER)]:
             del self.waiting[key]
 
@@ -603,6 +625,11 @@ class CarryState:
                 gone = floor > max(record["opened"] + record["lifetime"], record["closed_at"] or 0) + HORIZON
             else:
                 gone = floor > record["deadline"] + SKEW
+            if gone and any(entry["content"] is not None for key, entry in self.durable["stored"].items() if key.startswith(pair + ":")):
+                # A message the program has not taken stays until handed_over says it has it, and its session with it,
+                # since a kept message belongs to a session kept. Deleted with the guard against replays, a message
+                # a receipt had said was kept was gone (the follow-up check of 15 November 2026).
+                continue
             if gone:
                 del incoming[pair]
                 self.used.discard(pair)

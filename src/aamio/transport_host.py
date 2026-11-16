@@ -157,7 +157,11 @@ class TransportProcess:
         pending = b""
         stream = self.process.stdout
         while True:
-            chunk = stream.read1(65_536) if hasattr(stream, "read1") else stream.read(65_536)
+            try:
+                chunk = stream.read1(65_536) if hasattr(stream, "read1") else stream.read(65_536)
+            except (ValueError, OSError):
+                # The stream was closed by stop: the process is gone as far as this host is concerned.
+                chunk = b""
             if not chunk:
                 self.lines.put(("closed", None))
                 return
@@ -174,7 +178,7 @@ class TransportProcess:
 
     def _read_stderr(self):
         window_start, taken, dropped = self.clock(), 0, 0
-        for line in iter(self.process.stderr.readline, b""):
+        for line in self._stderr_lines():
             now = self.clock()
             if now - window_start >= 60:
                 if dropped:
@@ -185,6 +189,17 @@ class TransportProcess:
                 continue
             taken += len(line)
             self.log("transport %s: %s" % (self.name, line.decode("utf-8", "replace").rstrip()))
+
+    def _stderr_lines(self):
+        """Standard error line by line, until it ends or stop closes it."""
+        while True:
+            try:
+                line = self.process.stderr.readline()
+            except (ValueError, OSError):
+                return
+            if not line:
+                return
+            yield line
 
     def _write(self, message):
         """A line for the writer thread: it never waits for the transport to read."""
