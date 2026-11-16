@@ -7,6 +7,8 @@ late          answers a frame only when it is cancelled, and then says it was se
 bad_describe  describes itself under another name
 long_line     writes a line longer than the contract allows
 deaf          reads nothing for three seconds after its first ready, then answers every send
+early         says a status and a received frame in the same write as its describe
+eager         says a received frame before its describe, which comes half a second later
 """
 
 import json
@@ -34,6 +36,19 @@ def main():
         if kind == "hello":
             if MODE == "long_line":
                 say({"t": "status", "state": "up", "reason": "x" * 300_000})
+                continue
+            if MODE == "eager":
+                # A transport that listens before it has read hello hears the medium before it describes itself.
+                say({"t": "received", "from": "eager", "frame": "AAEC"})
+                time.sleep(0.5)
+            if MODE == "early":
+                # One write, so the host has all of it before it has taken describe in.
+                said = [{"t": "describe", "name": "fake", "version": "0.1.0", "aamio_addon": 3, "medium": "test", "properties": PROPERTIES},
+                        {"t": "status", "state": "up", "reason": "said with describe"},
+                        {"t": "received", "from": "early", "frame": "AAEC"},
+                        {"t": "ready", "credit": 4, "sends_read": 0}]
+                sys.stdout.write("".join(json.dumps(line, separators=(",", ":")) + "\n" for line in said))
+                sys.stdout.flush()
                 continue
             say({"t": "describe", "name": "other" if MODE == "bad_describe" else "fake", "version": "0.1.0", "aamio_addon": 3,
                  "medium": "test", "properties": PROPERTIES})

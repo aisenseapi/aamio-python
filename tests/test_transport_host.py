@@ -90,6 +90,37 @@ def test_frames_go_out_within_the_room_and_come_back_whole(tmp_path):
         process.stop()
 
 
+def test_what_a_transport_says_with_its_describe_is_not_lost(tmp_path):
+    """start read lines until describe had come and dropped whatever else had come with it: a status, or a frame that
+    came in as the medium opened. A port in use was said as down in the same breath, and whoever waited for it saw
+    nothing (a full run of 16 November 2026)."""
+    process = start("early", tmp_path)
+    try:
+        events, until = [], time.monotonic() + 5
+        while len(events) < 2:
+            assert time.monotonic() < until, events
+            events.extend(process.poll(timeout=0.05))
+        assert events == [("status", "up", "said with describe"), ("received", "early", bytes([0, 1, 2]))]
+        assert process.room() == 4
+    finally:
+        process.stop()
+
+
+def test_what_a_transport_says_before_its_describe_is_kept_and_describe_is_still_waited_for(tmp_path):
+    """The simulated radio listens before it has read hello, so a frame from a partner that is already sending comes
+    before describe. It is kept as what comes with describe is, and the wait for describe goes on as before: kept and
+    then not waited behind, a host with one thread never read the describe that came after (a full run of 16 November
+    2026)."""
+    began = time.monotonic()
+    process = start("eager", tmp_path)
+    try:
+        assert time.monotonic() - began < 5, "describe was waited for, and came"
+        assert process.poll() == [("received", "eager", bytes([0, 1, 2]))]
+        wait_for_room(process, 4)
+    finally:
+        process.stop()
+
+
 def test_a_transport_that_never_answers_is_hung_after_three_deadlines_whatever_else_it_says(tmp_path):
     clock = Clock()
     process = start("silent", tmp_path, clock)

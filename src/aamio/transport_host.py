@@ -113,6 +113,7 @@ class TransportProcess:
         self.log = log or (lambda line: None)
         self.process = None
         self.lines = queue.Queue()
+        self.early = []           # what the transport said before start returned, for the first poll after it
         self.properties = None
         self.medium = None
         self.written = 0          # sends written in all since the process started
@@ -148,7 +149,11 @@ class TransportProcess:
             left = until - self.clock()
             if left <= 0:
                 self._fail(TransportFailed("transport_timeout", "no describe within %d seconds of hello" % DESCRIBE_SECONDS))
-            self.poll(timeout=min(left, 0.2))
+            # What comes before describe or with it is kept for whoever polls next: a status, or a frame that
+            # came in as the medium opened. It was dropped here, so a port said as down in the same breath as
+            # describe was never heard of (a full run of 16 November 2026). Each round waits for a line as
+            # before, whatever is kept already.
+            self.early.extend(self._heard(min(left, 0.2)))
             if self.failed is not None:
                 raise self.failed
         return self.properties
@@ -372,7 +377,16 @@ class TransportProcess:
             self._fail(TransportFailed("transport_down", "the transport has said down for %d seconds" % HANG_ROOM_SECONDS))
 
     def poll(self, timeout=0.0):
-        """What the transport said since last time: a list of ('received', from, frame), ('answer', id) and ('status', state, reason)."""
+        """What the transport said since last time: a list of ('received', from, frame), ('answer', id) and ('status', state, reason).
+
+        What it said before start returned comes first, and is not waited behind.
+        """
+        events, self.early = self.early, []
+        events.extend(self._heard(0.0 if events else timeout))
+        return events
+
+    def _heard(self, timeout):
+        """The lines that have come, taken in, after a wait of up to timeout for the first: the events in them."""
         events = []
         try:
             item = self.lines.get(timeout=timeout) if timeout else self.lines.get_nowait()
