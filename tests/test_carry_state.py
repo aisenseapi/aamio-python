@@ -489,3 +489,45 @@ def test_every_challenge_waits_in_the_window_it_was_given_under(tmp_path):
     for n in range(carry_state.MAX_WAITING_PER_PARTNER - 1):
         _, ask = late.ask(B.public_raw, narrow, 700.0)
         assert at_b.deliver(ask, known, profile_of, 700.0, T)[0] == "accepted"
+
+
+def test_an_open_is_taken_in_the_window_its_challenge_was_given_under():
+    """The check of 16 November 2026: the quota counted a challenge in the window it was given under, and an open was
+    taken in the window of the profile now. Given with 60 seconds, a challenge was refused at 61 under that profile and
+    taken under one of 600, while the quota no longer counted it."""
+    narrow = carry_state.profile(mode="readable", challenge_window=60, lifetime=600)
+    wide = carry_state.profile(mode="readable", challenge_window=600, lifetime=3600)
+    at_a, at_b = carry_state.CarryState(A), carry_state.CarryState(B)
+    _, ask = at_a.ask(B.public_raw, narrow, 0.0)
+    _, challenge, _ = at_b.deliver(ask, [A.public_raw], narrow, 0.0, T)
+    _, opening, _ = at_a.deliver(challenge, [B.public_raw], narrow, 1.0, T)
+    refused_with("carry_nonce_expired", at_b.deliver, opening, [A.public_raw], wide, 61.0, T)
+    # What was given stands the other way too: given with 600 seconds, it is taken at 61 under a profile of 60.
+    _, ask = at_a.ask(B.public_raw, wide, 100.0)
+    _, challenge, _ = at_b.deliver(ask, [A.public_raw], wide, 100.0, T)
+    _, opening, _ = at_a.deliver(challenge, [B.public_raw], wide, 101.0, T)
+    assert at_b.deliver(opening, [A.public_raw], narrow, 161.0, T)[0] == "accepted"
+
+
+def test_a_challenge_the_quota_no_longer_counts_opens_no_session():
+    """The same, as the quota sees it: 64 challenges given with 60 seconds are out of the count at 61, a new one is
+    given under a profile of 600, and none of the 64 opens a session then."""
+    narrow = carry_state.profile(mode="readable", challenge_window=60, lifetime=600)
+    wide = carry_state.profile(mode="readable", challenge_window=600, lifetime=3600)
+    partners = [Keys(bytes([n]) * 32) for n in range(1, 10)]
+    known = [partner.public_raw for partner in partners]
+    at_b = carry_state.CarryState(B)
+    given = []
+    for partner in partners[:8]:
+        state = carry_state.CarryState(partner)
+        for _ in range(carry_state.MAX_WAITING_PER_PARTNER):
+            _, ask = state.ask(B.public_raw, narrow, 0.0)
+            result, challenge, _ = at_b.deliver(ask, known, narrow, 0.0, T)
+            assert result == "accepted"
+        given.append((state, challenge))
+    late = carry_state.CarryState(partners[8])
+    _, ask = late.ask(B.public_raw, wide, 61.0)
+    assert at_b.deliver(ask, known, wide, 61.0, T)[0] == "accepted", "the 64 are past their window, and no longer counted"
+    for state, challenge in given:
+        _, opening, _ = state.deliver(challenge, [B.public_raw], narrow, 1.0, T)
+        refused_with("carry_nonce_expired", at_b.deliver, opening, known, wide, 61.0, T)

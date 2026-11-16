@@ -690,6 +690,24 @@ def test_a_transport_whose_carrier_cannot_be_made_stays_down_with_the_reason_and
         b.close()
 
 
+def test_a_service_that_has_stopped_with_its_owner_starts_nothing_again(lan_env):
+    """The check of 16 November 2026 found it in aamio-js: a start that was under way when the owner closed went on after
+    the home had been let go of. Here a start from another thread could come after the stop, and it started the transport
+    and the loop again in a runtime that was closed."""
+    port_a, port_b = free_ports(2)
+    a, b = homes(lan_env, (port_a, port_b))
+    a.close()
+    service = b.transport_service()
+    b.close()
+    try:
+        service.start(background=True)
+        assert service.status() == {} and service.thread is None, "nothing was added, and no loop runs"
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.bind(("127.0.0.1", port_b))
+    finally:
+        service.stop()
+
+
 # ------------------------------------------------------------------ the health check of 2026-11-16
 
 from aamio.addon_process import Manifest

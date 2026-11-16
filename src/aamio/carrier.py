@@ -87,8 +87,10 @@ class Carrier:
         """Whether a try at the message waits in the queue, not one frame of it given to the transport yet."""
         return any(item[2] == key and not item[3] for item in self.queue)
 
-    def _queue(self, envelope, to, key=None):
-        self.queue.append([carry.split(envelope, self.frame_limit), to, key, []])
+    def _queue(self, envelope, to, key=None, counted=True):
+        """An envelope in frames, waiting for room. counted says whether the try it is has been counted in the state:
+        the first try of a message is, when the message is written, and a later one is counted as it begins."""
+        self.queue.append([carry.split(envelope, self.frame_limit), to, key, [], counted])
 
     def _control(self, envelope, to, kind, pair, most):
         self.counter += 1
@@ -240,15 +242,17 @@ class Carrier:
             if not self._fits_profile(key, entry["pair"][0], entry["envelope"]):
                 del self.messages[key]
                 continue
-            # The try is counted in the state before it goes, so a restart never gives back tries that were used.
-            if not self.state.tried(key):
+            if not self.state.tries_left(key):
+                # The tries are used: the bytes go, and the outcome is unknown for good (A7).
+                self.state.tried(key)
                 self.log("no receipt for %s, and its tries are used" % key)
                 del self.messages[key]
-                # A try that never started is not sent after the message is over (A7): it went out after unknown was said.
-                self.queue = [item for item in self.queue if not (item[2] == key and not item[3])]
                 continue
             entry["next"] = now + self.retry_seconds
-            self._queue(entry["envelope"], self.addresses.get(entry["pair"][0]), key)
+            # Queued, the try has used nothing: it is counted as it begins, in _flush, when it can be given to the
+            # transport. Counted here, every new owner used a try as it took the outbox up, room or not, and a
+            # budget went with nothing sent (the check of 16 November 2026).
+            self._queue(entry["envelope"], self.addresses.get(entry["pair"][0]), key, counted=False)
         for key, entry in list(self.control.items()):
             if now < entry["next"]:
                 continue
@@ -269,7 +273,7 @@ class Carrier:
 
     def _flush(self):
         while self.queue and self.process.room() > 0:
-            frames, to, key, ids = self.queue[0]
+            frames, to, key, ids, counted = self.queue[0]
             if key is not None and not ids:
                 # A try at a message begins here, so here is where it may still be stopped: when the message is over
                 # (its receipt came, or its tries are used), or when the partner's profile is of another mode now than
@@ -279,6 +283,17 @@ class Carrier:
                     self.messages.pop(key, None)
                     self.queue.pop(0)
                     continue
+                if not counted:
+                    # Counted in the state before its first frame goes, so a restart never gives back a try that
+                    # was used, and counted only now that there is room for it.
+                    if not self.state.tried(key):
+                        self.log("no receipt for %s, and its tries are used" % key)
+                        self.messages.pop(key, None)
+                        self.queue.pop(0)
+                        continue
+                    self.queue[0][4] = True
+                # The next try is one wait after this one began, however long it waited for room.
+                entry["next"] = self.clock() + self.retry_seconds
             frame = frames.pop(0)
             frame_id = self.process.send(frame, to=to)
             if frame_id is None:

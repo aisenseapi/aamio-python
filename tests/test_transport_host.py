@@ -478,7 +478,7 @@ def test_a_try_that_waits_for_room_is_not_begun_once_its_receipt_has_come(tmp_pa
     medium.credit = 0
     clock.now += 2.1
     carrier.pump()
-    assert carrier._queued(key) and at_a.durable["outbox"][key]["tries"] == 2
+    assert carrier._queued(key) and at_a.durable["outbox"][key]["tries"] == 1, "it waits, and has used nothing yet"
     _, receipt, _ = at_b.deliver(at_a_envelope(at_a, key), [A.public_raw], profile, 1.0, NOW)
     medium.events = [("received", None, frame) for frame in carry.split(receipt, 64)]
     carrier.pump()
@@ -486,6 +486,7 @@ def test_a_try_that_waits_for_room_is_not_begun_once_its_receipt_has_come(tmp_pa
     medium.credit = 1000
     carrier.pump()
     assert len(medium.given) == first and carrier.queue == [], "the copy that waited was not sent after the receipt"
+    assert at_a.durable["outbox"][key]["tries"] == 1, "and it was never counted"
 
 
 def at_a_envelope(state, key):
@@ -563,3 +564,35 @@ def test_no_try_is_counted_or_sent_once_the_profile_is_of_another_mode(tmp_path)
     assert at_a.durable["outbox"][key]["tries"] == 1 and key not in carrier.messages, "and no try was counted"
     assert carrier.outcome(key) == "unknown" and at_a.durable["outbox"][key]["envelope"] is None
     assert len(said) == 1 and key in said[0] and "not sent again" in said[0]
+
+
+def test_a_new_owner_uses_no_try_while_the_transport_has_no_room(tmp_path):
+    """The check of 16 November 2026: every new owner counted a try as it took the outbox up, room or not. With a budget
+    of three and no room, three owners used it all, the bytes went, and not one frame had been given."""
+    clock, profile = Clock(), carry_state.profile(mode="readable")
+    path = str(tmp_path / "a.json")
+    at_a, at_b = CarryState(A, path), CarryState(B)
+    session, ask = at_a.ask(B.public_raw, profile, 0.0)
+    _, challenge, _ = at_b.deliver(ask, [A.public_raw], profile, 0.0, NOW)
+    at_a.deliver(challenge, [B.public_raw], profile, 0.0, NOW)
+    at_a.send(B.public_raw, session, b"hei", profile, most=3)
+    key = carry_state.mark(B.public_raw, session, 1)
+    for owner in range(3):
+        medium = Medium(room=0)
+        carrier = Carrier(CarryState(A, path), medium, profile, [B.public_raw], clock=clock, wall=lambda: NOW, retry_seconds=2.0)
+        for _ in range(3):
+            clock.now += 2.1
+            carrier.pump()
+        assert medium.given == [], "nothing can be given, so nothing was"
+        assert (carrier.state.durable["outbox"][key]["tries"], carrier.outcome(key)) == (1, "waiting"), "owner %d used a try" % (owner + 1)
+    # With room the next owner's try is counted as it begins, and goes.
+    medium = Medium(room=1000)
+    carrier = Carrier(CarryState(A, path), medium, profile, [B.public_raw], clock=clock, wall=lambda: NOW, retry_seconds=2.0)
+    carrier.pump()
+    assert medium.given and carrier.state.durable["outbox"][key]["tries"] == 2
+    # And the tries still end: one more goes, and then the outcome is unknown and the bytes are gone.
+    for _ in range(3):
+        clock.now += 2.1
+        carrier.pump()
+    assert carrier.state.durable["outbox"][key]["tries"] == 3 and carrier.outcome(key) == "unknown"
+    assert carrier.state.durable["outbox"][key]["envelope"] is None

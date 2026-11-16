@@ -375,6 +375,15 @@ class CarryState:
         self._save()
         return True
 
+    def tries_left(self, key):
+        """How many more tries the budget allows a message that waits for its receipt. Nothing is counted: whoever
+        asks can then wait with the try until it can go."""
+        self._check()
+        entry = self.durable["outbox"].get(key)
+        if entry is None or entry["receipt"] or entry["envelope"] is None:
+            return 0
+        return max(0, entry["most"] - entry["tries"])
+
     def give_up(self, key):
         """A message that cannot go on as it was written, as one sealed under a profile the partner no longer has: its
         bytes go, as when the tries are used, and its mark and hash stay, so a receipt that comes late still confirms
@@ -494,7 +503,11 @@ class CarryState:
                 raise CarryRefused("carry_nonce_unknown")
             if entry["used"]:
                 raise CarryRefused("carry_nonce_used")
-            if mono - entry["t0"] > profile_in["challenge_window"]:
+            # In the window it was given under, as the quota counts it and as it is forgotten: taken in the window of
+            # the profile now, a challenge the quota no longer counted still opened a session when the profile had
+            # come to have a longer window (the check of 16 November 2026). A profile changed later neither
+            # lengthens nor shortens what was given.
+            if mono - entry["t0"] > entry["window"]:
                 raise CarryRefused("carry_nonce_expired")
             self._room(pk)
             entry["used"] = True

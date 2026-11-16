@@ -308,6 +308,7 @@ class Service:
         self.running = {}     # transport name -> {"manifest", "process", "carrier", "crashes", "next", "down"}
         self.thread = None
         self.stopping = threading.Event()
+        self.stopped = False   # stop has been called: the service stops once, with its owner
         # Where a runtime with a listener wants what comes in, and what it was given and has not had taken.
         self.offer = None
         self.offered = set()
@@ -371,16 +372,21 @@ class Service:
         over a transport, once, in the read's own shape.
         """
         with self.lock:
+            if self.stopped:
+                # Stopped with its owner, and for good. A start that comes after, as from a read still under way in
+                # another thread, starts nothing in a runtime that has let go of its home (the check of 16 November
+                # 2026 found the same in aamio-js).
+                return self
             if offer is not None:
                 self.offer = offer
             self._add(self.wanted())
             self._start_due()
             if self.offer is not None:
                 self._offer()
-        if background and self.running and self.thread is None:
-            self.stopping.clear()
-            self.thread = threading.Thread(target=self._loop, daemon=True)
-            self.thread.start()
+            # Under the lock with the rest, so stop either finds this thread or has stopped this start before it.
+            if background and self.running and self.thread is None:
+                self.thread = threading.Thread(target=self._loop, daemon=True)
+                self.thread.start()
         return self
 
     def _add(self, names):
@@ -470,6 +476,10 @@ class Service:
     def pump(self, timeout=0.02):
         """One round: every carrier pumped, transports that are due started again, and what came in offered."""
         with self.lock:
+            if self.stopped:
+                # The loop's thread may have waited for the lock while stop held it: no round after the stop, which
+                # could add a transport and start it with nobody left to stop it.
+                return
             now = time.monotonic()
             if now - self.known_at >= KNOWN_REFRESH:
                 self.known_at = now
@@ -498,6 +508,9 @@ class Service:
                 self.stopping.wait(0.2)
 
     def stop(self):
+        # From here on nothing is added or started: a start that waited for the lock finds the service stopped.
+        with self.lock:
+            self.stopped = True
         self.stopping.set()
         if self.thread is not None:
             self.thread.join(timeout=2.0)
