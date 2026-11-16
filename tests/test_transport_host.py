@@ -121,6 +121,25 @@ def test_what_a_transport_says_before_its_describe_is_kept_and_describe_is_still
         process.stop()
 
 
+def test_a_transport_that_does_not_describe_itself_is_said_with_what_is_known_of_it(tmp_path):
+    """No describe within ten seconds said only that. A start that stopped so once, with three suites running, could
+    not be told from any other: whether the hello had gone, whether the process lived, or what it had said (16 November
+    2026). The clock here runs ten times as fast, so the ten seconds take one."""
+    env = transport_host.environment([], base={"PATH": "", "SYSTEMROOT": __import__("os").environ.get("SYSTEMROOT", "")})
+    env["FAKE_TRANSPORT_MODE"] = "mute"
+    process = TransportProcess("fake", "0.1.0", [sys.executable, "-u", FAKE], str(tmp_path), env, clock=lambda: time.monotonic() * 10)
+    try:
+        with pytest.raises(TransportFailed) as failed:
+            process.start("0.0.0-test", "python", str(tmp_path))
+        assert failed.value.code == "transport_timeout"
+        said = str(failed.value)
+        for words in ("no describe within 10 seconds of hello: ", "the hello was written to it", "its process runs",
+                      "it said 1 line that was no describe", "On standard error: the fake transport has nothing to say"):
+            assert words in said, said
+    finally:
+        process.stop()
+
+
 def test_a_transport_that_never_answers_is_hung_after_three_deadlines_whatever_else_it_says(tmp_path):
     clock = Clock()
     process = start("silent", tmp_path, clock)

@@ -9,6 +9,7 @@ long_line     writes a line longer than the contract allows
 deaf          reads nothing for three seconds after its first ready, then answers every send
 early         says a status and a received frame in the same write as its describe
 eager         says a received frame before its describe, which comes half a second later
+mute          reads the hello and never describes itself: one status line, one line on standard error, and no more
 """
 
 import json
@@ -36,6 +37,11 @@ def main():
         if kind == "hello":
             if MODE == "long_line":
                 say({"t": "status", "state": "up", "reason": "x" * 300_000})
+                continue
+            if MODE == "mute":
+                sys.stderr.write("the fake transport has nothing to say\n")
+                sys.stderr.flush()
+                say({"t": "status", "state": "up", "reason": "not a describe"})
                 continue
             if MODE == "eager":
                 # A transport that listens before it has read hello hears the medium before it describes itself.

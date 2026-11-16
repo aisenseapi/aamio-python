@@ -114,6 +114,8 @@ class TransportProcess:
         self.process = None
         self.lines = queue.Queue()
         self.early = []           # what the transport said before start returned, for the first poll after it
+        self.said = 0             # lines taken from the transport in all
+        self.last_words = collections.deque(maxlen=3)   # the last lines it wrote on standard error
         self.properties = None
         self.medium = None
         self.written = 0          # sends written in all since the process started
@@ -143,12 +145,12 @@ class TransportProcess:
         hello = {"t": "hello", "aamio_addon": 3, "aamio": {"version": aamio_version, "runtime": runtime}, "state_dir": state_dir}
         if probe:
             hello["probe"] = True
-        self._write(hello)
+        hello_line = self._write(hello)
         until = self.clock() + DESCRIBE_SECONDS
         while self.properties is None:
             left = until - self.clock()
             if left <= 0:
-                self._fail(TransportFailed("transport_timeout", "no describe within %d seconds of hello" % DESCRIBE_SECONDS))
+                self._fail(TransportFailed("transport_timeout", "no describe within %d seconds of hello: %s" % (DESCRIBE_SECONDS, self._silence(hello_line))))
             # What comes before describe or with it is kept for whoever polls next: a status, or a frame that
             # came in as the medium opened. It was dropped here, so a port said as down in the same breath as
             # describe was never heard of (a full run of 16 November 2026). Each round waits for a line as
@@ -157,6 +159,17 @@ class TransportProcess:
             if self.failed is not None:
                 raise self.failed
         return self.properties
+
+    def _silence(self, hello):
+        """What is known of a transport that did not describe itself: whether the hello was written to it, whether its
+        process runs, what it said, and its last lines on standard error. Said alone, no describe told nothing of
+        where the start had stopped, and one that stopped once could not be told from any other (16 November 2026)."""
+        written = "the hello was written to it" if hello.state == "written" else "the hello was not written to it"
+        runs = "its process runs" if self.process.poll() is None else "its process has ended"
+        said = ("it said nothing" if not self.said else "it said 1 line that was no describe" if self.said == 1
+                else "it said %d lines, none of them a describe" % self.said)
+        words = " | ".join(self.last_words)
+        return "%s, %s, and %s%s" % (written, runs, said, ". On standard error: %s" % words if words else "")
 
     def _read_lines(self):
         pending = b""
@@ -193,7 +206,9 @@ class TransportProcess:
                 dropped += len(line)
                 continue
             taken += len(line)
-            self.log("transport %s: %s" % (self.name, line.decode("utf-8", "replace").rstrip()))
+            words = line.decode("utf-8", "replace").rstrip()
+            self.last_words.append(words[:200])
+            self.log("transport %s: %s" % (self.name, words))
 
     def _stderr_lines(self):
         """Standard error line by line, until it ends or stop closes it."""
@@ -411,6 +426,7 @@ class TransportProcess:
             self._fail(TransportFailed("transport_protocol", "a line that is not UTF-8 JSON"))
         if not isinstance(message, dict) or not isinstance(message.get("t"), str):
             self._fail(TransportFailed("transport_protocol", "a line without t"))
+        self.said += 1
         kind = message["t"]
         if kind == "describe":
             if self.properties is not None:
