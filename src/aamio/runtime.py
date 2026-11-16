@@ -5574,13 +5574,14 @@ class Runtime:
 
         budget = getattr(self, "work_budget", None)
         wait = WAIT_DEFAULT if budget is None else max(1, min(WAIT_DEFAULT, int(budget)))
-        result = self.transport_service().send(unb64url(partner["key"]), content, wait=wait)
+        # Without a work budget, as on the command line, a send waits as long as the medium needs: over sound, minutes.
+        result = self.transport_service().send(unb64url(partner["key"]), content, wait=wait, stretch=budget is None)
         # The sha256 is of the envelope the transport carries: what their
         # runtime reads it under and names as seen, as the sha256 of a send
         # over HTTPS is what the service stored.
         sent = {"to": partner["name"]}
         sent.update((field, result[field]) for field in ("via", "profile", "mark", "sha256", "status"))
-        sent["note"] = self.CARRIED_NOTES[result["status"]] % {"via": result["via"], "wait": wait}
+        sent["note"] = self.CARRIED_NOTES[result["status"]] % {"via": result["via"], "wait": result.get("waited", wait)}
         archive_error = self._archive_sent({"kind": "sent", "at": time.time(), "to": partner["name"], "via": result["via"], "profile": result["profile"],
                                             "mark": result["mark"], "status": result["status"],
                                             "body": body if archived_data is None else dict(body, data=archived_data)})

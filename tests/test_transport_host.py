@@ -255,6 +255,27 @@ def test_reassembly_keeps_within_its_limits():
     assert refused.value.code == "frame_conflict" and reassembly.groups == {}
 
 
+def test_on_a_slow_medium_a_group_is_kept_as_long_as_its_frames_take_there_twice_over():
+    """Over sound a frame takes 16 seconds and more, and a message of more than six frames could never be put together
+    within 120 seconds. The group lives twice as long as its frames take on the medium, and never less than 120 seconds."""
+    envelope = carry.write(A, B.public_raw, carry.READABLE, carry.MESSAGE, 0, bytes(8), 1, 1_794_700_300, b"y" * 900)
+    frames = carry.split(envelope, 128)
+    assert len(frames) == 9
+    clock = Clock()
+    slow = Reassembly(clock, frame_seconds=16.3)
+    assert slow.lifetime(9) == 2 * 9 * 16.3 and slow.lifetime(1) == transport_host.FRAME_SECONDS
+    for frame in frames[:-1]:
+        assert slow.add(frame) is None
+        clock.now += 20
+    assert slow.add(frames[-1]) == envelope, "nine frames over 160 seconds, put together"
+    clock = Clock()
+    fast = Reassembly(clock)
+    for frame in frames[:-1]:
+        assert fast.add(frame) is None
+        clock.now += 20
+    assert fast.add(frames[-1]) is None and len(fast.groups) == 1, "on a fast medium the group went after 120 seconds, as before"
+
+
 def test_the_environment_never_says_where_the_home_is():
     env = transport_host.environment(["AAMIO_HOME", "SIM_PORT"], base={"PATH": "/bin", "AAMIO_HOME": "/home/x/.aamio", "SIM_PORT": "4000", "TOKEN": "t"})
     assert env == {"PATH": "/bin", "SIM_PORT": "4000", "AAMIO_ADDON": "3"}
@@ -615,3 +636,118 @@ def test_a_new_owner_uses_no_try_while_the_transport_has_no_room(tmp_path):
         carrier.pump()
     assert carrier.state.durable["outbox"][key]["tries"] == 3 and carrier.outcome(key) == "unknown"
     assert carrier.state.durable["outbox"][key]["envelope"] is None
+
+
+# ------------------------------------------------------------------ waits on a slow medium (phase 3, 16 November 2026)
+
+# Bytes a second over sound: a full Earshot packet of 128 bytes takes 16.3 seconds.
+SOUND = 128 / 16.3
+
+
+class Fixed:
+    """The random part of a turn, fixed."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def random(self):
+        return self.value
+
+
+def slow_medium(room=1000):
+    medium = Medium(room=room, frame=128)
+    medium.properties.update({"max_frame_down": 128, "rate_up": SOUND, "rate_down": SOUND})
+    return medium
+
+
+def test_on_a_slow_medium_an_ask_goes_again_after_the_time_it_and_its_answer_take_there():
+    """Over sound an ask of two frames and its challenge of two take 65 seconds on the medium, and with slack a turn is
+    130. Asked again every 5 seconds, the air was full of asks and nothing else had a turn."""
+    clock, profile = Clock(), carry_state.profile(mode="sealed")
+    medium = slow_medium()
+    carrier = Carrier(CarryState(A), medium, profile, [B.public_raw], clock=clock, wall=lambda: NOW)
+    carrier.random = Fixed(0.0)
+    carrier.open(B.public_raw)
+    carrier.pump()
+    assert len(medium.given) == 2 and carrier.asking(B.public_raw), "an ask is two frames over sound"
+    clock.now += 130
+    carrier.pump()
+    assert len(medium.given) == 2, "not before the ask and its challenge could have gone, twice over"
+    clock.now += 1
+    carrier.pump()
+    assert len(medium.given) == 4, "asked again, with a new session"
+    fast = Medium(room=1000, frame=128)
+    carrier = Carrier(CarryState(A), fast, profile, [B.public_raw], clock=clock, wall=lambda: NOW)
+    carrier.open(B.public_raw)
+    carrier.pump()
+    clock.now += 5.1
+    carrier.pump()
+    assert len(fast.given) == 4, "on a medium that gives no rate, again after 5 seconds as before"
+
+
+def test_on_a_slow_medium_an_open_goes_again_on_a_challenges_turn_while_it_can_still_arrive_in_the_window():
+    """An open that waited for the message behind it and that message's receipt before it went again had two tries in a
+    window of 60 seconds at eight times real time; both were lost in collisions, and so was the session. It goes again
+    on a challenge's turn now, and a try that would come after the window is left out."""
+    clock = Clock()
+    profile = carry_state.profile(mode="sealed", challenge_window=400)
+    at_b = CarryState(B)
+    medium = slow_medium()
+    carrier = Carrier(CarryState(A), medium, profile, [B.public_raw], clock=clock, wall=lambda: NOW)
+    carrier.random = Fixed(0.999)
+    carrier.open(B.public_raw)
+    carrier.pump()
+    _, challenge, _ = at_b.deliver(carry.reassemble(medium.given), [A.public_raw], profile, 0.0, NOW)
+    medium.events = [("received", None, frame) for frame in carry.split(challenge, 128)]
+    carrier.pump()
+    given = len(medium.given)
+    assert given == 4 and not carrier.asking(B.public_raw), "the open went, two frames, and nothing is asked any more"
+    # A turn is 130.4 seconds and up to half of it again: 195.5 with the random part near the top.
+    clock.now += 195
+    carrier.pump()
+    assert len(medium.given) == given
+    clock.now += 1
+    carrier.pump()
+    assert len(medium.given) == given + 2, "the open again, one challenge's turn after it went"
+    # The window is 400 seconds. The challenge's time on the medium went before the open began, and the open's own comes
+    # after: a try that begins later than 334.8 seconds after the challenge came is too late. The third would begin at 391.5.
+    clock.now += 196
+    carrier.pump()
+    clock.now += 200
+    carrier.pump()
+    assert len(medium.given) == given + 2 and carrier.control == {}, "no try that would come after the window, and the open is let go"
+
+
+def test_a_challenge_ends_every_ask_to_that_partner_and_none_is_asked_again():
+    """The first ask was answered after it had been asked again with a new session: the second went on being asked
+    again, and on a half-duplex medium took turns from the message it was asked for."""
+    clock, profile = Clock(), carry_state.profile(mode="sealed")
+    at_b = CarryState(B)
+    medium = Medium(room=1000, frame=128)
+    carrier = Carrier(CarryState(A), medium, profile, [B.public_raw], clock=clock, wall=lambda: NOW)
+    carrier.open(B.public_raw)
+    carrier.pump()
+    first = carry.reassemble(medium.given)
+    clock.now += 5.1
+    carrier.pump()
+    assert carrier.asking(B.public_raw) and len(medium.given) == 4, "no challenge yet: asked again, with a new session"
+    _, challenge, _ = at_b.deliver(first, [A.public_raw], profile, 0.0, NOW)
+    medium.events = [("received", None, frame) for frame in carry.split(challenge, 128)]
+    carrier.pump()
+    assert not carrier.asking(B.public_raw), "the challenge to the first ask ends the second as well"
+    for _ in range(4):
+        clock.now += 5.1
+        carrier.pump()
+    assert not carrier.asking(B.public_raw) and carrier.open_session(B.public_raw) is not None
+
+
+def test_what_a_slow_medium_needs_for_a_session_and_a_send_is_measured_in_its_frames():
+    """A challenge and its open with slack, the window in which an open has three tries, and how long a send waits:
+    over sound 130.4, 456.4 and 326 seconds. On a medium that gives no rate, nothing."""
+    carrier = Carrier(CarryState(A), slow_medium(), carry_state.profile(), [B.public_raw], clock=Clock(), wall=lambda: NOW)
+    assert carrier.handshake_seconds() == pytest.approx(2 * 16.3 * 4) and carrier.airtime_of_handshake() == pytest.approx(2 * 2 * 16.3)
+    assert carrier.window_for_opens() == pytest.approx(2 * 2 * 16.3 + 2 * 1.5 * 2 * 16.3 * 4)
+    assert carrier.patience(12) == pytest.approx(2 * 16.3 * (4 * 2 + 2))
+    fast = Carrier(CarryState(A), Medium(room=1000, frame=128), carry_state.profile(), [B.public_raw], clock=Clock(), wall=lambda: NOW)
+    assert (fast.handshake_seconds(), fast.airtime_of_handshake(), fast.window_for_opens(), fast.patience(12)) == (0, 0, 0, 0)
+

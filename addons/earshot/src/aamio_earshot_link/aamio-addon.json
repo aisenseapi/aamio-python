@@ -1,0 +1,14 @@
+{
+  "aamio_addon": 3,
+  "name": "earshot-link",
+  "version": "0.1.0",
+  "description": "aamio through the air: each frame one Earshot packet, played on the speaker and heard by every microphone within earshot, half duplex, in the audible band unless AAMIO_EARSHOT_MODE says high or ultrasound. It listens only while an aamio that owns the home runs it, and says so. The sound is read on this machine, never sent anywhere. The core seals and verifies; everyone within earshot hears that frames go. About 8 bytes a second: a short message and its receipt take a minute or more.",
+  "transport": {
+    "medium": "sound",
+    "start": {"python": "aamio_earshot_link.transport"},
+    "platforms": ["linux", "darwin", "win32"],
+    "permissions": ["microphone", "speaker"]
+  },
+  "environment": ["AAMIO_EARSHOT_MODE", "AAMIO_EARSHOT_INPUT", "AAMIO_EARSHOT_OUTPUT", "AAMIO_EARSHOT_AIR", "AAMIO_EARSHOT_AIR_PEERS", "AAMIO_EARSHOT_AIR_MUTE",
+                  "AAMIO_EARSHOT_SPEED", "XDG_RUNTIME_DIR", "PULSE_SERVER"]
+}

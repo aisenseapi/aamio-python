@@ -27,6 +27,9 @@ Issues = "https://github.com/aisenseapi/aamio-python/issues"
 
 [project.entry-points."aamio.addons"]
 earshot = "aamio_earshot"
+# The transport under contract 3: the sound as the medium for the messages themselves. A package of its own, since the
+# core reads the manifest of the top-level package an entry point names.
+earshot-link = "aamio_earshot_link"
 
 [tool.setuptools.dynamic]
 version = { attr = "aamio_earshot.__version__" }
@@ -34,6 +37,7 @@ version = { attr = "aamio_earshot.__version__" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# The manifest the core reads without running the add-on.
+# The manifests the core reads without running the add-ons.
 [tool.setuptools.package-data]
 aamio_earshot = ["aamio-addon.json"]
+aamio_earshot_link = ["aamio-addon.json"]

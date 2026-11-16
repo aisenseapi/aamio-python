@@ -25,6 +25,7 @@ a message is taken: that is the state's, and the transport's word ends at
 "handed over".
 """
 
+import random
 import time
 
 from . import carry, carry_state
@@ -32,6 +33,16 @@ from .carry import CarryRefused
 from .transport_host import Reassembly
 
 UNVERIFIED_PER_SECOND = 20
+# A receipt, a challenge or an open, sealed, is under 200 bytes: 192, 163 and 163. An ask is 147.
+ANSWER_BYTES = 200
+# What a sealed message adds to its content, rounded up: 262 bytes carry a body of about 110.
+MESSAGE_BYTES = 160
+# On a slow medium a turn is longer by a random part of up to half of it: two that began together, as two that both
+# ask for a session at once, and lost each other's frames, would otherwise try again together for good.
+JITTER = 0.5
+# How much longer than the bare time on the medium a wait gives: a half-duplex medium takes turns, and what is heard
+# has to be read before it is answered.
+SLACK = 2.0
 
 
 class Carrier:
@@ -41,12 +52,21 @@ class Carrier:
         # One profile for every partner, or a function from a partner's key to its own (B5).
         self.profile_of = profile if callable(profile) else (lambda pk: profile)
         self.clock, self.wall = clock, wall
+        self.random = random.Random()
         self.log = log or (lambda line: None)
         # What the user is to hear, as a message that is not sent again: where the runtime keeps attention, or the log.
         self.note = note or self.log
         self.retry_seconds, self.ask_retry_seconds, self.tries = retry_seconds, ask_retry_seconds, tries
-        self.reassembly = Reassembly(clock)
+        rate_down = process.properties.get("rate_down")
+        frame_down = process.properties.get("max_frame_down")
+        slow = isinstance(rate_down, (int, float)) and not isinstance(rate_down, bool) and rate_down > 0 and isinstance(frame_down, int)
+        self.reassembly = Reassembly(clock, frame_seconds=frame_down / rate_down if slow else 0.0)
         self.frame_limit = process.properties["max_frame_up"]
+        # A full frame's time on the medium, as the transport's rate says, and what the waits are measured in where the
+        # medium is slow. Over sound a frame is 16 seconds: a try every 2 seconds filled the air with copies of a
+        # message whose receipt then had no turn, and a session could not be opened in the 30 seconds a send waited.
+        rate = process.properties.get("rate_up")
+        self.frame_seconds = self.frame_limit / rate if isinstance(rate, (int, float)) and not isinstance(rate, bool) and rate > 0 else 0.0
         self.queue = []          # [frames, to, mark or None, ids given so far], in order
         self.given = {}          # mark -> the frame ids of each try that was given to the transport whole
         self.handed = set()      # marks one try of which the transport said it handed over whole (B6 1)
@@ -87,23 +107,69 @@ class Carrier:
         """Whether a try at the message waits in the queue, not one frame of it given to the transport yet."""
         return any(item[2] == key and not item[3] for item in self.queue)
 
+    def _frames(self, size):
+        """How many frames size bytes take on this medium."""
+        return -(-size // max(1, self.frame_limit - carry.FRAME_HEADER))
+
+    def _turn(self, envelope, base):
+        """How long to wait for the answer to an envelope before it goes again: base, or on a slow medium the time the
+        envelope and what answers it take there, with slack. A fast medium never reaches base."""
+        slow = SLACK * self.frame_seconds * (self._frames(len(envelope)) + self._frames(ANSWER_BYTES))
+        return base if slow <= base else slow * (1 + JITTER * self.random.random())
+
+    def handshake_seconds(self):
+        """What a challenge and its open take on this medium, with slack: what a profile's challenge window has to give."""
+        return SLACK * self.frame_seconds * 2 * self._frames(ANSWER_BYTES)
+
+    def airtime_of_handshake(self):
+        """A challenge's and its open's time on this medium, at most: every frame counted as a full one."""
+        return 2 * self._airtime(ANSWER_BYTES)
+
+    def window_for_opens(self, tries=3):
+        """A challenge window in which an open has tries chances to come through on this medium, the longest turns
+        counted: what a profile for a slow medium is to give. A lost open loses its session."""
+        turn = SLACK * self.frame_seconds * 2 * self._frames(ANSWER_BYTES) * (1 + JITTER)
+        return 2 * self._airtime(ANSWER_BYTES) + (tries - 1) * turn
+
+    def patience(self, size):
+        """How long a send of size bytes of content takes on this medium when nothing is lost: an ask, its challenge and
+        the open, the message and its receipt, with slack. Next to nothing on a fast medium."""
+        return SLACK * self.frame_seconds * (4 * self._frames(ANSWER_BYTES) + self._frames(size + MESSAGE_BYTES))
+
     def _queue(self, envelope, to, key=None, counted=True):
         """An envelope in frames, waiting for room. counted says whether the try it is has been counted in the state:
         the first try of a message is, when the message is written, and a later one is counted as it begins."""
         self.queue.append([carry.split(envelope, self.frame_limit), to, key, [], counted])
 
-    def _control(self, envelope, to, kind, pair, most):
+    def _control(self, envelope, to, kind, pair, most, window):
+        """A challenge or an open, sent again with the same bytes one turn after it went, as long as it can still arrive
+        in the challenge window: a try that began later would come after the window, and be turned down, so it is left out.
+
+        An open goes again on the same turn as a challenge, though the first receipt in its session is what shows it came:
+        waiting for the message behind it and that message's receipt as well, an open over sound had two tries within a
+        window of 60 seconds at eight times real time, and when both were lost, so was the session (16 November 2026).
+        """
+        now = self.clock()
         self.counter += 1
         self.control["c-%d" % self.counter] = {"envelope": envelope, "to": to, "pair": pair, "kind": kind,
-                                               "next": self.clock() + self.retry_seconds, "tries": 1, "most": most}
+                                               "next": now + self._turn(envelope, self.retry_seconds), "tries": 1, "most": most,
+                                               "until": now + window - self._airtime(ANSWER_BYTES)}
         self._queue(envelope, to)
+
+    def _airtime(self, size):
+        """The bare time size bytes take on the medium, as the transport's rate says; nothing on a fast medium."""
+        return self.frame_seconds * self._frames(size)
 
     def open(self, partner_pk):
         """Ask the partner for a session of this party's: the challenge and the open follow in pump."""
         session, envelope = self.state.ask(partner_pk, self.profile_of(partner_pk), self.clock())
-        self.asks[(partner_pk, session)] = {"next": self.clock() + self.ask_retry_seconds, "tries": 1}
+        self.asks[(partner_pk, session)] = {"next": self.clock() + self._turn(envelope, self.ask_retry_seconds), "tries": 1}
         self._queue(envelope, self.addresses.get(partner_pk))
         return session
+
+    def asking(self, partner_pk):
+        """Whether an ask for a session with the partner is under way: sent, and gone again on its own until answered."""
+        return any(pk == partner_pk for pk, _session in self.asks)
 
     def is_open(self, partner_pk, session):
         return (partner_pk, session) in self.answered
@@ -128,7 +194,7 @@ class Carrier:
         """A message in an open session, sent again with the same bytes until its receipt comes: its mark."""
         envelope = self.state.send(partner_pk, session, content, self.profile_of(partner_pk), deadline=deadline, most=self.tries)
         key = carry_state.mark(partner_pk, session, self.state.counter_of(partner_pk, session))
-        self.messages[key] = {"envelope": envelope, "pair": (partner_pk, session), "next": self.clock() + self.retry_seconds}
+        self.messages[key] = {"envelope": envelope, "pair": (partner_pk, session), "next": self.clock() + self._turn(envelope, self.retry_seconds)}
         self._queue(envelope, self.addresses.get(partner_pk), key)
         return key
 
@@ -201,11 +267,16 @@ class Carrier:
             self.addresses[got.sender] = source
         pair = (got.sender, got.session)
         if got.kind == carry.CHALLENGE:
-            self.asks.pop(pair, None)
+            # A session with the partner is open: every ask to it ends, the one this answers and any made since. Asked
+            # again on a slow medium, each took turns from the messages it was asked for.
+            for asked in [key for key in self.asks if key[0] == got.sender]:
+                del self.asks[asked]
             self.answered.setdefault(pair, now)
             # The open is sent again with the same bytes through the challenge window, until the
             # first receipt in the session shows it came: on a medium that loses frames, one try is not enough.
-            self._control(reply, source, "open", pair, self._window_tries(got.sender))
+            # The window was counted from before the challenge went, so the challenge's own time on the medium is off it.
+            window = self.profile_of(got.sender)["challenge_window"]
+            self._control(reply, source, "open", pair, self._window_tries(got.sender), window - self._airtime(ANSWER_BYTES))
             return
         if got.kind == carry.OPEN:
             self._settled(pair, "challenge")
@@ -215,14 +286,17 @@ class Carrier:
             self._settled(pair, "open")
             return
         if got.kind == carry.ASK:
-            # The challenge too is sent again with the same bytes until its open comes, or the window is gone.
-            self._control(reply, source, "challenge", pair, self._window_tries(got.sender))
+            # The challenge too is sent again with the same bytes until its open comes, or the window is gone; a try is
+            # left out when the challenge and its open could no longer come through within it.
+            window = self.profile_of(got.sender)["challenge_window"]
+            self._control(reply, source, "challenge", pair, self._window_tries(got.sender), window - self._airtime(ANSWER_BYTES))
             return
         if reply is not None:
             self._queue(reply, source)
 
     def _window_tries(self, pk):
-        return max(1, int(self.profile_of(pk)["challenge_window"] / self.retry_seconds))
+        # A challenge goes again one turn after it went, a turn being as long as a challenge and its open take.
+        return max(1, int(self.profile_of(pk)["challenge_window"] / max(self.retry_seconds, SLACK * self.frame_seconds * 2 * self._frames(ANSWER_BYTES))))
 
     def _settled(self, pair, kind):
         for key, entry in list(self.control.items()):
@@ -248,7 +322,7 @@ class Carrier:
                 self.log("no receipt for %s, and its tries are used" % key)
                 del self.messages[key]
                 continue
-            entry["next"] = now + self.retry_seconds
+            entry["next"] = now + self._turn(entry["envelope"], self.retry_seconds)
             # Queued, the try has used nothing: it is counted as it begins, in _flush, when it can be given to the
             # transport. Counted here, every new owner used a try as it took the outbox up, room or not, and a
             # budget went with nothing sent (the check of 16 November 2026).
@@ -256,11 +330,11 @@ class Carrier:
         for key, entry in list(self.control.items()):
             if now < entry["next"]:
                 continue
-            if entry["tries"] >= entry["most"]:
+            if entry["tries"] >= entry["most"] or now > entry["until"]:
                 del self.control[key]
                 continue
             entry["tries"] += 1
-            entry["next"] = now + self.retry_seconds
+            entry["next"] = now + self._turn(entry["envelope"], self.retry_seconds)
             self._queue(entry["envelope"], self.addresses.get(entry["pair"][0], entry["to"]))
         for (pk, session), entry in list(self.asks.items()):
             if now < entry["next"]:
@@ -268,7 +342,7 @@ class Carrier:
             del self.asks[(pk, session)]
             if entry["tries"] < self.tries:
                 new_session, envelope = self.state.ask(pk, self.profile_of(pk), now)
-                self.asks[(pk, new_session)] = {"next": now + self.ask_retry_seconds, "tries": entry["tries"] + 1}
+                self.asks[(pk, new_session)] = {"next": now + self._turn(envelope, self.ask_retry_seconds), "tries": entry["tries"] + 1}
                 self._queue(envelope, self.addresses.get(pk))
 
     def _flush(self):
@@ -292,8 +366,8 @@ class Carrier:
                         self.queue.pop(0)
                         continue
                     self.queue[0][4] = True
-                # The next try is one wait after this one began, however long it waited for room.
-                entry["next"] = self.clock() + self.retry_seconds
+                # The next try is one turn after this one began, however long it waited for room.
+                entry["next"] = self.clock() + self._turn(entry["envelope"], self.retry_seconds)
             frame = frames.pop(0)
             frame_id = self.process.send(frame, to=to)
             if frame_id is None:

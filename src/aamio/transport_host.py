@@ -477,12 +477,25 @@ class TransportProcess:
 
 
 class Reassembly:
-    """Frames from the medium, sorted by tag into envelopes, within the limits of A10."""
+    """Frames from the medium, sorted by tag into envelopes, within the limits of A10.
 
-    def __init__(self, clock=time.monotonic):
+    A group is let go FRAME_SECONDS after its first frame, or on a slow medium
+    after twice the time its frames take there, whichever is longer. frame_seconds
+    is a full frame's time on the medium, as the transport's rate says. Over
+    sound a frame takes 16 seconds and more, so a message of more than six
+    frames could never be put together within 120 seconds, and went again and
+    again for nothing.
+    """
+
+    def __init__(self, clock=time.monotonic, frame_seconds=0.0):
         self.clock = clock
-        self.groups = {}   # tag -> {"first", "frames": {index: bytes}, "bytes"}
+        self.frame_seconds = frame_seconds
+        self.groups = {}   # tag -> {"first", "frames": {index: bytes}, "bytes", "count"}
         self.dropped = 0   # groups and frames let go to stay within A10, counted
+
+    def lifetime(self, count):
+        """How long a group of count frames is kept after its first frame."""
+        return max(FRAME_SECONDS, 2 * count * self.frame_seconds)
 
     def add(self, frame):
         """An envelope when a group is complete, None while it is not; CarryRefused for a frame or a group that cannot be.
@@ -491,7 +504,7 @@ class Reassembly:
         so what is held never passes FRAME_BYTES, whatever comes before anything is verified.
         """
         now = self.clock()
-        for tag in [tag for tag, group in self.groups.items() if now - group["first"] > FRAME_SECONDS]:
+        for tag in [tag for tag, group in self.groups.items() if now - group["first"] > self.lifetime(group["count"])]:
             del self.groups[tag]
         if len(frame) < carry.FRAME_HEADER + 1:
             raise carry.CarryRefused("frame_bad_length")
@@ -513,7 +526,7 @@ class Reassembly:
             if oldest == tag:
                 group = None
         if group is None:
-            group = self.groups[tag] = {"first": now, "frames": {}, "bytes": 0}
+            group = self.groups[tag] = {"first": now, "frames": {}, "bytes": 0, "count": frame[8]}
         group["frames"][index] = frame
         group["bytes"] += len(frame)
         frames = list(group["frames"].values())

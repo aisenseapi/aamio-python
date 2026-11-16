@@ -41,6 +41,8 @@ DEFAULT_PROFILE = "sealed"
 RESTART_AFTER = (1, 5, 30)
 CRASH_WINDOW, CRASHES_MOST = 600, 3
 WAIT_DEFAULT = 30
+# The window a profile for a slow medium is told to give, at the least.
+CHALLENGE_WINDOW_SLOW = 300
 # How often a running carrier's list of whom it takes messages from is read again: a partner removed meanwhile, over MCP
 # or by another runtime on the same home, is taken from no longer than this after.
 KNOWN_REFRESH = 2.0
@@ -401,6 +403,44 @@ class Service:
                 self.running[name]["down"] = "%s is bound to a partner and is not an enabled transport here: aamio addon enable %s" % (name, name)
                 self.runtime.log("transport %s: %s" % (name, self.running[name]["down"]))
 
+    def _check_windows(self, name, carrier):
+        """Say it when a partner's profile gives a challenge less time than this medium needs for it and its open.
+
+        Over sound a challenge and its open take close to a minute in the air
+        alone, and two with the waits for a turn, and the profile sealed gives 60
+        seconds: most opens would come too late and be turned down, few sessions
+        would open, and sends would end in carry_not_sent or without a receipt,
+        with nothing to say why.
+        """
+        need = carrier.handshake_seconds()
+        if need <= 0:
+            return
+        try:
+            bindings = self.config.bindings()
+        except CodedRuntimeError:
+            return
+        for key, routes in bindings.items():
+            route = next((route for route in routes if route.get("transport") == name), None)
+            partner = self.runtime.partner_by_key(key)
+            if route is None or partner is None:
+                continue
+            try:
+                window = checked(self.config.profile(route["profile"]))["challenge_window"]
+            except (CodedRuntimeError, CodedValueError, KeyError):
+                continue
+            if window >= need:
+                continue
+            # Long enough for an open to have three tries, in whole minutes, as long as a profile can give at the most.
+            longer = max(CHALLENGE_WINDOW_SLOW, int(-(-carrier.window_for_opens() // 60) * 60))
+            note = getattr(self.runtime, "_note_trouble", None) or (lambda where, state, what: self.runtime.log("transport %s: %s" % (where, what)))
+            longer = min(longer, 600)
+            note(name, "window_too_short", "the profile %s gives a challenge %d seconds to be answered, and on %s a challenge and its open take up "
+                            "to %d seconds in the air, more with the waits for a turn: most sessions with %s cannot open, and a send to %s "
+                            "ends in carry_not_sent or gets no receipt. A window of %d seconds gives an open three tries: aamio transport "
+                            "profile add %s-slow --window %d --lifetime 3600, then aamio transport unbind %s and aamio transport bind %s %s "
+                            "--profile %s-slow" % (route["profile"], window, name, int(carrier.airtime_of_handshake()), partner["name"], partner["name"],
+                                                   longer, route["profile"], longer, partner["name"], partner["name"], name, route["profile"]))
+
     def _say(self, name, text):
         """What a carrier has to tell the user, in attention under the transport's name: added to what waits there unread."""
         runtime = self.runtime
@@ -449,6 +489,7 @@ class Service:
                                            note=lambda text, name=name: self._say(name, text))
                 entry["process"] = process
                 self.runtime.log("transport %s: up" % name)
+                self._check_windows(name, entry["carrier"])
             except (TransportFailed, OSError) as error:
                 process.stop()
                 self._crashed(name, error)
@@ -573,12 +614,16 @@ class Service:
         profile = self.profile_for(pk)
         return carrier.usable_session(pk, profile["lifetime"] - profile["challenge_window"])
 
-    def send(self, pk, content, wait=WAIT_DEFAULT):
+    def send(self, pk, content, wait=WAIT_DEFAULT, stretch=False):
         """content to pk over its first transport, in an open session or in a new one: its mark, the sha256 of its
         envelope and how far it came, and for the trace its size and whether it went sealed.
 
         The sha256 is the one the partner's runtime reads it under and names as
         seen once it has read it.
+
+        With stretch, the wait is as long as the medium needs as well, once its
+        carrier is up and has said its rate: a session and a message over sound
+        take minutes. waited says how long it was.
 
         status is confirmed when the receipt came, handed_over when every frame
         of a try was given to the medium and no receipt came within wait,
@@ -590,8 +635,14 @@ class Service:
         if route is None:
             raise CodedLookupError("transport_unbound", "that partner has no transport")
         name = route["transport"]
-        until = time.monotonic() + wait
+        began = time.monotonic()
+        until = began + wait
         self.start()
+        if stretch and self._wait(lambda: self._carrier(name) is not None, until):
+            with self.lock:
+                carrier = self._carrier(name)
+                if carrier is not None:
+                    until = max(until, began + carrier.patience(len(content)))
         asked = {"carrier": None}
 
         def open_session():
@@ -602,13 +653,16 @@ class Service:
             if self._session(carrier, pk) is not None:
                 return True
             if asked["carrier"] is not carrier:
-                carrier.open(pk)
+                # An ask under way, as one an earlier send made before it gave up, is answered all the same: a new one
+                # beside it only adds frames, and on a half-duplex medium they take each other's turns.
+                if not carrier.asking(pk):
+                    carrier.open(pk)
                 asked["carrier"] = carrier
             return False
 
         if not self._wait(open_session, until):
             raise CodedRuntimeError("carry_not_sent", "the partner did not answer on %s within %d seconds, so nothing was sent. Its aamio has to run on the same network, "
-                                    "as aamio serve or aamio read --wait, with this key bound to %s" % (name, wait, name))
+                                    "as aamio serve or aamio read --wait, with this key bound to %s" % (name, int(until - began), name))
         with self.lock:
             carrier = self._carrier(name)
             try:
@@ -627,7 +681,7 @@ class Service:
         if outcome == "waiting":
             outcome = "handed_over" if handed else "queued"
         return {"via": name, "profile": route["profile"], "mark": key, "status": outcome, "sha256": written["sha256"],
-                "bytes": len(envelope), "sealed": envelope[len(carry.MAGIC)] == carry.SEALED}
+                "bytes": len(envelope), "sealed": envelope[len(carry.MAGIC)] == carry.SEALED, "waited": int(until - began)}
 
     def outbox(self):
         """What was sent over a transport, as aamio transport list shows it: mark and outcome, oldest first."""
