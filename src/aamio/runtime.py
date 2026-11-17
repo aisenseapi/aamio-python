@@ -760,10 +760,24 @@ def normalize_traces(traces, keep, keys):
     return books
 
 
+# The id of a send over a transport is its mark: the partner's key, the session and the counter. Over HTTPS it is "m-"
+# and 16 hex digits, so the two are never taken for each other.
+CARRIED_ID = re.compile(r"[0-9a-f]{64}:[0-9a-f]{16}:[0-9]+")
+
+
 def sent_over(row):
-    """The transport a send in the trace went over, or None for a send over HTTPS."""
+    """The transport a send in the trace went over, or None for a send over HTTPS.
+
+    A runtime from before the transports keeps only the fields it knows when it
+    writes trace.json again, so via is gone from a row it has written. The row
+    is still known by its message id, which over a transport is the mark (the
+    release check of 17 November 2026: old and new clients on one home).
+    """
     via = row.get("via")
-    return via if isinstance(via, str) and via else None
+    if isinstance(via, str) and via:
+        return via
+    message_id = row.get("message_id")
+    return "transport" if isinstance(message_id, str) and CARRIED_ID.fullmatch(message_id) else None
 
 
 def trace_view(book, limit):

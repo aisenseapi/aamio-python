@@ -37,7 +37,7 @@ sys.path.insert(0, "tests")
 from aamio import mcp_server
 from aamio.crypto import Keys, thread_signing_input
 from aamio.gate import GateStop
-from aamio.runtime import Runtime, SendFailed, normalize_traces, trace_view
+from aamio.runtime import sent_over, Runtime, SendFailed, normalize_traces, trace_view
 
 
 class Service:
@@ -743,6 +743,23 @@ def test_a_send_over_a_transport_is_matched_by_its_envelope_and_said_in_words_of
     assert "retry it from the outbox" not in note and "the service stored it" not in note, note
     key = Keys(bytes(range(32))).public
     assert normalize_traces({key: book}, 50, 100)[key]["sent"] == book["sent"], "via is kept when the file is read back"
+
+
+def test_a_send_over_a_transport_that_an_older_runtime_wrote_again_without_via_is_still_known_by_its_mark():
+    """A runtime from before the transports keeps only the fields it knows when it writes trace.json again: via is gone,
+    and a send that its receipt confirmed was taken for one over HTTPS without an answer, and said not to be stored (the
+    release check of 17 November 2026). The mark it is known by says it went over a transport."""
+    named = carried(2, outcome="handed_over")
+    received = [{"at": 1_794_852_100, "channel": "lan", "sha256": hashlib.sha256(b"10").hexdigest(), "seen": named["sha256"],
+                 "encrypted": True, "format": "json", "fields": ["from", "seen", "text"]}]
+    with_via = {"sent": [carried(1), named, carried(3, outcome="handed_over")], "received": received, "last_read": None}
+    stripped = {"sent": [{name: value for name, value in row.items() if name != "via"} for row in with_via["sent"]], "received": received, "last_read": None}
+    assert all("via" not in row for row in stripped["sent"])
+    old, new = trace_view(with_via, 50), trace_view(stripped, 50)
+    assert [row["seen_by_them"] for row in new["sent"]] == [row["seen_by_them"] for row in old["sent"]] == [None, True, None]
+    assert new["no_read_claim"] == old["no_read_claim"] and new["note"] == old["note"], new["note"]
+    https = {"message_id": "m-0123456789abcdef", "at": 1_794_852_000, "status": 201, "outcome": "sent", "sha256": hashlib.sha256(b"x").hexdigest()}
+    assert sent_over(https) is None and sent_over(stripped["sent"][0]) == "transport" and sent_over(carried(1)) == "lan"
 
 
 def test_a_send_over_a_transport_under_a_readable_profile_is_not_said_to_be_sealed():

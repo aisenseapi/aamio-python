@@ -158,6 +158,48 @@ def test_after_the_partner_started_again_the_next_message_goes_in_a_new_session(
         b.close()
 
 
+def failing_writes(runtime, said):
+    """The trace and the archive of a runtime fail at every write, as on a full disk; what they would have said is kept."""
+    keep = runtime._save_json
+
+    def save_json(name, *args, **kwargs):
+        if name == "trace.json":
+            said.append(name)
+            raise OSError("no room for %s (test)" % name)
+        return keep(name, *args, **kwargs)
+
+    def archive(label, record):
+        said.append("archive " + label)
+        raise OSError("no room in the archive (test)")
+
+    runtime._save_json = save_json
+    runtime.archive = archive
+
+
+def test_a_send_and_a_read_over_a_transport_go_whole_when_the_trace_and_the_archive_cannot_be_written(lan_env):
+    """The release check of 17 November 2026, point 2. The trace and the archive record a send and a read; they are not
+    the send or the read. With both failing at every write the message still goes, is read once, and both sides are told
+    what was not written: in the answer, and in attention."""
+    a, b = homes(lan_env)
+    tried = {"a": [], "b": []}
+    try:
+        b.start(require_inbox=False)
+        failing_writes(a, tried["a"])
+        sent = a.send("b", "uten spor")
+        assert sent["status"] == "confirmed" and sent["via"] == "lan", sent
+        assert "trace.json" in tried["a"] and "archive sent" in tried["a"], tried
+        assert sent.get("trace_error") and sent.get("archive_error"), sent
+        failing_writes(b, tried["b"])
+        got = b.read(wait=10)
+        assert [m["body"]["text"] for m in got] == ["uten spor"] and got[0]["archived"] is False, got
+        noted = [note["state"] for note in b.attention_taken()]
+        assert noted, "the read said nothing of what it could not write"
+        assert b.read(wait=0) == [], "handed over once, though nothing was archived or traced"
+    finally:
+        a.close()
+        b.close()
+
+
 def test_a_partner_that_does_not_answer_gets_nothing_and_it_is_said(lan_env, monkeypatch):
     monkeypatch.setattr(transports, "WAIT_DEFAULT", 3)
     a, b = homes(lan_env)
