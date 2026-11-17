@@ -178,7 +178,8 @@ def failing_writes(runtime, said):
 
 def test_a_send_and_a_read_over_a_transport_go_whole_when_the_trace_and_the_archive_cannot_be_written(lan_env):
     """The release check of 17 November 2026, point 2. The trace and the archive record a send and a read; they are not
-    the send or the read. With both failing at every write the message still goes, is read once, and both sides are told
+    the send or the read. This held before the test was written, and the test is here so that it stays so. With both
+    failing at every write the message still goes, is read once, and both sides are told
     what was not written: in the answer, and in attention."""
     a, b = homes(lan_env)
     tried = {"a": [], "b": []}
