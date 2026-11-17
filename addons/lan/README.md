@@ -10,6 +10,20 @@ moves frames. Everyone on the network can see that frames go, how big they
 are, and the four-byte hints in them, and anyone there can send frames, which
 the core then verifies and refuses when they are not from a partner.
 
+## Use
+
+```bash
+pip install aamio-lan
+aamio addon enable lan
+aamio partner add NAME KEY
+aamio transport bind NAME lan
+```
+
+aamio-lan needs aamio 0.7.0 or later. From then on a message to that partner
+goes over the local network, and never over HTTPS instead. The partner binds
+your key the same way. Only the process that owns the home runs the transport:
+`aamio serve`, and `aamio send` or `aamio read --wait` while they run.
+
 ## Settings
 
 The manifest declares these variables, and the core passes them on:
@@ -36,5 +50,5 @@ broadcast brings back, and anything that does not start with `AL1`. The same
 datagrams are sent by the LAN transports of aamio-php and aamio-js, so any of
 them can talk to any other.
 
-The specification is part B of `docs/aamio-tillegg-kontrakt-3-2026-11-15.md` in
-the service repository.
+What a transport is, and how to write one, is at
+https://aamio.at/docs/addons#transports.

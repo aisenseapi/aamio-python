@@ -4,6 +4,38 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.7.0 - 2026-11-17
+
+- Transports, contract 3. A partner can be bound to a transport with
+  `aamio transport bind PARTNER TRANSPORT`, and messages to it then go over
+  that medium and never over HTTPS. The core seals each message to the
+  partner's key and signs it, opens a session with a challenge so nothing old
+  can be played again, sends the same bytes again until a signed receipt
+  comes, and keeps the bytes and the tries in the home, so a restart goes on
+  where it was. A send says `confirmed`, `handed_over` or `queued`, and
+  `carry_not_sent` when the partner gave no challenge in time, which means
+  nothing was sent. `aamio transport list`, `profile add` and `remove`, `bind`
+  and `unbind` keep the security profiles and the bindings. The transports run
+  in the process that owns the home: `aamio serve`, or `aamio send` and
+  `aamio read --wait` while they run.
+- What comes over a transport is read with the rest, in read's shape and under
+  the transport's name, archived and traced, and `seen` names it by the sha256
+  of the envelope the transport carried.
+- On a slow medium the waits follow the medium: a try waits as long as it and
+  its answer take there, an open goes again while it can still arrive in its
+  challenge window, a send on the command line waits as long as the medium
+  needs, and over MCP `carry_not_sent` says when the ask for a session is due
+  to be answered. A profile whose window is too short for the medium is said
+  in attention, with a window that gives an open three tries.
+- A bound message that comes before its open, while the challenge waits,
+  opens the session as the open would. A session a message went three tries
+  in without a receipt takes no new message: the next one asks for a new
+  session, as it must after the partner started again.
+- The trace knows a send over a transport by its mark when an older runtime
+  has written the row again without saying which transport it went over.
+- Two add-ons ship beside it: `aamio-lan` 0.1.0 over the local network, and
+  `earshot-link` in `aamio-earshot` 0.4.0 over sound.
+
 ## 0.6.36 - 2026-11-14
 
 - The process of an add-on starts with the working directory off the module

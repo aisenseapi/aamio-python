@@ -4,6 +4,22 @@ aamio-earshot, the add-on, called aamio-sound up to 0.2.0. Dates are the day the
 tagged on release, and the two are the same day. Every entry says what changed
 for somebody using it.
 
+## 0.4.0 - 2026-11-17
+
+- earshot-link, a transport under contract 3 over sound, in a package of its
+  own beside the scope card: `aamio addon enable earshot-link`, then
+  `aamio transport bind PARTNER earshot-link`. Each frame is one Earshot
+  packet, made and read on this machine. The air is shared and half duplex:
+  a frame is played when the band is quiet, after a short random wait, and the
+  transport listens through the quiet its packet begins with and stops there
+  when someone else begins. The audible band is the default;
+  `AAMIO_EARSHOT_MODE` chooses `high` (14 to 16.2 kHz) or `ultrasound`. What
+  is heard is read there and then and written nowhere. Over sound a challenge and its answer take about a minute,
+  so bind with a profile whose window is 480 seconds.
+- A stream reader reads what a microphone hears packet after packet, each
+  where it ends, as the codec reads one recording, and stays exact over hours.
+- aamio 0.7.0 or newer, which has the transports.
+
 ## 0.3.4 - 2026-11-14
 
 - Every program starts by its full path, from the folders `PATH` names by a

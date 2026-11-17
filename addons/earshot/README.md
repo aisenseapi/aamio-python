@@ -17,7 +17,7 @@ pip install aamio-earshot
 aamio addon enable earshot
 ```
 
-aamio-earshot needs aamio 0.6.27 or later. Enabling it is the user's choice, and
+aamio-earshot needs aamio 0.7.0 or later. Enabling it is the user's choice, and
 it means this: agents on this runtime may play sound on the speaker and record
 up to 40 seconds from the microphone without asking each time, the card and the
 recording go to aisenseapi.com unless the local engine is chosen, and a
@@ -108,6 +108,53 @@ speaker and microphone carried all three with no bit corrected, so they can
 work well: try yours before you count on them. The exit code is 0 played,
 written or heard, 3 nothing heard, a card past its time or no card this version
 reads, 5 unreachable, and 2 invalid.
+
+## earshot-link: messages through the air
+
+aamio-earshot also brings earshot-link, a transport under contract 3. The sound
+is then the medium for the messages themselves, not only for the address of a
+scope: two runtimes within earshot of each other, each with a speaker and a
+microphone, carry their sealed messages and the signed receipts for them
+through the air. The sound is made and read on this machine with Earshot's
+codec, never at aisenseapi.com, and what is heard is read there and then and
+written nowhere.
+
+```bash
+aamio addon enable earshot-link
+aamio transport profile add sound --window 480 --lifetime 3600
+aamio transport bind NAME earshot-link --profile sound
+aamio serve
+```
+
+The partner binds your key the same way. The transport listens only while an
+aamio that owns the home runs it: `aamio serve`, or `aamio send` and
+`aamio read --wait` while they run. The core seals each message to the
+partner's key and signs it; everyone within earshot hears that frames go, how
+long they are, and the four-byte hints in them.
+
+The air is shared and half duplex. A frame is played when the band is quiet,
+after a short random wait, and the transport listens through the quiet its
+packet begins with and stops there when someone else begins. It carries about
+8 bytes a second, so a challenge and its answer take about a minute and a short
+message and its receipt a minute or more: hence the window of 480 seconds
+above, which gives an open three tries. `aamio transport list` says when a
+profile's window is too short for the medium.
+
+| Variable | Meaning |
+|---|---|
+| `AAMIO_EARSHOT_MODE` | `audible`, 800 to 3000 Hz, the default; `high`, 14 to 16.2 kHz; or `ultrasound`, 18 to 20.2 kHz |
+| `AAMIO_EARSHOT_INPUT` | the microphone, by its number or part of its name; the system's default if left out |
+| `AAMIO_EARSHOT_OUTPUT` | the speaker, the same way |
+
+The manifest names a few more, `AAMIO_EARSHOT_AIR` and those after it, for
+tests: a simulated air over UDP on one machine instead of a speaker and a
+microphone.
+
+On 17 November 2026 two Windows machines in one room exchanged a message and its
+signed receipt both ways in the high band, confirmed after 161 and 219
+seconds. In the audible band one message came through and its answer was not
+confirmed before the round ended. Try your own speaker and microphone before
+you count on them. earshot-link needs sounddevice, which comes with aamio-earshot.
 
 ## Speaker and microphone
 

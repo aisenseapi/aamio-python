@@ -27,5 +27,5 @@ The manifest declares these variables, and the core passes them on:
 An address is `sim:<port>`. A frame to nobody in particular goes to every peer,
 the way everyone in range hears a radio.
 
-The specification is part B of `docs/aamio-tillegg-kontrakt-3-2026-11-15.md` in
-the service repository.
+What a transport is, and how to write one, is at
+https://aamio.at/docs/addons#transports.
