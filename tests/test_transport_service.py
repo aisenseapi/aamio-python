@@ -129,6 +129,35 @@ def test_a_message_that_came_and_was_not_read_is_read_after_a_restart(lan_env):
         b.close()
 
 
+def test_after_the_partner_started_again_the_next_message_goes_in_a_new_session(lan_env):
+    """Decided 17 November 2026. b started again takes a's session as expired (A6.8) and refuses what comes in it without a
+    word over the medium (A7): a's next message went in the same session and was lost as well. Once a message in it has
+    gone three tries without a receipt, a new message asks for a new session, and arrives."""
+    port_a, port_b = free_ports(2)
+    a, b = homes(lan_env, (port_a, port_b))
+    try:
+        b.start(require_inbox=False)
+        first = a.send("b", "før omstarten")
+        assert first["status"] == "confirmed", first
+        assert [m["body"]["text"] for m in b.read(wait=5)] == ["før omstarten"]
+        b.close()
+        b = Runtime(home=str(lan_env / "b"), host=NOWHERE, archive=True)
+        b.transport_service().environ = dict(os.environ, **lan_variables(port_b, port_a))
+        b.start(require_inbox=False)
+        a.work_budget = 5
+        lost = a.send("b", "i den gamle økten")
+        assert lost["status"] in ("handed_over", "queued") and lost["mark"].split(":")[1] == first["mark"].split(":")[1], lost
+        outbox = a.transport_service().carry().durable["outbox"]
+        until(lambda: outbox[lost["mark"]]["tries"] >= 3, 15, "the message in the old session never went three tries")
+        a.work_budget = None
+        after = a.send("b", "etter omstarten")
+        assert after["status"] == "confirmed" and after["mark"].split(":")[1] != first["mark"].split(":")[1], after
+        assert [m["body"]["text"] for m in b.read(wait=5)] == ["etter omstarten"]
+    finally:
+        a.close()
+        b.close()
+
+
 def test_a_partner_that_does_not_answer_gets_nothing_and_it_is_said(lan_env, monkeypatch):
     monkeypatch.setattr(transports, "WAIT_DEFAULT", 3)
     a, b = homes(lan_env)

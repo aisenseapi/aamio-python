@@ -396,6 +396,23 @@ class CarryState:
         self._save()
         return True
 
+    def unanswered(self, partner_pk, session, tries):
+        """Whether a message of this party's in its session with the partner went tries tries without a receipt, or ran
+        out of them, while no later message in the session has one: then the partner may no longer have the session, as
+        after a restart, where it is taken as expired (A6.8) and nothing it refuses is answered over the medium (A7)."""
+        self._check()
+        prefix = _pair(partner_pk, session) + ":"
+        confirmed = silent = 0
+        for key, entry in self.durable["outbox"].items():
+            if not key.startswith(prefix):
+                continue
+            counter = int(key[len(prefix):])
+            if entry["receipt"]:
+                confirmed = max(confirmed, counter)
+            elif entry["envelope"] is None or entry["tries"] >= tries:
+                silent = max(silent, counter)
+        return silent > confirmed
+
     def unconfirmed(self):
         """What was sent and waits for its receipt, oldest first: (mark, partner pk, session, counter, envelope)."""
         self._check()
@@ -432,9 +449,27 @@ class CarryState:
 
     # ---------------------------------------------------------- receiving
 
-    def _binding_for(self, pk, session):
+    def _binding_for(self, pk, session, mono=None):
+        """N for a bound message: its session's, or, where the session is not opened, that of a challenge given for it
+        that waits unused in its window, which the message then opens as an open would (A6.2 point 6)."""
         record = self.durable["incoming"].get(_pair(pk, session))
-        return bytes.fromhex(record["nonce"]) if record is not None and record["challenged"] else None
+        if record is not None:
+            return bytes.fromhex(record["nonce"]) if record["challenged"] else None
+        entry = self.waiting.get(_pair(pk, session))
+        if entry is not None and mono is not None and not entry["used"] and mono - entry["t0"] <= entry["window"]:
+            return entry["nonce"]
+        return None
+
+    def _opened(self, pk, pair, entry, profile_in, t):
+        """The session the challenge entry was given for, opened: by its open, or by a bound message that came first."""
+        self._room(pk)
+        entry["used"] = True
+        # The lifetime goes with the session: a profile changed later can shorten it, never lengthen it (A6.6.4).
+        record = self.durable["incoming"][pair] = {"challenged": True, "nonce": entry["nonce"].hex(), "highest": 0, "closed": False,
+                                                    "deadline": None, "opened": t, "closed_at": None, "lifetime": profile_in["lifetime"]}
+        self._save()
+        self.anchors[pair] = entry["t0"]
+        return record
 
     def deliver(self, envelope, known, profile_in, mono, now, rnd=None, seal_rnd=None):
         """An envelope that came over a transport: ('accepted' | 'duplicate', what goes back or None, the reading), or CarryRefused.
@@ -453,7 +488,7 @@ class CarryState:
 
     def _deliver(self, envelope, known, profile_in, mono, now, rnd, seal_rnd):
         t = self._tick(now)
-        got = carry.read(envelope, self.keys, known, self._binding_for)
+        got = carry.read(envelope, self.keys, known, lambda pk, session: self._binding_for(pk, session, mono))
         if callable(profile_in):
             profile_in = profile_in(got.sender)
         if got.mode != (carry.SEALED if profile_in["mode"] == "sealed" else carry.READABLE):
@@ -509,13 +544,7 @@ class CarryState:
             # lengthens nor shortens what was given.
             if mono - entry["t0"] > entry["window"]:
                 raise CarryRefused("carry_nonce_expired")
-            self._room(pk)
-            entry["used"] = True
-            # The lifetime goes with the session: a profile changed later can shorten it, never lengthen it (A6.6.4).
-            incoming[pair] = {"challenged": True, "nonce": entry["nonce"].hex(), "highest": 0, "closed": False,
-                              "deadline": None, "opened": t, "closed_at": None, "lifetime": profile_in["lifetime"]}
-            self._save()
-            self.anchors[pair] = entry["t0"]
+            self._opened(pk, pair, entry, profile_in, t)
             return "accepted", None, got
 
         if kind == carry.CLOSE:
@@ -585,6 +614,11 @@ class CarryState:
         incoming = self.durable["incoming"]
         record, new = incoming.get(pair), None
         bound = bool(got.flags & carry.BOUND)
+        if bound and record is None:
+            # carry.read found N in a challenge that waits in its window, and the message is signed over it as an open
+            # is: it opens the session as the open would, with the same t0 (A6.2 point 6, decided 17 November 2026).
+            # Over sound the open was lost in collisions, and the session with it, while the messages behind it came.
+            record = self._opened(pk, pair, self.waiting[pair], profile_in, t)
         if not bound and pair in self.durable["outgoing"]:
             raise CarryRefused("carry_wrong_direction")
         if not bound:

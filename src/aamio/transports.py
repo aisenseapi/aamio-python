@@ -661,8 +661,9 @@ class Service:
             return False
 
         if not self._wait(open_session, until):
-            raise CodedRuntimeError("carry_not_sent", "the partner did not answer on %s within %d seconds, so nothing was sent. Its aamio has to run on the same network, "
-                                    "as aamio serve or aamio read --wait, with this key bound to %s" % (name, int(until - began), name))
+            hint = "" if stretch else self._not_sent_hint(name, pk, content, until - began)
+            raise CodedRuntimeError("carry_not_sent", "the partner did not answer on %s within %d seconds, so nothing was sent.%s Its aamio has to run "
+                                    "on the same network, as aamio serve or aamio read --wait, with this key bound to %s" % (name, int(until - began), hint, name))
         with self.lock:
             carrier = self._carrier(name)
             try:
@@ -682,6 +683,21 @@ class Service:
             outcome = "handed_over" if handed else "queued"
         return {"via": name, "profile": route["profile"], "mark": key, "status": outcome, "sha256": written["sha256"],
                 "bytes": len(envelope), "sealed": envelope[len(carry.MAGIC)] == carry.SEALED, "waited": int(until - began)}
+
+    def _not_sent_hint(self, name, pk, content, waited):
+        """What carry_not_sent adds when the wait was shorter than a send takes on the medium, as over MCP, where it is the
+        work budget: the ask goes on in the background, and a send after its answer came uses the session it opened.
+        Empty otherwise."""
+        with self.lock:
+            try:
+                carrier = self._carrier(name)
+            except CodedRuntimeError:
+                return ""
+            if carrier is None or waited >= carrier.patience(len(content)):
+                return ""
+            due = carrier.ask_due(pk)
+        return "" if due is None else (" The ask for a session is still under way on %s, and its answer is due in about %d seconds: send again then, and that send "
+                                       "uses the session it opens." % (name, max(5, int(due))))
 
     def outbox(self):
         """What was sent over a transport, as aamio transport list shows it: mark and outcome, oldest first."""

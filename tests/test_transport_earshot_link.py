@@ -340,3 +340,32 @@ def test_a_profile_whose_window_is_shorter_than_a_challenge_and_its_open_take_is
         a.close()
         b.close()
 
+
+def test_over_mcp_a_send_that_runs_out_of_its_budget_says_when_the_ask_is_answered_and_the_next_send_uses_it(earshot_env):
+    """Decided 17 November 2026. Over MCP a send waits the work budget, shorter than a session takes over sound. It says
+    that the ask is still under way and when its answer is due, and a send after that uses the session it opened."""
+    a, b = homes(earshot_env)
+    try:
+        b.start(require_inbox=False)
+        a.work_budget = 5
+        with pytest.raises(CodedRuntimeError) as refused:
+            a.send("b", "for tidlig")
+        said = str(refused.value)
+        assert refused.value.error_code == "carry_not_sent" and "still under way on earshot-link" in said and "send again then" in said, said
+        service = a.transport_service()
+
+        def opened():
+            with service.lock:
+                carrier = service.running["earshot-link"]["carrier"]
+                return carrier is not None and carrier.usable_session(b.keys.public_raw, 3600) is not None
+
+        until(opened, 120, "the ask was never answered")
+        sent = a.send("b", "i tide")
+        # Within five seconds the message may still wait behind the open in the queue: queued, and then confirmed.
+        assert sent["status"] in ("confirmed", "handed_over", "queued"), sent
+        until(lambda: outcome(a, sent["mark"]) == "confirmed", 120, "no receipt: %s" % sent)
+        assert [m["body"]["text"] for m in b.read(wait=0)] == ["i tide"]
+    finally:
+        a.close()
+        b.close()
+

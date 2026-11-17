@@ -751,3 +751,59 @@ def test_what_a_slow_medium_needs_for_a_session_and_a_send_is_measured_in_its_fr
     fast = Carrier(CarryState(A), Medium(room=1000, frame=128), carry_state.profile(), [B.public_raw], clock=Clock(), wall=lambda: NOW)
     assert (fast.handshake_seconds(), fast.airtime_of_handshake(), fast.window_for_opens(), fast.patience(12)) == (0, 0, 0, 0)
 
+
+# ------------------------------------------------------------------ decided 17 November 2026
+
+def asked_and_answered(clock, medium, at_b, profile):
+    """A's carrier asks over the medium, B's state answers, and the challenge comes back: A's session, answered."""
+    carrier = Carrier(CarryState(A), medium, profile, [B.public_raw], clock=clock, wall=lambda: NOW)
+    session = carrier.open(B.public_raw)
+    carrier.pump()
+    _, challenge, _ = at_b.deliver(carry.reassemble(medium.given), [A.public_raw], profile, 0.0, NOW)
+    medium.events = [("received", None, frame) for frame in carry.split(challenge, medium.properties["max_frame_up"])]
+    carrier.pump()
+    assert carrier.usable_session(B.public_raw, 3600) == session
+    return carrier, session
+
+
+def test_a_session_a_message_went_three_tries_in_without_a_receipt_takes_no_new_message():
+    """B started again takes A's session as expired (A6.8) and refuses what comes in it without a word over the medium
+    (A7): every message after went the same way. Once a message in it has gone three tries without a receipt, the next
+    message asks for a new session; a receipt that comes after all makes the session usable again."""
+    clock, profile = Clock(), carry_state.profile(mode="sealed")
+    at_b = CarryState(B)
+    medium = Medium(room=1000, frame=128)
+    carrier, session = asked_and_answered(clock, medium, at_b, profile)
+    key = carrier.send(B.public_raw, session, b"hei")
+    carrier.pump()
+    clock.now += 2.1
+    carrier.pump()
+    assert carrier.usable_session(B.public_raw, 3600) == session, "two tries without a receipt: the session still takes messages"
+    clock.now += 2.1
+    carrier.pump()
+    assert carrier.state.durable["outbox"][key]["tries"] == 3
+    assert carrier.usable_session(B.public_raw, 3600) is None, "three: the next message asks for a new session"
+    _, receipt, _ = at_b.deliver(at_a_envelope(carrier.state, key), [A.public_raw], profile, 10.0, NOW)
+    medium.events = [("received", None, frame) for frame in carry.split(receipt, 128)]
+    carrier.pump()
+    assert carrier.confirmed(key) and carrier.usable_session(B.public_raw, 3600) == session, "the receipt came after all"
+
+
+def test_a_bound_message_whose_open_was_lost_opens_its_session_and_the_challenge_goes_no_more():
+    """Over sound the open was lost in collisions, the session with it, and the messages behind it were refused. A bound
+    message is signed over the challenge as the open is, so it opens the session itself, and the challenge stops."""
+    clock, profile = Clock(), carry_state.profile(mode="sealed")
+    at_a = CarryState(A)
+    medium = Medium(room=1000, frame=128)
+    carrier = Carrier(CarryState(B), medium, profile, [A.public_raw], clock=clock, wall=lambda: NOW)
+    session, ask = at_a.ask(B.public_raw, profile, 0.0)
+    medium.events = [("received", None, frame) for frame in carry.split(ask, 128)]
+    carrier.pump()
+    assert [entry["kind"] for entry in carrier.control.values()] == ["challenge"]
+    _, _opening, _ = at_a.deliver(carry.reassemble(medium.given), [B.public_raw], profile, 0.0, NOW)
+    message = at_a.send(B.public_raw, session, b"hei uten open", profile)
+    medium.events = [("received", None, frame) for frame in carry.split(message, 128)]
+    carrier.pump()
+    assert [content for _pk, _session, _counter, content, _key in carrier.inbox] == [b"hei uten open"]
+    assert carrier.control == {}, "the challenge is not sent again: the message opened the session"
+

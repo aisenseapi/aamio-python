@@ -1558,15 +1558,6 @@
     {
      "party": "B",
      "op": "deliver",
-     "envelope": "414d433101010124f6ed6a56475aa701020304050607080000000100000000000968656920667261204150b3da9ebba6edf02e316f068f3f43043412d92a405a3c01afb8e7e8a1f1fb36aa5b3f167e5e380dbbda370a22a8db3a47e261147bea6d59f66f550465a4800d",
-     "mono": 2,
-     "now": 1794700000,
-     "result": "refused",
-     "code": "carry_session_unknown"
-    },
-    {
-     "party": "B",
-     "op": "deliver",
      "envelope": "414d433101050024f6ed6a56475aa701020304050607080000000000000000001041e9085341f2ddf1025fc532cbb1bf4491bff44a77e4d3badfa0b661796383e74f49c69a774f8daef0e5618c88b2538ce4f872a1885077ffc70611aa201d66a5378cadc54c6f1d3532a6cfc4eaddfc0f",
      "mono": 5,
      "now": 1794700000,
@@ -2405,7 +2396,7 @@
      "mono": 7,
      "now": 1795305401,
      "result": "refused",
-     "code": "carry_session_unknown"
+     "code": "carry_bad_signature"
     }
    ]
   },
@@ -3173,6 +3164,197 @@
      "now": 1794700062,
      "result": "refused",
      "code": "carry_challenge_unexpected"
+    }
+   ]
+  },
+  {
+   "name": "a bound message before its open opens the session while the challenge waits, and the open after it is used",
+   "parties": [
+    {
+     "name": "B",
+     "known": [
+      "A"
+     ],
+     "profile": {
+      "mode": "readable",
+      "challenge": true,
+      "accept_unchallenged": false,
+      "lifetime": 600,
+      "challenge_window": 60,
+      "clock_trusted": true
+     }
+    }
+   ],
+   "steps": [
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101030024f6ed6a56475aa701020304050607080000000000000000000063390772fa69b2c07e4978ccff8d049ba1cd7449fd4425b4a30ae86590aa5a325e9fa9b03863000616d5b97658ae16095146aad73a69b17066a7eb0f2e777705",
+     "mono": 0,
+     "now": 1794700000,
+     "rnd": "4681cf4db1805744700936766ee1a1430e22b657b02dae3073b783e5255e36a7",
+     "result": "accepted",
+     "reply": "414d433101040056475aa724f6ed6a01020304050607080000000000000000001041e9085341f2ddf1025fc532cbb1bf44dce1b86c1ccf605d077360a3da6856752bcef7335fd5cb6f1d07d68a92dd4fa2fce8de3d129d8cc091ceb26abfea9976e5b5203bc7d220ca2fedd01171b2470e"
+    },
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101010124f6ed6a56475aa701020304050607080000000100000000000968656920667261204150b3da9ebba6edf02e316f068f3f43043412d92a405a3c01afb8e7e8a1f1fb36aa5b3f167e5e380dbbda370a22a8db3a47e261147bea6d59f66f550465a4800d",
+     "mono": 2,
+     "now": 1794700000,
+     "result": "accepted",
+     "reply": "414d433101020056475aa724f6ed6a01020304050607080000000000000000002d01010203040506070800000001baaf8960c77254c7f2d07b62a13ea73c03e7c46423dafa15884b52f057783f7b3644212a90106455a6cfb779f18c44a70b4518b14deb9f55eb3b71da200a1ec4721645f8499ad216a7e57c3d2cd319b68c751fa9fef489e519418faccd548401"
+    },
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101050024f6ed6a56475aa701020304050607080000000000000000001041e9085341f2ddf1025fc532cbb1bf4491bff44a77e4d3badfa0b661796383e74f49c69a774f8daef0e5618c88b2538ce4f872a1885077ffc70611aa201d66a5378cadc54c6f1d3532a6cfc4eaddfc0f",
+     "mono": 5,
+     "now": 1794700000,
+     "result": "refused",
+     "code": "carry_nonce_used"
+    },
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101010124f6ed6a56475aa701020304050607080000000100000000000968656920667261204150b3da9ebba6edf02e316f068f3f43043412d92a405a3c01afb8e7e8a1f1fb36aa5b3f167e5e380dbbda370a22a8db3a47e261147bea6d59f66f550465a4800d",
+     "mono": 6,
+     "now": 1794700000,
+     "result": "duplicate",
+     "reply": "414d433101020056475aa724f6ed6a01020304050607080000000000000000002d01010203040506070800000001baaf8960c77254c7f2d07b62a13ea73c03e7c46423dafa15884b52f057783f7b3644212a90106455a6cfb779f18c44a70b4518b14deb9f55eb3b71da200a1ec4721645f8499ad216a7e57c3d2cd319b68c751fa9fef489e519418faccd548401"
+    },
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101010124f6ed6a56475aa70102030405060708000000020000000000096865692066726120411b7ea9c176e3fd9aa2114bc7347c46193685a18e8e4dce38bf4316500cd2daa3a560acde37f91c9054d6914e6564b49f1710cce22bfbfa575046d9aa2d8ed009",
+     "mono": 7,
+     "now": 1794700000,
+     "result": "accepted",
+     "reply": "414d433101020056475aa724f6ed6a01020304050607080000000000000000002d010102030405060708000000022028d4e0e0bc18369bbb4f7de2d543c212b9a0f18794147cc498845166ae0efa66aa13ae4780af802d696dbe0d195086d2beb2e314aff88876dd777aa5d5b959577fc0b3cab2bc069845162a5c64eb78e5264c9062cf2d730e3bc80df6f82f0e"
+    },
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101010124f6ed6a56475aa7010203040506070800000003000000000009686569206672612041a483d608b15f5da823fa42233e16b676f4e976c22e99dd43a28f2d4dc78efb3925eea156d139ab5ef8316ad1deb95491b6ea81db0fa69bdf1c74420e77540f0b",
+     "mono": 600,
+     "now": 1794700000,
+     "result": "accepted",
+     "reply": "414d433101020056475aa724f6ed6a01020304050607080000000000000000002d01010203040506070800000003cf4d9c8049ef8b12fe9fd08e195eb4c078cb03915f86ff6aed80a7f6dda455b893e1c349f3d243296ee4aeb63b59915bd2e2444f49639ca7218275910b19331e40d8c7c954118210d8891cc9af6db0d6070fc508f6d12c6f82d9efa229b7bf0e"
+    },
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101010124f6ed6a56475aa701020304050607080000000400000000000968656920667261204188cfb3a7c2317381f84a995ed1e3bcaab6acdaf14a04a861fde99c5c905f5f2ee21df5a9814407deffb54108169185d71f9474dc7b32dc65d6dbb14cd6377a0f",
+     "mono": 601,
+     "now": 1794700000,
+     "result": "refused",
+     "code": "carry_session_expired"
+    }
+   ]
+  },
+  {
+   "name": "a bound message after the challenge's window opens nothing, and the open is late too",
+   "parties": [
+    {
+     "name": "B",
+     "known": [
+      "A"
+     ],
+     "profile": {
+      "mode": "readable",
+      "challenge": true,
+      "accept_unchallenged": false,
+      "lifetime": 600,
+      "challenge_window": 60,
+      "clock_trusted": true
+     }
+    }
+   ],
+   "steps": [
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101030024f6ed6a56475aa701020304050607080000000000000000000063390772fa69b2c07e4978ccff8d049ba1cd7449fd4425b4a30ae86590aa5a325e9fa9b03863000616d5b97658ae16095146aad73a69b17066a7eb0f2e777705",
+     "mono": 0,
+     "now": 1794700000,
+     "rnd": "4681cf4db1805744700936766ee1a1430e22b657b02dae3073b783e5255e36a7",
+     "result": "accepted",
+     "reply": "414d433101040056475aa724f6ed6a01020304050607080000000000000000001041e9085341f2ddf1025fc532cbb1bf44dce1b86c1ccf605d077360a3da6856752bcef7335fd5cb6f1d07d68a92dd4fa2fce8de3d129d8cc091ceb26abfea9976e5b5203bc7d220ca2fedd01171b2470e"
+    },
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101010124f6ed6a56475aa701020304050607080000000100000000000968656920667261204150b3da9ebba6edf02e316f068f3f43043412d92a405a3c01afb8e7e8a1f1fb36aa5b3f167e5e380dbbda370a22a8db3a47e261147bea6d59f66f550465a4800d",
+     "mono": 61,
+     "now": 1794700000,
+     "result": "refused",
+     "code": "carry_session_unknown"
+    },
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101050024f6ed6a56475aa701020304050607080000000000000000001041e9085341f2ddf1025fc532cbb1bf4491bff44a77e4d3badfa0b661796383e74f49c69a774f8daef0e5618c88b2538ce4f872a1885077ffc70611aa201d66a5378cadc54c6f1d3532a6cfc4eaddfc0f",
+     "mono": 62,
+     "now": 1794700000,
+     "result": "refused",
+     "code": "carry_nonce_expired"
+    }
+   ]
+  },
+  {
+   "name": "a bound message signed over another challenge opens nothing, and the open still does",
+   "parties": [
+    {
+     "name": "B",
+     "known": [
+      "A"
+     ],
+     "profile": {
+      "mode": "readable",
+      "challenge": true,
+      "accept_unchallenged": false,
+      "lifetime": 600,
+      "challenge_window": 60,
+      "clock_trusted": true
+     }
+    }
+   ],
+   "steps": [
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101030024f6ed6a56475aa701020304050607080000000000000000000063390772fa69b2c07e4978ccff8d049ba1cd7449fd4425b4a30ae86590aa5a325e9fa9b03863000616d5b97658ae16095146aad73a69b17066a7eb0f2e777705",
+     "mono": 0,
+     "now": 1794700000,
+     "rnd": "4681cf4db1805744700936766ee1a1430e22b657b02dae3073b783e5255e36a7",
+     "result": "accepted",
+     "reply": "414d433101040056475aa724f6ed6a01020304050607080000000000000000001041e9085341f2ddf1025fc532cbb1bf44dce1b86c1ccf605d077360a3da6856752bcef7335fd5cb6f1d07d68a92dd4fa2fce8de3d129d8cc091ceb26abfea9976e5b5203bc7d220ca2fedd01171b2470e"
+    },
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101010124f6ed6a56475aa701020304050607080000000100000000000968656920667261204158f69aab72af201f926bb8361a53e70c81666c4b8226a633cb3ae1ad0fccb81517b6d9d33380637b9f255792e5b74fce6dd6049ea02322aab917326ed8ba5e03",
+     "mono": 2,
+     "now": 1794700000,
+     "result": "refused",
+     "code": "carry_bad_signature"
+    },
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101050024f6ed6a56475aa701020304050607080000000000000000001041e9085341f2ddf1025fc532cbb1bf4491bff44a77e4d3badfa0b661796383e74f49c69a774f8daef0e5618c88b2538ce4f872a1885077ffc70611aa201d66a5378cadc54c6f1d3532a6cfc4eaddfc0f",
+     "mono": 3,
+     "now": 1794700000,
+     "result": "accepted"
+    },
+    {
+     "party": "B",
+     "op": "deliver",
+     "envelope": "414d433101010124f6ed6a56475aa701020304050607080000000100000000000968656920667261204150b3da9ebba6edf02e316f068f3f43043412d92a405a3c01afb8e7e8a1f1fb36aa5b3f167e5e380dbbda370a22a8db3a47e261147bea6d59f66f550465a4800d",
+     "mono": 4,
+     "now": 1794700000,
+     "result": "accepted",
+     "reply": "414d433101020056475aa724f6ed6a01020304050607080000000000000000002d01010203040506070800000001baaf8960c77254c7f2d07b62a13ea73c03e7c46423dafa15884b52f057783f7b3644212a90106455a6cfb779f18c44a70b4518b14deb9f55eb3b71da200a1ec4721645f8499ad216a7e57c3d2cd319b68c751fa9fef489e519418faccd548401"
     }
    ]
   }

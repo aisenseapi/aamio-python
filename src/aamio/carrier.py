@@ -43,6 +43,10 @@ JITTER = 0.5
 # How much longer than the bare time on the medium a wait gives: a half-duplex medium takes turns, and what is heard
 # has to be read before it is answered.
 SLACK = 2.0
+# A session a message went this many tries in without a receipt, with no later message in it confirmed, takes no new
+# message: the partner may have started again and taken it as expired (A6.8), and what it refuses is never answered over
+# the medium (A7), so every message after would be lost in it too. The next one asks for a new session.
+UNANSWERED_TRIES = 3
 
 
 class Carrier:
@@ -183,12 +187,21 @@ class Carrier:
         return found
 
     def usable_session(self, partner_pk, seconds):
-        """The newest session of this party's with the partner whose challenge came less than seconds ago, or None."""
+        """The newest session of this party's with the partner whose challenge came less than seconds ago, or None. None
+        too when a message in it went UNANSWERED_TRIES tries without a receipt and nothing later in it was confirmed (A7):
+        the next message asks for a new session."""
         found, now = None, self.clock()
         for (pk, session), at in self.answered.items():
             if pk == partner_pk and now - at < seconds:
                 found = session
+        if found is not None and self.state.unanswered(partner_pk, found, UNANSWERED_TRIES):
+            return None
         return found
+
+    def ask_due(self, partner_pk):
+        """Seconds until the answer to the ask under way with the partner is due on this medium, or None without one."""
+        due = [entry["next"] for (pk, _session), entry in self.asks.items() if pk == partner_pk]
+        return None if not due else max(0.0, min(due) - self.clock())
 
     def send(self, partner_pk, session, content, deadline=0):
         """A message in an open session, sent again with the same bytes until its receipt comes: its mark."""
@@ -291,6 +304,9 @@ class Carrier:
             window = self.profile_of(got.sender)["challenge_window"]
             self._control(reply, source, "challenge", pair, self._window_tries(got.sender), window - self._airtime(ANSWER_BYTES))
             return
+        # A message: its receipt goes back. A bound one may have opened its session itself, its open lost (A6.2 point 6),
+        # so the challenge is not sent again either.
+        self._settled(pair, "challenge")
         if reply is not None:
             self._queue(reply, source)
 
