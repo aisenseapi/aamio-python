@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "addons", "earshot", "src"))
 
 from aamio import addon_process, addons, cli, mcp_server
+from aamio.crypto import Keys
 from aamio.runtime import Runtime
 from aamio_earshot import __version__ as ADDON_VERSION, audio, card, codec, process, programs, service
 from local_aisense import Receiver, busy, cut, direct, stall
@@ -33,6 +34,9 @@ LONG_KEY = "a1" * 32
 READ_KEY = "0123456789abcdefghijklmnop"
 # The clock of these tests: a card made now is good until NOW + 3600 unless it says otherwise.
 NOW = 1794150000
+# Public keys as aamio prints them, for the card of 0.5.0.
+KEY = Keys(bytes(range(1, 33))).public
+OTHER_KEY = Keys(bytes(range(33, 65))).public
 
 
 def wav(seconds=1.0, rate=48000):
@@ -198,6 +202,117 @@ def test_the_card_command_makes_the_text_without_sound_or_network():
     assert said["exit_code"] == 2 and said["is_error"] is True and said["result"]["reason"] == "a_key_not_an_address"
 
 
+# ------------------------------------------------------------ the card of 0.5.0
+
+def test_a_card_of_0_5_0_says_the_media_and_carries_the_key_and_reads_back():
+    assert len(KEY) == 43 and not card.KEY_SHAPED.fullmatch(KEY)
+    made = card.make(ADDRESS, "rom-42", NOW + 3600, "lan,internet", KEY)
+    assert made == "aamio:scope/%s?n=rom-42&t=%d&v=lan,internet&k=%s" % (ADDRESS, NOW + 3600, KEY)
+    assert card.read(made) == {"kind": "scope", "address": ADDRESS, "name": "rom-42", "expires_at": NOW + 3600, "via": ["lan", "internet"], "key": KEY}
+    assert card.make(ADDRESS, "rom-42", NOW + 3600, ["lan", "internet"], KEY) == made, "via as a list is the same card"
+    assert len(made.encode("utf-8")) == 115 <= card.MAX_BYTES
+    # Without via and key the card is the one 0.4.0 made, and it reads back without either.
+    assert card.make(ADDRESS, "rom-42", NOW, "internet") == card.make(ADDRESS, "rom-42", NOW, []) == card.make(ADDRESS, "rom-42", NOW) == "aamio:scope/%s?n=rom-42&t=%d" % (ADDRESS, NOW)
+    assert card.read(card.make(ADDRESS, "rom-42", NOW)) == {"kind": "scope", "address": ADDRESS, "name": "rom-42", "expires_at": NOW}
+    assert card.read(card.make(ADDRESS, key=KEY)) == {"kind": "scope", "address": ADDRESS, "name": None, "expires_at": None, "key": KEY}
+    # A medium this earshot has no transport for is read, since a card from a later one may name it, and the order of the
+    # parameters is free, as it was for n and t.
+    assert card.read("aamio:scope/%s?v=ble,internet&k=%s" % (ADDRESS, KEY))["via"] == ["ble", "internet"]
+    assert card.read("aamio:scope/%s?k=%s&v=sound&t=%d" % (ADDRESS, KEY, NOW))["via"] == ["sound"]
+    with pytest.raises(card.Refused) as refused:
+        card.make(ADDRESS, "R" + "x" * 31, NOW, "lan,sound,internet", KEY)
+    assert refused.value.reason == "card_too_long" and "147 bytes" in refused.value.fix and "128" in refused.value.fix
+
+
+def _flipped(key):
+    """key with the last character changed in a bit base64url leaves out: the same 32 bytes, said another way."""
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    return key[:-1] + alphabet[alphabet.index(key[-1]) ^ 1]
+
+
+@pytest.mark.parametrize("via,key,reason", [
+    ("lan", None, "key_needed"),
+    (["sound", "internet"], None, "key_needed"),
+    ("lan", SCOPE_KEY, "a_key_not_a_public_key"),
+    ("lan", LONG_KEY, "a_key_not_a_public_key"),
+    ("lan", "a" * 43, "a_key_not_a_public_key"),
+    (None, READ_KEY, "a_key_not_a_public_key"),
+    ("lan", KEY[:-1], "invalid_key"),
+    ("lan", KEY + "A", "invalid_key"),
+    ("lan", _flipped(KEY), "invalid_key"),
+    ("lan", "!" * 43, "invalid_key"),
+    ("lan", 12345, "invalid_key"),
+    ("LAN", KEY, "invalid_via"),
+    ("lan,lan", KEY, "invalid_via"),
+    ("a,b,c,d", KEY, "invalid_via"),
+    (",lan", KEY, "invalid_via"),
+    ("lan,", KEY, "invalid_via"),
+    ("lan sound", KEY, "invalid_via"),
+    (["lan", 5], KEY, "invalid_via"),
+    (5, KEY, "invalid_via"),
+])
+def test_a_card_that_names_a_medium_beside_internet_carries_a_public_key_and_never_a_secret(via, key, reason):
+    with pytest.raises(card.Refused) as refused:
+        card.make(ADDRESS, "rom-42", NOW, via, key)
+    assert refused.value.reason == reason
+    if reason == "a_key_not_a_public_key":
+        assert "never go into the air" in refused.value.fix and "aamio whoami" in refused.value.fix
+
+
+@pytest.mark.parametrize("query,reason", [
+    ("v=", "invalid_via"),
+    ("v=LAN", "invalid_via"),
+    ("v=lan,lan", "invalid_via"),
+    ("v=a,b,c,d", "invalid_via"),
+    ("k=short", "invalid_key"),
+    ("k=" + "a" * 43, "invalid_key"),
+    ("k=" + SCOPE_KEY, "invalid_key"),
+    ("k=" + _flipped(KEY), "invalid_key"),
+    ("v=lan&v=lan", "not_this_version"),
+    ("v=lan&x=1", "not_this_version"),
+])
+def test_a_card_of_0_5_0_that_is_not_one_is_not_read_in_part(query, reason):
+    with pytest.raises(card.NotUnderstood) as why:
+        card.read("aamio:scope/%s?%s" % (ADDRESS, query))
+    assert why.value.reason == reason
+
+
+def test_the_card_command_puts_the_media_and_the_key_given_on_the_card():
+    said = run(request("command", "card", address=ADDRESS, name="rom-42", via="lan,internet", key=KEY))
+    result = said["result"]
+    assert said["exit_code"] == 0 and result["card"] == "aamio:scope/%s?n=rom-42&t=%d&v=lan,internet&k=%s" % (ADDRESS, NOW + 3600, KEY)
+    assert result["bytes"] == len(result["card"]) and "lan, then internet" in result["note"] and "0.5.0" in result["note"] and "public key" in result["note"]
+    said = run(request("command", "card", address=ADDRESS, name="rom-42"))
+    assert "0.5.0" not in said["result"]["note"], "a card without via and key is said as it was"
+    said = run(request("command", "card", address=ADDRESS, via="lan"))
+    assert said["exit_code"] == 2 and said["result"]["reason"] == "key_needed" and "aamio whoami" in said["result"]["fix"]
+
+
+def test_over_mcp_the_key_on_a_card_is_the_runtime_s_own_and_only_when_a_medium_needs_it():
+    def tool(**arguments):
+        asked = request("tool", "aamio_addon_earshot_broadcast", **arguments)
+        asked["own_key"] = KEY
+        return asked
+    aisense = Aisense()
+    said = run(tool(address=ADDRESS, via=["lan", "internet"]), aisense)
+    assert said["exit_code"] == 0 and aisense.encoded[-1][0] == "aamio:scope/%s?t=%d&v=lan,internet&k=%s" % (ADDRESS, NOW + 3600, KEY)
+    assert "everyone within earshot hears it" in said["result"]["note"]
+    run(tool(address=ADDRESS, via=["sound"], key=OTHER_KEY), aisense)
+    assert aisense.encoded[-1][0].endswith("&v=sound&k=" + KEY), "a key given in the call is never the one a tool puts on the card"
+    for arguments in ({}, {"via": ["internet"]}):
+        run(tool(address=ADDRESS, **arguments), aisense)
+        assert aisense.encoded[-1][0] == "aamio:scope/%s?t=%d" % (ADDRESS, NOW + 3600), "without a medium beside internet the card is today's, own key or not"
+    said = run(dict(tool(address=ADDRESS, via=["lan"]), own_key=None), aisense)
+    assert said["exit_code"] == 2 and said["result"]["reason"] == "key_needed"
+
+
+def test_broadcast_with_a_medium_and_a_key_given_plays_the_card_of_0_5_0():
+    aisense, speaker = Aisense(), Speaker()
+    said = run(request("command", "broadcast", address=ADDRESS, via="sound,internet", key=KEY), aisense, speaker)
+    assert said["exit_code"] == 0 and said["result"]["status"] == "played" and aisense.encoded == [("aamio:scope/%s?t=%d&v=sound,internet&k=%s" % (ADDRESS, NOW + 3600, KEY), "audible")]
+    assert "0.5.0" in said["result"]["note"] and len(speaker.played) == 1
+
+
 # ---------------------------------------------------------------- broadcast
 
 def test_broadcast_plays_the_card_and_leaves_nothing_behind():
@@ -284,6 +399,19 @@ def test_listen_records_reads_and_deletes_the_recording_before_it_is_sent():
     assert "untrusted" not in result["note"] and "anyone within earshot" in result["note"] and "may be a recording of any age" in result["note"], "a card with no end is said to be one"
     said = run(request("command", "listen", seconds="12"), Aisense(text="aamio:scope/" + ADDRESS), microphone=Microphone())
     assert said["result"]["recorded_seconds"] == 12 and "aamio scope add heard-k7rq2m --address %s" % ADDRESS in said["result"]["next"], "a card with no name gets one to keep it under, in the command line's words"
+
+
+def test_a_card_heard_with_media_and_a_key_says_how_to_bind_and_binds_nothing():
+    heard = card.make(ADDRESS, "rom-42", NOW + 3600, "lan,internet", KEY)
+    said = run(request("command", "listen"), Aisense(text=heard), microphone=Microphone())
+    result = said["result"]
+    assert said["exit_code"] == 0 and result["status"] == "heard" and result["card"]["via"] == ["lan", "internet"] and result["card"]["key"] == KEY
+    assert "aamio partner add rom-42 %s" % KEY in result["bind"] and "aamio transport bind rom-42 TRANSPORT" in result["bind"] and "the medium lan" in result["bind"]
+    assert "not signed" in result["bind"] and "aamio scope add rom-42" in result["next"], "the scope is still the way to answer"
+    said = run(request("tool", "aamio_addon_earshot_listen"), Aisense(text="aamio:scope/%s?n=rom-42&v=lan" % ADDRESS), microphone=Microphone())
+    assert "carries no key" in said["result"]["bind"], "a card that names a medium and carries no key binds nothing"
+    said = run(request("tool", "aamio_addon_earshot_listen"), Aisense(text="aamio:scope/%s?n=rom-42" % ADDRESS), microphone=Microphone())
+    assert "bind" not in said["result"] and "via" not in said["result"]["card"], "a card of 0.4.0 is heard as it was"
 
 
 @pytest.mark.parametrize("seconds", [4, 41, "x", "0", -1, 2.5])
@@ -786,6 +914,26 @@ def test_over_mcp_a_key_is_refused_and_a_file_is_read(real_addon, tmp_path):
         assert reply["result"]["isError"] is True and reply["result"]["structuredContent"]["reason"] == "no_such_file"
         reply = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "aamio_addon_earshot_listen", "arguments": {"seconds": 5, "loud": True}}})
         assert reply["result"]["isError"] is True and reply["result"]["structuredContent"].get("given") == ["loud"], "an argument the schema does not have is refused by the core"
+    finally:
+        runtime.close()
+
+
+def test_the_core_runs_the_card_of_0_5_0_on_the_command_line_and_over_mcp_with_the_runtime_s_key(real_addon, tmp_path, capsys):
+    home = str(tmp_path / "home")
+    # --key=KEY, since a key in base64url may start with a dash.
+    code, out, _ = command(capsys, home, "addon", "earshot", "card", ADDRESS, "--via", "lan,internet", "--key=" + KEY)
+    made = json.loads(out)
+    assert code == 0 and made["card"].endswith("&v=lan,internet&k=" + KEY), "the command line takes via and the key given"
+    tools = {tool["name"]: tool for tool in mcp_server.tools()}
+    assert tools["aamio_addon_earshot_broadcast"]["inputSchema"]["properties"]["via"]["maxItems"] == 3 and "key" not in tools["aamio_addon_earshot_broadcast"]["inputSchema"]["properties"]
+    runtime = Runtime(home=str(tmp_path / "mcp-home"), host="https://fake.test", archive=False)
+    try:
+        out = tmp_path / "card.wav"
+        reply = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "aamio_addon_earshot_broadcast",
+                                  "arguments": {"address": ADDRESS, "via": ["lan"], "engine": "local", "out": str(out)}}})
+        result = reply["result"]["structuredContent"]
+        assert reply["result"]["isError"] is False and result["status"] == "written" and result["card"].endswith("&v=lan&k=" + runtime.keys.public)
+        assert process.handle(request("command", "decode", file=str(out), engine="local"))["result"]["card"]["key"] == runtime.keys.public, "the sound carries the runtime's own key"
     finally:
         runtime.close()
 

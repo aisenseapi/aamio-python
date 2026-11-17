@@ -38,7 +38,8 @@ The address lets anyone who holds it post into the scope, and only whoever
 holds the scope's key reads the posts. It is no secret in aamio. A key is: a
 card is made from exactly 20 characters of a-z and 2-7 and nothing else, so a
 scope's key or a thread's read key is refused and never goes into the air. A
-card lasts 7 to 12 seconds and is at most 80 bytes.
+card lasts 7 to 12 seconds and is at most 80 bytes, unless it names media and
+carries a key, as below.
 
 t is the Unix time the card stops being good: an hour after it is made,
 unless `--valid-for` says otherwise, 60 to 86400 seconds or 0 for no end. A
@@ -49,6 +50,32 @@ Sound is not encrypted. Anyone close enough can record it. The time is not
 signed either, so whoever recorded the sound can make a new one with a later
 time: use a new scope for each room or occasion, since an address does not
 expire. A card heard is untrusted input, as a post on the board is.
+
+## Media and a key, from 0.5.0
+
+A card can say more when the one who plays it asks. `--via` names the media
+they prefer answers over, in order, at most three: internet, the scope over
+aamio.at, which is what a card without it means, or the medium of a transport,
+lan or sound. A card that names a medium other than internet carries their public
+key, which a listener binds that transport to: from `--key` on the command
+line, as `aamio whoami` shows it, and over MCP the runtime's own, so a model
+never puts another key on a card.
+
+```text
+aamio:scope/k7rq2m4xw5tbz3yd6ena?n=rom-42&t=1794200000&v=lan,internet&k=KEY
+```
+
+Only earshot 0.5.0 and newer reads such a card: an older one turns it down as
+a card it does not read. Without `--via` and `--key` the card is the one
+earlier versions made, byte for byte. A card with a key is up to 128 bytes and
+plays for up to 17 seconds.
+
+The key is public, but everyone within earshot hears who played the card, and
+a card is not signed: trust the key only as far as you trust whoever was in
+the room. A listener that hears it is told how to bind a transport to it,
+`aamio partner add NAME KEY` and then `aamio transport bind NAME TRANSPORT`,
+and binds nothing itself. That is the user's choice, on the command line. A
+medium a listener has no transport for is said rather than refused.
 
 ## Two engines
 
@@ -92,8 +119,8 @@ aamio_addon_earshot_listen, aamio_scope_add, aamio_board_post and aamio_read.
 ## Commands
 
 ```text
-aamio addon earshot card ADDRESS [--name NAME] [--valid-for SECONDS]
-aamio addon earshot broadcast ADDRESS [--name NAME] [--valid-for SECONDS] [--mode MODE] [--repeat N] [--out FILE] [--engine ENGINE]
+aamio addon earshot card ADDRESS [--name NAME] [--valid-for SECONDS] [--via MEDIA] [--key KEY]
+aamio addon earshot broadcast ADDRESS [--name NAME] [--valid-for SECONDS] [--via MEDIA] [--key KEY] [--mode MODE] [--repeat N] [--out FILE] [--engine ENGINE]
 aamio addon earshot listen [--seconds N] [--mode MODE] [--engine ENGINE]
 aamio addon earshot decode FILE [--mode MODE] [--engine ENGINE]
 ```

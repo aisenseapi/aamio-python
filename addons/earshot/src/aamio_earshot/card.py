@@ -18,8 +18,24 @@ A card this version does not read, with a parameter it does not know, is not
 understood rather than read in part: a later card may name another service,
 and must never be taken for one on this. The longest card is 80 bytes, of the
 128 a sound can carry.
+
+From 0.5.0 a card may say more, when the one who plays it asks:
+
+    aamio:scope/k7rq2m4xw5tbz3yd6ena?n=rom-42&t=1794200000&v=lan,internet&k=KEY
+
+v is the media they prefer answers over, in order, at most three: internet,
+the scope over aamio.at as a card without v means, or the medium of a
+transport as its manifest names it, lan or sound today. k is their public key,
+43 characters of base64url, which a listener binds a transport to; a card that
+names a medium other than internet carries it. A medium a listener has no
+transport for is said rather than refused, so a card from a later earshot
+naming a medium this one does not know is still read. Such a card is up to
+128 bytes, and only earshot 0.5.0 and newer reads it. A public key is public,
+and a scope's key or a thread's read key never takes its place: k refuses
+their shape as the address does.
 """
 
+import base64
 import re
 
 PREFIX = "aamio:scope/"
@@ -30,6 +46,16 @@ KEY_SHAPED = re.compile(r"[a-z0-9]{26,64}")
 # Unix seconds, as a card carries them: nine to eleven digits.
 EXPIRY = re.compile(r"[0-9]{9,11}")
 MAX_BYTES = 128
+# The media a card may ask answers over: internet, or a transport's medium as its manifest names it.
+MEDIUM = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+INTERNET = "internet"
+VIA_MOST = 3
+# A public key as aamio prints it: 32 bytes of Ed25519 in base64url without padding.
+PUBLIC_KEY = re.compile(r"[A-Za-z0-9_-]{43}")
+VIA_FIX = ("via is the media you prefer answers over, in order, at most three and each once: internet, the scope over aamio.at, "
+           "or the medium of a transport, lan or sound. As text they are separated by commas, as lan,internet.")
+KEY_FIX = ("key is your public key, the 43 characters aamio whoami shows as key. A card that names a medium other than internet "
+           "carries it, and everyone within earshot hears it.")
 
 
 class Refused(Exception):
@@ -65,26 +91,79 @@ def check_name(name):
     raise Refused("invalid_name", "The name is a hint the listeners may keep the scope under: 1 to 32 letters, digits, dots, underscores and dashes, starting with a letter or a digit. It can be left out.")
 
 
-def make(address, name=None, expires=None):
-    """The card for a scope's write address, good until expires (Unix seconds) when given, or Refused."""
+def _media(via):
+    """The media in a v, or None when the text is not one."""
+    media = via.split(",")
+    if len(media) > VIA_MOST or len(set(media)) != len(media) or any(MEDIUM.fullmatch(medium) is None for medium in media):
+        return None
+    return media
+
+
+def check_via(via):
+    """The media a card asks answers over, or None. internet alone is what a card without v says, so it adds nothing."""
+    if via is None or via == "" or via == []:
+        return None
+    if isinstance(via, list) and all(isinstance(medium, str) for medium in via):
+        via = ",".join(via)
+    media = _media(via) if isinstance(via, str) else None
+    if media is None:
+        raise Refused("invalid_via", VIA_FIX)
+    return None if media == [INTERNET] else media
+
+
+def _public(key):
+    """Whether key is a public key as aamio prints it, and not a secret of the shape a card refuses."""
+    if not isinstance(key, str) or PUBLIC_KEY.fullmatch(key) is None or KEY_SHAPED.fullmatch(key):
+        return False
+    raw = base64.urlsafe_b64decode(key + "=")
+    return len(raw) == 32 and base64.urlsafe_b64encode(raw).decode().rstrip("=") == key
+
+
+def check_key(key):
+    if key is None or key == "":
+        return None
+    if isinstance(key, str) and KEY_SHAPED.fullmatch(key):
+        raise Refused("a_key_not_a_public_key", "That has the shape of a scope's key or a thread's read key, and those never go into the air: anyone who recorded the sound could read with it. Give your public key, the 43 characters aamio whoami shows as key.")
+    if not _public(key):
+        raise Refused("invalid_key", KEY_FIX)
+    return key
+
+
+def make(address, name=None, expires=None, via=None, key=None):
+    """The card for a scope's write address, good until expires (Unix seconds) when given, or Refused. via and key
+    make the card of 0.5.0; without them it is the card earlier versions made."""
     address = check_address(address)
     name = check_name(name)
+    media = check_via(via)
+    key = check_key(key)
     parts = ["n=" + name] if name else []
     if expires is not None:
         if not isinstance(expires, int) or isinstance(expires, bool) or EXPIRY.fullmatch(str(expires)) is None:
             raise Refused("invalid_expiry", "The time a card stops being good is Unix seconds, nine to eleven digits.")
         parts.append("t=%d" % expires)
-    return PREFIX + address + ("?" + "&".join(parts) if parts else "")
+    if media is not None and key is None and any(medium != INTERNET for medium in media):
+        raise Refused("key_needed", "A card that asks for answers over %s carries the public key a listener binds that medium to. %s"
+                      % (", ".join(medium for medium in media if medium != INTERNET), KEY_FIX))
+    if media is not None:
+        parts.append("v=" + ",".join(media))
+    if key is not None:
+        parts.append("k=" + key)
+    text = PREFIX + address + ("?" + "&".join(parts) if parts else "")
+    size = len(text.encode("utf-8"))
+    if size > MAX_BYTES:
+        raise Refused("card_too_long", "The card would be %d bytes, and one sound carries %d: shorten the name or leave it out, or name fewer media." % (size, MAX_BYTES))
+    return text
 
 
 def read(text):
-    """The card in what was heard, as {"kind": "scope", "address", "name", "expires_at"}, or NotUnderstood."""
+    """The card in what was heard, as {"kind": "scope", "address", "name", "expires_at"}, with "via" and "key" when it
+    carries them, or NotUnderstood."""
     if not isinstance(text, str) or not text.startswith(PREFIX):
         raise NotUnderstood("not_an_aamio_card")
     address, question, query = text[len(PREFIX):].partition("?")
     if ADDRESS.fullmatch(address) is None:
         raise NotUnderstood("not_a_write_address")
-    found = {"n": None, "t": None}
+    found = {"n": None, "t": None, "v": None, "k": None}
     seen = set()
     if question:
         for part in query.split("&"):
@@ -96,5 +175,15 @@ def read(text):
                 raise NotUnderstood("invalid_name")
             if key == "t" and EXPIRY.fullmatch(value) is None:
                 raise NotUnderstood("invalid_expiry")
+            if key == "v" and _media(value) is None:
+                raise NotUnderstood("invalid_via")
+            if key == "k" and not _public(value):
+                raise NotUnderstood("invalid_key")
             found[key] = value
-    return {"kind": "scope", "address": address, "name": found["n"], "expires_at": int(found["t"]) if found["t"] is not None else None}
+    heard = {"kind": "scope", "address": address, "name": found["n"], "expires_at": int(found["t"]) if found["t"] is not None else None}
+    # A card without v and k reads as it always did, and one with them says them.
+    if found["v"] is not None:
+        heard["via"] = found["v"].split(",")
+    if found["k"] is not None:
+        heard["key"] = found["k"]
+    return heard
