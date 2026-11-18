@@ -41,6 +41,8 @@ CHANNEL = 5
 RETRY_SECONDS = 5.0
 CONNECT_SECONDS = 10.0
 CONNECT_TRIES = 2
+# Connections at once: anyone in range can open one, and each holds a thread here, so more are closed as they come.
+CONNECTIONS_MOST = 16
 # Bytes a second, from the tests between two machines: 42 to 64 KB/s.
 RATE = 40_000
 ADDRESS = re.compile(r"[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}")
@@ -68,6 +70,7 @@ class Bt:
         self.out = threading.Lock()
         self.guard = threading.Lock()
         self.links = {}
+        self.open_connections = 0
         self.stopping = False
         self.sends_read = 0
         self.server = None
@@ -156,10 +159,18 @@ class Bt:
                 # A transport that can no longer hear says so (B3), rather than go quiet as if nobody were near.
                 self.say({"t": "status", "state": "down", "reason": "Bluetooth can no longer be heard: %s" % error})
                 return
+            with self.guard:
+                full = self.open_connections >= CONNECTIONS_MOST
+                if not full:
+                    self.open_connections += 1
+            if full:
+                note("a connection from %s was closed: %d are open already" % (peer[0], CONNECTIONS_MOST))
+                conn.close()
+                continue
             # Over Bluetooth the other machine is the address the connection came from. Simulated, a connection comes
             # from a port of its own, so the machine names the port it listens on in its first record.
             device = None if self.port is not None else self.device_of(str(peer[0]))
-            threading.Thread(target=self.read, args=(conn, device), daemon=True).start()
+            threading.Thread(target=self.read, args=(conn, device, True), daemon=True).start()
 
     def keep(self, device, conn):
         with self.guard:
@@ -171,8 +182,9 @@ class Bt:
             if device is not None and self.links.get(device) is conn:
                 del self.links[device]
 
-    def read(self, conn, device):
-        """Records from one connection until it ends. One of another kind ends the connection: it is not this transport's."""
+    def read(self, conn, device, counted=False):
+        """Records from one connection until it ends. One of another kind ends the connection: it is not this transport's.
+        A connection another machine opened is counted against CONNECTIONS_MOST until it ends."""
         if device is not None:
             self.keep(device, conn)
         buffer = b""
@@ -201,6 +213,9 @@ class Bt:
                 note("a connection from %s ended: %s" % (device or "a machine not yet named", error))
         finally:
             self.forget(device, conn)
+            if counted:
+                with self.guard:
+                    self.open_connections -= 1
             try:
                 conn.close()
             except OSError:

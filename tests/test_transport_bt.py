@@ -263,3 +263,31 @@ def test_two_homes_over_bluetooth_through_the_core_with_the_service_out_of_reach
     finally:
         a.close()
         b.close()
+
+
+def test_a_seventeenth_connection_from_others_is_closed_while_sixteen_are_open(tmp_path):
+    """Anyone in range can open a connection, and each holds a thread in the transport, so there is a most."""
+    (port,) = free_ports(1)
+    radio = bt(tmp_path / "a", port)
+    held = []
+    try:
+        for n in range(16):
+            conn = socket.create_connection(("127.0.0.1", port), timeout=5)
+            conn.sendall(b"AB1H" + struct.pack(">H", 15) + b"127.0.0.1:%05d" % (40000 + n))
+            held.append(conn)
+        time.sleep(0.5)
+        extra = socket.create_connection(("127.0.0.1", port), timeout=5)
+        extra.settimeout(5)
+        assert extra.recv(10) == b"", "the seventeenth is closed as it comes"
+        extra.close()
+        held.pop().close()
+        time.sleep(0.5)
+        again = socket.create_connection(("127.0.0.1", port), timeout=5)
+        again.settimeout(1)
+        with pytest.raises(socket.timeout):
+            again.recv(10)
+        again.close()
+    finally:
+        for conn in held:
+            conn.close()
+        radio.stop()

@@ -56,15 +56,18 @@ manifest names those two. PHP and Node have none, so aamio-bt is for
 aamio-python alone; the other runtimes list it and do not run it.
 
 On 18 November 2026 two Windows machines that were never paired, one with a
-Qualcomm adapter and one with an Intel one, reached each other this way both
-ways: about 2 seconds to connect, 10 to 15 ms there and back, and 42 to
-64 KB a second. One that had answered nobody in a while answered once its
-Bluetooth settings had been opened; after that it answered with them closed.
-When a machine cannot be reached, the send says so, with that advice.
+Qualcomm adapter and one with an Intel one, reached each other over RFCOMM
+with Python's own sockets, as this transport does, both ways: about 2 seconds
+to connect, 10 to 15 ms there and back, and 42 to 64 KB a second. One that had
+answered nobody in a while answered once its Bluetooth settings had been
+opened; after that it answered with them closed. When a machine cannot be
+reached, a send says so, with that advice. On Linux the sockets are the same,
+and nothing has been tried there yet.
 
 ## On the wire
 
 On a connection each record is `AB1`, a kind, two bytes of length and the
 body: `H`, the address of the machine that opened the connection, once and
 first, and `F`, one frame of contract 3, at most 8192 bytes. A connection that
-carries anything else is closed.
+carries anything else is closed, and at most 16 that other machines opened are
+kept at once.
