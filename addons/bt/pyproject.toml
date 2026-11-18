@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# A transport under contract 3: aamio over classic Bluetooth, RFCOMM, with Python's own sockets on Windows and Linux.
+# A distribution of its own: `pip install aamio-bt` brings it, and `pip install aamio` alone does not. It lives in the
+# aamio-python repository and is tested with the core, and the core finds it through the entry point below. It is not
+# published yet.
+name = "aamio-bt"
+dynamic = ["version"]
+description = "aamio over Bluetooth: a transport under contract 3 that carries each frame over classic Bluetooth, RFCOMM, from one machine in range to one other, with Python's own sockets on Windows and Linux."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "AI SENSE AS" }]
+# The first core that knows contract 3. The transport itself needs nothing but the standard library.
+dependencies = ["aamio>=0.7.0"]
+keywords = ["aamio", "agents", "transport", "bluetooth", "rfcomm"]
+
+[project.urls]
+Homepage = "https://aamio.at/docs/addons"
+Source = "https://github.com/aisenseapi/aamio-python/tree/main/addons/bt"
+Issues = "https://github.com/aisenseapi/aamio-python/issues"
+
+[project.entry-points."aamio.addons"]
+bt = "aamio_bt"
+
+[tool.setuptools.dynamic]
+version = { attr = "aamio_bt.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+aamio_bt = ["aamio-addon.json"]

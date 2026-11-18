@@ -1,0 +1,13 @@
+{
+  "aamio_addon": 3,
+  "name": "bt",
+  "version": "0.1.0",
+  "description": "aamio over Bluetooth: classic RFCOMM from one machine in range to one other, with Python's own sockets on Windows and Linux. The first ask to a partner goes to the machines named in AAMIO_BT_PEERS; after that the core answers the address a verified envelope came from. The core seals and verifies; everyone within range sees that frames go.",
+  "transport": {
+    "medium": "bt",
+    "start": {"python": "aamio_bt.transport"},
+    "platforms": ["linux", "win32"],
+    "permissions": ["bluetooth"]
+  },
+  "environment": ["AAMIO_BT_CHANNEL", "AAMIO_BT_PEERS", "AAMIO_BT_SIMULATE"]
+}
