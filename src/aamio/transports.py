@@ -8,6 +8,13 @@ is written again as {name, key} by partner add, so the bindings live here, by
 the partner's key. A partner without a binding goes over HTTPS as before; a
 partner with one goes over its transport only, and never over HTTPS instead.
 
+Two files beside them are hints, and never stop a send: here.json, where each
+transport said it is reached, for cards that say it; and addresses.json, where
+each bound partner is reached on each transport, as the user gave it to bind
+or as a fresh envelope from the partner showed it. They are files of their own
+because a core of 0.7.0 refuses a binding with a field it does not know, and
+the same home is read by all three runtimes, of any version.
+
 Only the process that owns the home runs a transport (B2): aamio serve for as
 long as it serves, and a send or a read that waits, on the command line, for as
 long as it runs. The service starts every transport that is enabled and bound
@@ -34,13 +41,16 @@ from .carrier import Carrier
 from .carry import CarryRefused
 from .crypto import is_key
 from .errors import CodedLookupError, CodedRuntimeError, CodedValueError
-from .transport_host import TransportFailed, TransportProcess
+from .transport_host import TransportFailed, TransportProcess, here_of
 
 PROFILE_VERSION = 1
 DEFAULT_PROFILE = "sealed"
 RESTART_AFTER = (1, 5, 30)
 CRASH_WINDOW, CRASHES_MOST = 600, 3
 WAIT_DEFAULT = 30
+# How long a start of a moment waits for a transport's first ready, to learn where it is reached (B2).
+LEARN_SECONDS = 10
+ADDRESS_FROM = ("you", "heard")
 # The window a profile for a slow medium is told to give, at the least.
 CHALLENGE_WINDOW_SLOW = 300
 # How often a running carrier's list of whom it takes messages from is read again: a partner removed meanwhile, over MCP
@@ -274,10 +284,79 @@ class Config:
         else:
             bindings.pop(key, None)
         self._write("bindings.json", "partners", bindings)
+        try:
+            self.drop_addresses(key, transport)
+        except (CodedRuntimeError, OSError):
+            pass  # a hint left for a partner no longer bound is never used: addresses are looked up by binding
         return routes
 
     def routes(self, key):
         return self.bindings().get(key, [])
+
+    # ------------------------------------------------------------ hints
+
+    def _read_hint(self, name, field):
+        """A hint file's field, or {} when it is not there or cannot be read: where something is reached never stops a send."""
+        try:
+            return self._read(name, field)
+        except CodedRuntimeError:
+            return {}
+
+    def here(self):
+        """transport name -> {"medium", "here", "at", "version"}: where each transport said it is reached, the last time it
+        said, and the version that said it. An empty here is a transport that said nothing of it: kept, so one whose medium
+        has no addresses, as sound, is not started again for every card. version is None in a file without it."""
+        found = {}
+        for name, entry in self._read_hint("here.json", "transports").items():
+            if (isinstance(entry, dict) and isinstance(entry.get("medium"), str) and type(entry.get("at")) is int
+                    and here_of(entry.get("here"), entry["medium"]) is not None):
+                version = entry.get("version") if isinstance(entry.get("version"), str) else None
+                found[name] = {"medium": entry["medium"], "here": list(entry["here"]), "at": entry["at"], "version": version}
+        return found
+
+    def set_here(self, name, medium, here, at, version=None):
+        with self.lock:
+            known = self._read_hint("here.json", "transports")
+            known[name] = {"medium": medium, "here": list(here), "at": int(at)}
+            if version is not None:
+                known[name]["version"] = version
+            self._write_held("here.json", "transports", known)
+
+    def addresses(self):
+        """partner key -> transport -> {"address", "from", "at"}: where each bound partner is reached on each transport."""
+        found = {}
+        for key, by in self._read_hint("addresses.json", "partners").items():
+            if not isinstance(by, dict):
+                continue
+            for transport, entry in by.items():
+                if (isinstance(entry, dict) and isinstance(entry.get("address"), str) and entry.get("from") in ADDRESS_FROM
+                        and type(entry.get("at")) is int and here_of([entry["address"]], entry["address"].split(":", 1)[0]) is not None):
+                    found.setdefault(key, {})[transport] = {"address": entry["address"], "from": entry["from"], "at": entry["at"]}
+        return found
+
+    def set_address(self, key, transport, address, source, at):
+        with self.lock:
+            known = self._read_hint("addresses.json", "partners")
+            by = known.get(key) if isinstance(known.get(key), dict) else {}
+            by[transport] = {"address": address, "from": source, "at": int(at)}
+            known[key] = by
+            self._write_held("addresses.json", "partners", known)
+
+    def drop_addresses(self, key, transport=None):
+        with self.lock:
+            known = self._read_hint("addresses.json", "partners")
+            by = known.get(key)
+            if not isinstance(by, dict):
+                return
+            if transport is None:
+                known.pop(key)
+            else:
+                if transport not in by:
+                    return
+                by.pop(transport)
+                if not by:
+                    known.pop(key)
+            self._write_held("addresses.json", "partners", known)
 
     def state_path(self):
         return os.path.join(self.dir, "carry.json")
@@ -470,9 +549,103 @@ class Service:
                 entry["process"].stop()
             self.runtime.log("transport %s: stopped, since no partner in the address book is bound to it any more" % name)
         self._add(wanted)
+        addresses = self.config.addresses()
         for name, entry in self.running.items():
             if entry["carrier"] is not None:
                 entry["carrier"].known = self.known_for(name)
+                # Given to bind meanwhile, or learned by another owner of this home: what the home keeps is the newest.
+                entry["carrier"].addresses.update(self._addresses_for(name, addresses))
+
+    # ------------------------------------------------------------ where things are reached
+
+    def _addresses_for(self, name, addresses=None):
+        """partner pk -> where it is reached on the transport, as the home keeps it, for the partners bound to it: a hint
+        left behind for one no longer bound, or no longer in the address book, is never used."""
+        addresses = self.config.addresses() if addresses is None else addresses
+        bound = {b64url(pk) for pk in self.known_for(name)}
+        return {unb64url(key): by[name]["address"] for key, by in addresses.items() if name in by and key in bound}
+
+    def _heard(self, name, pk, address):
+        """A fresh envelope from the partner came from address: kept, so the next owner of the home asks there first."""
+        try:
+            self.config.set_address(b64url(pk), name, address, "heard", int(time.time()))
+        except (CodedRuntimeError, OSError) as error:
+            self.runtime.log("transport %s: where a partner was heard from could not be kept: %s" % (name, error))
+
+    def _here(self, name, medium, here, version=None):
+        """The transport said where it is reached, or said nothing of it (an empty list): kept for cards, as an add-on that
+        needs here gets it, with the version that said it."""
+        try:
+            self.config.set_here(name, medium, here, int(time.time()), version)
+        except (CodedRuntimeError, OSError) as error:
+            self.runtime.log("transport %s: where it is reached could not be kept: %s" % (name, error))
+
+    def _name_of(self, pk):
+        partner = self.runtime.partner_by_key(b64url(pk))
+        return partner["name"] if partner else "the key %s" % b64url(pk)[:8]
+
+    def learn_here(self, name, seconds=LEARN_SECONDS):
+        """Where an enabled transport is reached: (addresses or None, how it is known).
+
+        The running one says it on its ready. One that does not run is started for
+        a moment, as B2 allows for this alone, and stopped at its first ready:
+        the ready says where it is reached, or that it says nothing of it.
+        """
+        with self.lock:
+            entry = self.running.get(name)
+            process = entry["process"] if entry is not None else None
+            if process is not None:
+                # Never a second one beside it: the two would fight over the medium, as a port or a channel.
+                return process.here, ("running" if process.readied else "starting")
+        manifest = self.manifests().get(name)
+        if manifest is None:
+            raise CodedLookupError("transport_unknown", "no enabled transport is called %s. aamio addon list shows what is installed, and aamio addon enable %s lets it run here" % (name, name))
+        folder = working_folder(self.runtime.home, name)
+        process = TransportProcess(name, manifest.__version__, process_command(manifest.start_module), folder,
+                                   environment_for(manifest, folder, base=self.environ), log=self.runtime.log)
+        try:
+            process.start(CORE_VERSION, "python", folder)
+            until = time.monotonic() + seconds
+            while not process.readied and time.monotonic() < until:
+                process.poll(timeout=0.1)
+        except (TransportFailed, OSError) as error:
+            raise CodedRuntimeError("transport_down", "%s did not start to say where it is reached: %s" % (name, error)) from None
+        finally:
+            process.stop()
+        if not process.readied:
+            return None, "not_ready"
+        # Said nothing is kept too, as an empty list, so a transport over a medium without addresses is not started again
+        # for every card: the microphone of a transport over sound opened each time (the review of 19 November 2026).
+        self._here(name, manifest.medium, process.here or [], manifest.__version__)
+        return process.here, "learned"
+
+    def here_for_addons(self):
+        """What an add-on that needs here gets: each enabled transport's medium and where it is reached, as the running one
+        says it, else as the home keeps it from this version of the transport, else learned now by a start of a moment, at
+        most once per version. Never a partner's. A transport that said nothing of it is left out."""
+        manifests = self.manifests()
+        kept = self.config.here()
+        out = []
+        for name, manifest in manifests.items():
+            with self.lock:
+                entry = self.running.get(name)
+                process = entry["process"] if entry is not None else None
+                running = process.here if process is not None and process.readied else None
+            said = kept.get(name)
+            if running is not None:
+                here, at = running, int(time.time())
+            elif said is not None and said["medium"] == manifest.medium and said["version"] in (None, manifest.__version__):
+                here, at = said["here"], said["at"]
+            else:
+                try:
+                    here, _how = self.learn_here(name)
+                except (CodedRuntimeError, CodedLookupError) as error:
+                    self.runtime.log("transport %s: %s" % (name, error))
+                    here = None
+                at = int(time.time())
+            if here:
+                out.append({"transport": name, "medium": manifest.medium, "here": list(here), "at": at})
+        return out
 
     def _start_due(self):
         now = time.monotonic()
@@ -486,7 +659,9 @@ class Service:
             try:
                 process.start(CORE_VERSION, "python", folder)
                 entry["carrier"] = Carrier(self.carry(), process, self.profile_for, self.known_for(name), log=self.runtime.log,
-                                           note=lambda text, name=name: self._say(name, text))
+                                           note=lambda text, name=name: self._say(name, text), addresses=self._addresses_for(name),
+                                           heard=lambda pk, address, name=name: self._heard(name, pk, address), name_of=self._name_of,
+                                           on_here=lambda here, name=name, medium=manifest.medium, version=manifest.__version__: self._here(name, medium, here, version))
                 entry["process"] = process
                 self.runtime.log("transport %s: up" % name)
                 self._check_windows(name, entry["carrier"])
@@ -662,8 +837,9 @@ class Service:
 
         if not self._wait(open_session, until):
             hint = "" if stretch else self._not_sent_hint(name, pk, content, until - began)
-            raise CodedRuntimeError("carry_not_sent", "the partner did not answer on %s within %d seconds, so nothing was sent.%s Its aamio has to run "
-                                    "on the same network, as aamio serve or aamio read --wait, with this key bound to %s" % (name, int(until - began), hint, name))
+            raise CodedRuntimeError("carry_not_sent", "the partner did not answer on %s within %d seconds, so nothing was sent.%s Its aamio has to be "
+                                    "within reach of %s and running, as aamio serve or aamio read --wait, with this key bound to %s%s"
+                                    % (name, int(until - began), hint, name, name, self._transport_said(name, began)))
         with self.lock:
             carrier = self._carrier(name)
             try:
@@ -683,6 +859,17 @@ class Service:
             outcome = "handed_over" if handed else "queued"
         return {"via": name, "profile": route["profile"], "mark": key, "status": outcome, "sha256": written["sha256"],
                 "bytes": len(envelope), "sealed": envelope[len(carry.MAGIC)] == carry.SEALED, "waited": int(until - began)}
+
+    def _transport_said(self, name, since):
+        """What the transport said of the latest frame it could not send since the send began, for carry_not_sent, or
+        an empty string. It knows the medium: a Bluetooth address nobody answers on, a network that is down."""
+        with self.lock:
+            entry = self.running.get(name)
+            process = entry["process"] if entry is not None else None
+            said = process.last_error if process is not None else None
+        if said is None or said[0] < since or not said[2]:
+            return ""
+        return ". %s said of the last frame it could not send: %s" % (name, said[2].rstrip("."))
 
     def _not_sent_hint(self, name, pk, content, waited):
         """What carry_not_sent adds when the wait was shorter than a send takes on the medium, as over MCP, where it is the
@@ -764,14 +951,28 @@ def listing(runtime):
     enabled = service.manifests()
     bindings = config.bindings()
     stored = config.profiles()
+    kept = config.here()
+    addresses = config.addresses()
     rows = []
     for key, routes in bindings.items():
         partner = runtime.partner_by_key(key)
-        rows.append({"partner": partner["name"] if partner else None, "key": key, "in_address_book": partner is not None, "routes": routes})
+        row = {"partner": partner["name"] if partner else None, "key": key, "in_address_book": partner is not None, "routes": routes}
+        reached = {transport: entry for transport, entry in addresses.get(key, {}).items() if any(route["transport"] == transport for route in routes)}
+        if reached:
+            # Where the partner is reached on each transport: given to bind ("you") or shown by a fresh envelope ("heard").
+            row["addresses"] = reached
+        rows.append(row)
     transports = []
     for name, manifest in enabled.items():
         partners = [row["partner"] or row["key"] for row in rows if row["in_address_book"] and any(route["transport"] == name for route in row["routes"])]
-        transports.append({"name": name, "version": manifest.__version__, "medium": manifest.medium, "permissions": list(manifest.permissions), "partners": partners})
+        item = {"name": name, "version": manifest.__version__, "medium": manifest.medium, "permissions": list(manifest.permissions), "partners": partners}
+        said = kept.get(name)
+        if said is not None and said["medium"] == manifest.medium:
+            item["here"], item["here_at"] = said["here"], said["at"]
+        else:
+            item["here"] = None
+            item["here_fix"] = "aamio transport here %s starts it for a moment and says where it is reached, for a card" % name
+        transports.append(item)
     profiles = [dict(record, stored=True) for record in stored.values()]
     if DEFAULT_PROFILE not in stored:
         profiles.insert(0, dict(profile_record(DEFAULT_PROFILE), stored=False))
@@ -800,16 +1001,65 @@ def profile_remove(runtime, name):
     return {"removed": name}
 
 
-def bind(runtime, which, transport, profile=None):
+def here(runtime, name):
+    """aamio transport here NAME: where an enabled transport is reached, from the running one or a start of a moment."""
+    service = runtime.transport_service()
+    manifests = service.manifests()
+    if name not in manifests:
+        raise CodedLookupError("transport_unknown", "no enabled transport is called %s. aamio addon list shows what is installed, and aamio addon enable %s lets it run here" % (name, name))
+    found, how = service.learn_here(name)
+    medium = manifests[name].medium
+    if how == "starting":
+        return {"transport": name, "medium": medium, "here": None,
+                "note": "%s is starting in this process and has not said it is ready yet: ask again in a moment." % name}
+    if how == "not_ready":
+        return {"transport": name, "medium": medium, "here": None,
+                "note": "%s did not say it was ready within %d seconds, as when its medium is off or another program holds it, so nothing was learned. "
+                        "The lines it wrote above say why." % (name, LEARN_SECONDS)}
+    if not found:
+        # Nothing said and an empty list say the same: a card names the medium alone. found[0] below stopped on [] with
+        # an IndexError (the Node port of 19 November 2026 found it).
+        return {"transport": name, "medium": medium, "here": found,
+                "note": "%s says nothing of where it is reached: a version from before here (contract 3, B3), or a medium without addresses. "
+                        "A card can name the medium %s without an address." % (name, medium)}
+    started = "It runs, and said so itself." if how == "running" else "It was started for a moment to say this, and stopped again."
+    return {"transport": name, "medium": medium, "here": found,
+            "note": "%s %s is kept in the home for cards: over MCP an Earshot card that names %s carries it by itself, and on the command line "
+                    "aamio addon earshot card ADDRESS --via %s --key KEY does. A partner binds it with aamio transport bind NAME TRANSPORT --address %s."
+                    % (started, ", ".join(found), medium, found[0], found[0])}
+
+
+def bind(runtime, which, transport, profile=None, address=None):
+    """A partner bound to a transport, or the address it is reached at there, for a partner bound to it already."""
     partner = _partner(runtime, which)
     service = runtime.transport_service()
-    if transport not in service.manifests():
+    manifests = service.manifests()
+    if transport not in manifests:
         raise CodedLookupError("transport_unknown", "no enabled transport is called %s. aamio addon list shows what is installed, and aamio addon enable %s lets it run here" % (transport, transport))
-    routes = service.config.bind(partner["key"], transport, profile or DEFAULT_PROFILE)
-    return {"partner": partner["name"], "key": partner["key"], "routes": routes,
-            "note": "Messages to %s go over %s from now on, and never over HTTPS instead, and %s takes messages from %s. %s binds your key to %s the same way. "
-                    "Only the process that owns this home runs the transport: aamio serve, or aamio send and aamio read --wait while they run." % (
-                        partner["name"], routes[0]["transport"], routes[0]["transport"], partner["name"], partner["name"], transport)}
+    medium = manifests[transport].medium
+    if address is not None and here_of([address], medium) is None:
+        raise CodedValueError("transport_address_invalid", "an address on %s is %s: and then where the partner is reached, as its card or aamio transport here on its machine "
+                                                           "says it, at most 128 characters of printable ASCII without spaces" % (transport, medium))
+    bound = next((route for route in service.config.routes(partner["key"]) if route["transport"] == transport), None)
+    if bound is not None and (address is None or (profile is not None and profile != bound["profile"])):
+        raise CodedValueError("transport_already_bound", "%s is bound to that partner already%s" % (
+            transport, ", under the profile %s: aamio transport unbind first to bind it under another" % bound["profile"] if address is not None else
+            ". With --address, bind says where the partner is reached on it"))
+    routes = service.config.routes(partner["key"]) if bound is not None else service.config.bind(partner["key"], transport, profile or DEFAULT_PROFILE)
+    answer = {"partner": partner["name"], "key": partner["key"], "routes": routes}
+    if address is not None:
+        service.config.set_address(partner["key"], transport, address, "you", int(time.time()))
+        answer["address"] = address
+    if bound is not None:
+        answer["note"] = ("The first ask to %s on %s goes to %s from now on; when it stops answering there, every second ask goes to nobody in particular, "
+                          "and a fresh envelope from %s moves the address to where it came from." % (partner["name"], transport, address, partner["name"]))
+        return answer
+    reached = (" The first ask goes to %s; when it stops answering there, every second ask goes to nobody in particular, and a fresh envelope from %s "
+               "moves the address to where it came from." % (address, partner["name"])) if address is not None else ""
+    answer["note"] = ("Messages to %s go over %s from now on, and never over HTTPS instead, and %s takes messages from %s.%s %s binds your key to %s the same way. "
+                      "Only the process that owns this home runs the transport: aamio serve, or aamio send and aamio read --wait while they run." % (
+                          partner["name"], routes[0]["transport"], routes[0]["transport"], partner["name"], reached, partner["name"], transport))
+    return answer
 
 
 def unbind(runtime, which, transport=None):

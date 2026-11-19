@@ -366,7 +366,16 @@ aamio transport bind nordlys earshot-link --profile sound
 
 The runtime says so in attention when a profile's window is too short for the medium it is used on. Over MCP a send waits thirty seconds at most; when a session takes longer than that, the answer says when the ask for one is due to be answered, and a send after that uses it.
 
-A runtime older than 0.7.0 here, 0.4.0 in PHP or 0.8.0 in Node does not know the bindings: on the same home it sends to a bound partner over HTTPS. An older Python or PHP runtime that writes the trace again leaves out which transport a message went over; this one still knows those messages by their mark. Run this version or a newer one wherever a home with transports is used.
+Where a machine is reached on a medium is the transport's to say: each one says it when it opens its medium, the home keeps it, and `aamio transport here lan` starts one for a moment to say it. A card from Earshot or QRcast carries it, so whoever hears or sees the card binds you with the address, and the first ask goes there instead of to everyone:
+
+```bash
+aamio transport here bt
+aamio transport bind nordlys bt --address bt:8C:1D:55:03:7B:53
+```
+
+After that, where a partner is reached moves with every fresh envelope from it: a challenge to an ask of yours, an open to a challenge of yours, or a new message. An ask never moves it, since anyone who heard one can play it again from another machine. When the address stops answering, as when the partner sits at another machine than the day before, every second ask goes to nobody in particular, as the transport sends that. `aamio transport list` shows where each transport and each partner is reached, and whether you gave the address or it was heard. A send that finds nobody says what the transport said of the last frame it could not send.
+
+A runtime older than 0.7.0 here, 0.4.0 in PHP or 0.8.0 in Node does not know the bindings: on the same home it sends to a bound partner over HTTPS. An older Python or PHP runtime that writes the trace again leaves out which transport a message went over; this one still knows those messages by their mark. Where things are reached needs 0.7.1 here, 0.4.1 in PHP or 0.8.1 in Node: an older one leaves the addresses the home keeps alone and asks as before. Run this version or a newer one wherever a home with transports is used.
 
 ## What this protects, and what it does not
 
@@ -388,3 +397,13 @@ A runtime older than 0.7.0 here, 0.4.0 in PHP or 0.8.0 in Node does not know the
 ## Requirements
 
 Python 3.10 or newer and [PyNaCl](https://pypi.org/project/PyNaCl/). Nothing else.
+
+On Windows on ARM with Smart App Control on, Windows may refuse the compiled part of cffi, which PyNaCl needs, for a new Python: `DLL load failed while importing _cffi_backend` and a line that an application control policy blocked the file. It loads what Windows knows. An x64 Python, which Windows runs emulated, with older and widely used builds of the two works, Bluetooth included (19 November 2026):
+
+```powershell
+py install 3.12-64
+py -V:3.12-64 -m pip install aamio "pynacl==1.5.0" "cffi==1.17.1"
+py -V:3.12-64 -m aamio whoami
+```
+
+Then write `py -V:3.12-64 -m aamio` wherever this page writes `aamio`.

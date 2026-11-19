@@ -23,6 +23,16 @@ An ask that no challenge answers in time is asked again with a new session,
 since the old one may be in use at the other end. Nothing here decides whether
 a message is taken: that is the state's, and the transport's word ends at
 "handed over".
+
+Where a partner is reached is learned only from what shows it is fresh: a
+challenge to an ask of this party's, an open to a challenge of its own, or a
+new message. An ask can be played again from anywhere, and a copy of a message
+or a receipt can be sent again by anyone who heard it, so neither moves where
+the partner is said to be: a replayed ask could otherwise lead every message
+to a machine in range that never answers. An address known from before, as
+the home keeps it, is where the first ask goes; when it has stopped answering,
+every second ask goes to nobody in particular, as one did before anything was
+known.
 """
 
 import random
@@ -51,8 +61,14 @@ UNANSWERED_TRIES = 3
 
 class Carrier:
     def __init__(self, state, process, profile, known, clock=time.monotonic, wall=time.time, log=None,
-                 retry_seconds=2.0, ask_retry_seconds=5.0, tries=carry_state.TRIES_DEFAULT, note=None):
+                 retry_seconds=2.0, ask_retry_seconds=5.0, tries=carry_state.TRIES_DEFAULT, note=None,
+                 addresses=None, heard=None, name_of=None, on_here=None):
         self.state, self.process, self.profile, self.known = state, process, profile, list(known)
+        # Told where a partner was heard from, fresh, so the home can keep it; told where the transport says it is reached.
+        self.heard = heard or (lambda pk, address: None)
+        self.on_here = on_here or (lambda here: None)
+        # A partner as the user knows it, for the line that says a message came in.
+        self.name_of = name_of or (lambda pk: pk.hex()[:8])
         # One profile for every partner, or a function from a partner's key to its own (B5).
         self.profile_of = profile if callable(profile) else (lambda pk: profile)
         self.clock, self.wall = clock, wall
@@ -78,7 +94,8 @@ class Carrier:
         self.control = {}        # id -> {"envelope", "to", "pair", "kind", "next", "tries", "most"}: challenges and opens
         self.asks = {}           # (partner pk, session) -> {"next", "tries"}
         self.answered = {}       # (partner pk, session) this party may send in -> when its challenge came, in that order
-        self.addresses = {}      # partner pk -> the transport address it was last heard from
+        # partner pk -> the transport address it was last heard from fresh, or the home kept from before
+        self.addresses = dict(addresses or {})
         self.refused = []        # codes, for a test or a log to read
         self.budget, self.budget_at = UNVERIFIED_PER_SECOND, clock()
         self.counter = 0
@@ -251,6 +268,8 @@ class Carrier:
                 self._received(event[1], event[2])
             elif event[0] == "status":
                 self.log("transport %s: %s %s" % (self.process.name, event[1], event[2]))
+            elif event[0] == "here":
+                self.on_here(event[1])
         self._resend()
         self._flush()
         self.process.check_time()
@@ -276,8 +295,12 @@ class Carrier:
             # Refusals stay here (A7): logged and counted, never answered over the medium.
             self.refused.append(refused.code)
             return
-        if source is not None:
-            self.addresses[got.sender] = source
+        if source is not None and result == "accepted" and got.kind in (carry.CHALLENGE, carry.OPEN, carry.MESSAGE):
+            # Fresh: a challenge answers an ask of ours, an open a challenge of ours, and a new message has a counter
+            # never taken before. The address it came from is where the partner is now.
+            if self.addresses.get(got.sender) != source:
+                self.addresses[got.sender] = source
+                self.heard(got.sender, source)
         pair = (got.sender, got.session)
         if got.kind == carry.CHALLENGE:
             # A session with the partner is open: every ask to it ends, the one this answers and any made since. Asked
@@ -309,6 +332,10 @@ class Carrier:
         self._settled(pair, "challenge")
         if reply is not None:
             self._queue(reply, source)
+        if result == "accepted" and got.kind == carry.MESSAGE:
+            # Said where the owner keeps its log, as aamio serve's window: it said nothing when a message came, and a
+            # test between two machines had nothing to look at until the read (19 November 2026).
+            self.log("transport %s: a message came in from %s" % (self.process.name, self.name_of(got.sender)))
 
     def _window_tries(self, pk):
         # A challenge goes again one turn after it went, a turn being as long as a challenge and its open take.
@@ -351,15 +378,20 @@ class Carrier:
                 continue
             entry["tries"] += 1
             entry["next"] = now + self._turn(entry["envelope"], self.retry_seconds)
-            self._queue(entry["envelope"], self.addresses.get(entry["pair"][0], entry["to"]))
+            # Back where what it answers came from: a challenge to where the ask came from, an open to where the
+            # challenge did. An ask moves no address (see above), so the address known may be another machine's.
+            self._queue(entry["envelope"], entry["to"] if entry["to"] is not None else self.addresses.get(entry["pair"][0]))
         for (pk, session), entry in list(self.asks.items()):
             if now < entry["next"]:
                 continue
             del self.asks[(pk, session)]
             if entry["tries"] < self.tries:
                 new_session, envelope = self.state.ask(pk, self.profile_of(pk), now)
-                self.asks[(pk, new_session)] = {"next": now + self._turn(envelope, self.ask_retry_seconds), "tries": entry["tries"] + 1}
-                self._queue(envelope, self.addresses.get(pk))
+                tries = entry["tries"] + 1
+                self.asks[(pk, new_session)] = {"next": now + self._turn(envelope, self.ask_retry_seconds), "tries": tries}
+                # A known address that has stopped answering, as a machine with a Bluetooth address of another day, is
+                # not asked for good: every second ask goes to nobody in particular, as AAMIO_BT_PEERS or a broadcast.
+                self._queue(envelope, self.addresses.get(pk) if tries % 2 == 1 else None)
 
     def _flush(self):
         while self.queue and self.process.room() > 0:

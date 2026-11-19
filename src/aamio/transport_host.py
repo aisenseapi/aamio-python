@@ -25,11 +25,14 @@ one that was written, or written in part, is unknown.
 """
 
 import base64
+import codecs
 import collections
 import hashlib
 import json
+import locale
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -45,10 +48,52 @@ HANG_ROOM_SECONDS = 60
 FORGET_SECONDS = 600
 FRAME_GROUPS, FRAME_BYTES, FRAME_SECONDS = 32, 256 * 1024, 120
 WRITE_QUEUE = 1024
+# here on a ready (B3): where others reach this transport now, at most this many addresses.
+HERE_MOST = 4
+# An address in here is printable ASCII without spaces, as a card can carry it: medium:rest.
+_HERE_ADDRESS = re.compile(r"[\x21-\x7e]{1,128}")
 
 DIRECTIONS = ("duplex", "half", "send_only", "receive_only")
 ADDRESSING = ("none", "device", "routed")
 VISIBLE_TO = ("range", "local", "operator")
+
+
+def _system_encoding():
+    """The code page of the system's own words: the locale's, also where this Python runs in UTF-8 mode, as 3.15 does
+    by default, in which getpreferredencoding says utf-8 whatever a child wrote in. latin-1 when there is none to have."""
+    get = getattr(locale, "getencoding", None)
+    try:
+        name = get() if get is not None else locale.getpreferredencoding(False)
+        codecs.lookup(name)
+        return name
+    except (LookupError, TypeError, ValueError):
+        return "latin-1"
+
+
+def text_of(raw):
+    """Bytes a process wrote, as text: UTF-8, as contract 3 asks, or else the system's own code page.
+
+    Python on Windows writes standard error to a pipe in the ANSI code page, so
+    the system's own words for an error, as Norwegian ones, came out as
+    replacement characters (the field test over Bluetooth of 19 November 2026).
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode(_system_encoding(), "replace")
+
+
+def here_of(value, medium):
+    """The addresses in a ready's here, or None when they cannot be taken: a list of at most HERE_MOST addresses, each
+    medium:rest in printable ASCII without spaces, at most 128 characters, each once."""
+    if not isinstance(value, list) or len(value) > HERE_MOST:
+        return None
+    if any(not isinstance(address, str) or _HERE_ADDRESS.fullmatch(address) is None or not address.startswith("%s:" % medium)
+           or len(address) == len(medium) + 1 for address in value):
+        return None
+    if len(set(value)) != len(value):
+        return None
+    return list(value)
 
 
 class _Line:
@@ -128,6 +173,9 @@ class TransportProcess:
         self.down_since = None    # when the transport said down, while it has not said up again
         self.after_down = False   # down was said: no room until a ready that comes after up
         self.failed = None        # a TransportFailed once the process may not be used
+        self.here = None          # where others reach it now, as its latest ready said, or None while it has said nothing
+        self.readied = False      # a ready has come since the start
+        self.last_error = None    # (clock, code, message) of the latest error it gave for a frame
         self.lines_out = collections.deque()
         self.out_cv = threading.Condition()
         self.closing = False
@@ -206,7 +254,7 @@ class TransportProcess:
                 dropped += len(line)
                 continue
             taken += len(line)
-            words = line.decode("utf-8", "replace").rstrip()
+            words = text_of(line).rstrip()
             self.last_words.append(words[:200])
             self.log("transport %s: %s" % (self.name, words))
 
@@ -357,6 +405,10 @@ class TransportProcess:
         else:
             entry["status"] = "not_sent"
             entry["reason"] = str(message.get("code", "error"))
+            # What the transport said, kept for a send that ends without an answer: its words name the medium's own
+            # trouble, as a Bluetooth address no machine answers on, which the core cannot know (19 November 2026).
+            said = message.get("message")
+            self.last_error = (self.clock(), entry["reason"], said[:300] if isinstance(said, str) else None)
         return frame_id
 
     def check_time(self):
@@ -392,7 +444,8 @@ class TransportProcess:
             self._fail(TransportFailed("transport_down", "the transport has said down for %d seconds" % HANG_ROOM_SECONDS))
 
     def poll(self, timeout=0.0):
-        """What the transport said since last time: a list of ('received', from, frame), ('answer', id) and ('status', state, reason).
+        """What the transport said since last time: a list of ('received', from, frame), ('answer', id), ('status', state,
+        reason) and ('here', addresses) when where it can be reached changed.
 
         What it said before start returned comes first, and is not waited behind.
         """
@@ -443,11 +496,24 @@ class TransportProcess:
                 self._fail(TransportFailed("transport_protocol", "ready with credit and sends_read that do not add up"))
             before = self.room()
             self.credit, self.sends_read = credit, sends_read
+            self.readied = True
             if self.down_since is None:
                 self.after_down = False
             if self.room() > max(before, 0):
                 self.waiting_for_room_since = None
-            return []
+            if "here" not in message:
+                return []
+            # Where others reach it is a hint for cards and bindings, never a reason to stop a transport that moves
+            # frames: one that cannot be taken is said and left out, and the one said before stands.
+            here = here_of(message["here"], self.medium)
+            if here is None:
+                self.log("transport %s: here is not taken: it is a list of at most %d addresses, each %s:... in printable ASCII "
+                         "without spaces, at most 128 characters" % (self.name, HERE_MOST, self.medium))
+                return []
+            if here == self.here:
+                return []
+            self.here = here
+            return [("here", here)]
         if kind in ("sent", "error", "link_ack"):
             if kind == "error" and message.get("id") is None:
                 self.log("transport %s: %s" % (self.name, message.get("message", message.get("code"))))

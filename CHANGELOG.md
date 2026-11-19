@@ -4,6 +4,34 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.7.1 - 2026-11-19
+
+- Where a machine is reached on a medium. A transport may say it on each
+  `ready` (`here`, contract 3), the home keeps it, and `aamio transport here
+  TRANSPORT` starts an enabled transport for a moment to say it. `aamio
+  transport list` shows it, and an add-on that asks for it gets it beside the
+  public key: Earshot 0.5.0 and QRcast 0.2.0 put it on their cards over MCP.
+- `aamio transport bind PARTNER TRANSPORT --address ADDRESS` says where the
+  partner is reached on the transport, from its card or from `aamio transport
+  here` on its machine, also for a partner bound already. The first ask goes
+  there, and nobody has to be named in `AAMIO_BT_PEERS` or found by broadcast.
+- Where a partner is reached is kept in the home and moves with every fresh
+  envelope from it: a challenge to an ask of yours, an open to a challenge of
+  yours, or a new message. An ask never moves it, since anyone who heard one
+  can play it again from another machine; before, a replayed ask led the
+  messages after it there. When the address stops answering, every second ask
+  goes to nobody in particular. The addresses live in a file of their own
+  under `transports/`, so a runtime of 0.7.0 on the same home still reads its
+  bindings.
+- A send that finds nobody says what the transport said of the last frame it
+  could not send, and that the partner has to be within reach of the
+  transport, rather than on the same network, which only the local network
+  is. `aamio serve` writes a line when a message comes in over a transport.
+- What a transport or an add-on writes to standard error in the system's code
+  page reads as text: Windows' own Norwegian words for an error came out as
+  replacement characters.
+- `aamio-lan` 0.2.0 says where it is reached; `aamio-bt` does too.
+
 ## 0.7.0 - 2026-11-17
 
 - Transports, contract 3. A partner can be bound to a transport with

@@ -534,10 +534,13 @@ def main(argv=None):
     tpa.add_argument("--window", default=None, help="seconds a challenge waits for its open, 60 if left out")
     tpa.add_argument("--max-content", default=None, dest="max_content", help="the most bytes a message carries")
     tps.add_parser("remove").add_argument("name")
+    th = ts.add_parser("here", help="where an enabled transport is reached, from a start of a moment when it does not run, kept for cards")
+    th.add_argument("transport", help="an enabled transport, as lan or bt")
     tb = ts.add_parser("bind", help="send to a partner over a transport, and take its messages from it")
     tb.add_argument("partner", help="a partner's name or key")
     tb.add_argument("transport", help="an enabled transport, as lan")
     tb.add_argument("--profile", default=None, help="a profile's name, sealed if left out")
+    tb.add_argument("--address", default=None, help="where the partner is reached on the transport, as its card or aamio transport here on its machine says it, as bt:8C:1D:55:03:7B:53. Also for a partner bound already")
     tu = ts.add_parser("unbind", help="a partner over HTTPS again, or over its next transport")
     tu.add_argument("partner")
     tu.add_argument("transport", nargs="?", default=None)
@@ -792,8 +795,10 @@ def run(args, runtime):
             out(transports.profile_add(runtime, args.name, args.readable, args.lifetime, args.window, args.max_content))
         elif args.transport_command == "profile":
             out(transports.profile_remove(runtime, args.name))
+        elif args.transport_command == "here":
+            out(transports.here(runtime, args.transport))
         elif args.transport_command == "bind":
-            out(transports.bind(runtime, args.partner, args.transport, args.profile))
+            out(transports.bind(runtime, args.partner, args.transport, args.profile, args.address))
         else:
             out(transports.unbind(runtime, args.partner, args.transport))
     elif args.command == "serve":
