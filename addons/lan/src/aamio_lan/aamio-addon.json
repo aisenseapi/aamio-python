@@ -1,7 +1,7 @@
 {
   "aamio_addon": 3,
   "name": "lan",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "aamio over the local network: each frame one UDP datagram, to an address or to everyone on the network. The core seals and verifies; the network sees that frames go.",
   "transport": {
     "medium": "lan",

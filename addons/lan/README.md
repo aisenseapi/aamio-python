@@ -39,7 +39,16 @@ An address is `lan:<ip>:<port>`. A frame to nobody in particular, as the first
 ask to a partner whose address is not known yet, goes to the broadcast address
 and to the peers; after that the core answers the address a verified envelope
 came from. Where broadcast does not reach, as on a guest network that keeps
-devices apart, name the other machine in `AAMIO_LAN_PEERS`.
+devices apart, name the other machine in `AAMIO_LAN_PEERS`, or bind the
+partner with its address.
+
+From 0.2.0 the transport says where this machine is reached when the port
+opens: the address it listens on, or with 0.0.0.0 its own addresses on the
+network, at most four, the one a route out would use first. `aamio transport
+here lan` shows them, an Earshot or QRcast card can carry one, and a partner
+binds it with `aamio transport bind NAME lan --address lan:192.168.2.22:47474`:
+the first ask then goes there, with no broadcast and no peers. With aamio 0.7.0
+the transport works as before, and the core leaves what it says of this alone.
 
 ## On the wire
 

@@ -15,7 +15,10 @@ never paired reached each other this way, both ways; one that had answered nobod
 Bluetooth settings had been opened.
 
 The channel is opened after hello, and never when hello says probe. Bluetooth that is off or missing is said as down
-and tried again every five seconds, and said as up with room once the channel opens.
+and tried again every five seconds, and said as up with room once the channel opens. Each ready says where this machine
+is reached, here: its own Bluetooth address, so a card can carry it and a partner can bind it, and nobody has to name it
+in AAMIO_BT_PEERS. Standard error is UTF-8, as contract 3 asks: the system's own words for an error, as Norwegian ones,
+came out as replacement characters in the core's log (19 November 2026).
 
     AAMIO_BT_CHANNEL   the RFCOMM channel this transport listens and connects on, 5 if left out
     AAMIO_BT_PEERS     the Bluetooth addresses a frame to nobody in particular goes to, comma separated
@@ -145,7 +148,7 @@ class Bt:
             self.server = sock
             if said_down:
                 self.say({"t": "status", "state": "up", "reason": "Bluetooth is open as %s" % self.me})
-            self.say({"t": "ready", "credit": CREDIT, "sends_read": self.sends_read})
+            self.say(self.ready())
             self.take()
             return
 
@@ -289,6 +292,13 @@ class Bt:
 
     # ---------------------------------------------------------------- the protocol
 
+    def ready(self):
+        """Room, and once the channel is open, where this machine is reached (contract 3, B3)."""
+        said = {"t": "ready", "credit": CREDIT, "sends_read": self.sends_read}
+        if self.server is not None and self.me:
+            said["here"] = ["bt:" + self.me]
+        return said
+
     def say(self, message):
         line = json.dumps(message, separators=(",", ":")) + "\n"
         with self.out:
@@ -309,7 +319,7 @@ class Bt:
             elif kind == "send":
                 self.sends_read += 1
                 self.say(self.send(message))
-                self.say({"t": "ready", "credit": CREDIT, "sends_read": self.sends_read})
+                self.say(self.ready())
             elif kind == "cancel":
                 pass  # a frame is answered before the next line is read, so nothing is left to cancel
             elif kind == "stop":
@@ -325,6 +335,8 @@ class Bt:
 
 
 def main():
+    # UTF-8, as contract 3 asks, whatever code page a pipe gets on Windows.
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
     try:
         bt = Bt()
     except ValueError as error:

@@ -12,7 +12,11 @@ the network can see that frames go, how big they are and the hints in them.
 The port is opened after hello, and never when hello says probe: enable then
 only sees that this starts and describes itself. A port that cannot be opened,
 as one another program holds, is said as down and tried again every two
-seconds, and said as up with room once it opens.
+seconds, and said as up with room once it opens. Each ready says where this
+machine is reached, here: the address it listens on, or with 0.0.0.0 its own
+addresses on the network, as they were when the port opened, at most four, so
+a card can carry one and a partner can bind it. Standard error is UTF-8, as
+contract 3 asks.
 
     AAMIO_LAN_PORT       the UDP port this transport listens on, 47474 if left out
     AAMIO_LAN_BIND       the address it listens on, 0.0.0.0 if left out
@@ -28,12 +32,13 @@ import sys
 import threading
 import time
 
-NAME, VERSION = "lan", "0.1.0"
+NAME, VERSION = "lan", "0.2.0"
 MAGIC = b"AL1"
 CREDIT = 32
 MAX_FRAME = 1200
 PORT = 47474
 RETRY_SECONDS = 2.0
+HERE_MOST = 4
 
 
 def peers_of(text):
@@ -63,6 +68,41 @@ class Lan:
         self.stopping = False
         self.sends_read = 0
         self.socket = None
+        self.here = []
+
+    def addresses(self):
+        """Where this machine is reached: the address the port is bound to, or with 0.0.0.0 its own IPv4 addresses, the
+        one a route out would use first, without loopback and link-local ones, at most HERE_MOST, as lan:<ip>:<port>."""
+        if self.bind not in ("0.0.0.0", ""):
+            return ["lan:%s:%d" % (self.bind, self.port)]
+        found = []
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                # Nothing goes: connect on UDP only picks the interface a route would take.
+                probe.connect(("10.254.254.254", 9))
+                found.append(probe.getsockname()[0])
+            finally:
+                probe.close()
+        except OSError:
+            pass
+        try:
+            found.extend(info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET))
+        except OSError:
+            pass
+        mine = []
+        for ip in found:
+            if ip in mine or ip == "0.0.0.0" or ip.startswith("127.") or ip.startswith("169.254."):
+                continue
+            mine.append(ip)
+        return ["lan:%s:%d" % (ip, self.port) for ip in mine[:HERE_MOST]]
+
+    def ready(self):
+        """Room, and once the port is open, where this machine is reached (contract 3, B3)."""
+        said = {"t": "ready", "credit": CREDIT, "sends_read": self.sends_read}
+        if self.socket is not None and self.here:
+            said["here"] = self.here
+        return said
 
     def _open(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -86,10 +126,11 @@ class Lan:
                     said_down = True
                 time.sleep(RETRY_SECONDS)
                 continue
+            self.here = self.addresses()
             self.socket = sock
             if said_down:
                 self.say({"t": "status", "state": "up", "reason": "port %d is open" % self.port})
-            self.say({"t": "ready", "credit": CREDIT, "sends_read": self.sends_read})
+            self.say(self.ready())
             self.listen()
             return
 
@@ -168,7 +209,7 @@ class Lan:
             elif kind == "send":
                 self.sends_read += 1
                 self.say(self.send(message))
-                self.say({"t": "ready", "credit": CREDIT, "sends_read": self.sends_read})
+                self.say(self.ready())
             elif kind == "cancel":
                 pass  # a datagram is on the network as soon as it is given, so nothing is left to cancel
             elif kind == "stop":
@@ -179,6 +220,8 @@ class Lan:
 
 
 def main():
+    # UTF-8, as contract 3 asks, whatever code page a pipe gets on Windows.
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
     try:
         lan = Lan()
     except ValueError as error:

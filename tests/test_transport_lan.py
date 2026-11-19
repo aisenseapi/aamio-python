@@ -24,6 +24,8 @@ from aamio.transport_host import TransportProcess
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LAN = ROOT / "addons" / "lan" / "src"
+# The version the transport describes itself as, read where it is set: describe must name the manifest's.
+LAN_VERSION = json.loads((LAN / "aamio_lan" / "aamio-addon.json").read_text(encoding="utf-8"))["version"]
 A, B = Keys(bytes(range(32))), Keys(bytes(range(32, 64)))
 
 
@@ -42,7 +44,7 @@ def lan_process(tmp_path, port, peer):
     env = transport_host.environment([], base={key: value for key, value in os.environ.items() if key.upper() in ("PATH", "SYSTEMROOT", "TEMP", "TMP")})
     env.update({"PYTHONPATH": str(LAN), "AAMIO_LAN_PORT": str(port), "AAMIO_LAN_BIND": "127.0.0.1", "AAMIO_LAN_BROADCAST": "none",
                 "AAMIO_LAN_PEERS": "127.0.0.1:%d" % peer})
-    return TransportProcess("lan", "0.1.0", [sys.executable, "-u", "-m", "aamio_lan.transport"], str(tmp_path), env)
+    return TransportProcess("lan", LAN_VERSION, [sys.executable, "-u", "-m", "aamio_lan.transport"], str(tmp_path), env)
 
 
 def wait_for(process, condition, seconds=10):
