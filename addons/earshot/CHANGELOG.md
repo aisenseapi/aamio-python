@@ -4,19 +4,25 @@ aamio-earshot, the add-on, called aamio-sound up to 0.2.0. Dates are the day the
 tagged on release, and the two are the same day. Every entry says what changed
 for somebody using it.
 
-## 0.5.0 - 2026-11-17
+## 0.5.0 - 2026-11-19
 
 - A card can name the media the one who plays it prefers answers over, with
   `--via` (`via` over MCP), in order and at most three: internet, or the
-  medium of a transport, lan or sound. A card that names a medium other than
+  medium of a transport, as lan or bt. A card that names a medium other than
   internet carries their public key, from `--key` on the command line and the
   runtime's own over MCP, so a listener can bind that transport to it. Only
   earshot 0.5.0 and newer reads such a card; without `--via` and `--key` the
   card is the one earlier versions made, byte for byte.
+- A medium on a card can carry where the one who plays it is reached on it,
+  as their transport says it: `bt:8C:1D:55:03:7B:53`. Over MCP the card takes
+  it from the runtime's own transports, and the model names the media alone;
+  on the command line `aamio transport here` shows it. Nothing here knows a
+  medium, so a transport made later is carried the same way. Needs aamio
+  0.7.1.
 - A card heard with media and a key says how to bind a transport to it, with
-  `aamio partner add` and `aamio transport bind`, and binds nothing itself. A
-  key with the shape of a scope's key or a read key is refused, as an address
-  of that shape always was.
+  `aamio partner add` and `aamio transport bind`, with `--address` when the
+  card says where, and binds nothing itself. A key with the shape of a scope's
+  key or a read key is refused, as an address of that shape always was.
 
 ## 0.4.0 - 2026-11-17
 

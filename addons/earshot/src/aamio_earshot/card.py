@@ -22,17 +22,25 @@ and must never be taken for one on this. The longest card is 80 bytes, of the
 From 0.5.0 a card may say more, when the one who plays it asks:
 
     aamio:scope/k7rq2m4xw5tbz3yd6ena?n=rom-42&t=1794200000&v=lan,internet&k=KEY
+    aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794200000&v=bt:8C:1D:55:03:7B:53&k=KEY
 
-v is the media they prefer answers over, in order, at most three: internet,
-the scope over aamio.at as a card without v means, or the medium of a
-transport as its manifest names it, lan or sound today. k is their public key,
-43 characters of base64url, which a listener binds a transport to; a card that
-names a medium other than internet carries it. A medium a listener has no
-transport for is said rather than refused, so a card from a later earshot
-naming a medium this one does not know is still read. Such a card is up to
-128 bytes, and only earshot 0.5.0 and newer reads it. A public key is public,
-and a scope's key or a thread's read key never takes its place: k refuses
-their shape as the address does.
+v is the media they prefer answers over, in order, at most three, each once:
+internet, the scope over aamio.at as a card without v means, or the medium of
+a transport as its manifest names it, as lan, bt or sound. A transport's
+medium may carry where they are reached on it, as the transport says it
+(contract 3, B3: here): the medium, a colon, and 1 to 64 characters of
+letters, digits, dots, colons, underscores and dashes, as
+bt:8C:1D:55:03:7B:53 or lan:192.168.2.22:47474. That is the transport's own
+address, which a listener's core binds to with aamio transport bind NAME
+TRANSPORT --address. Nothing here knows what a medium is: a transport made
+tomorrow is carried the same way. k is their public key, 43 characters of
+base64url, which a listener binds a transport to; a card that names a medium
+other than internet carries it. A medium a listener has no transport for is
+said rather than refused, so a card from a later earshot naming a medium this
+one does not know is still read. Such a card is up to 128 bytes, and only
+earshot 0.5.0 and newer reads it. A public key is public, and a scope's key or
+a thread's read key never takes its place: k refuses their shape as the
+address does. The same card goes in a QR code, and aamio-qrcast reads it.
 """
 
 import base64
@@ -46,16 +54,24 @@ KEY_SHAPED = re.compile(r"[a-z0-9]{26,64}")
 # Unix seconds, as a card carries them: nine to eleven digits.
 EXPIRY = re.compile(r"[0-9]{9,11}")
 MAX_BYTES = 128
-# The media a card may ask answers over: internet, or a transport's medium as its manifest names it.
+# The media a card may ask answers over: internet, or a transport's medium as its manifest names it, each alone or with
+# where it is reached, as the transport says it: medium:address.
 MEDIUM = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+ENTRY = re.compile(r"([a-z0-9][a-z0-9_-]{0,31})(?::([A-Za-z0-9._:-]{1,64}))?")
 INTERNET = "internet"
 VIA_MOST = 3
 # A public key as aamio prints it: 32 bytes of Ed25519 in base64url without padding.
 PUBLIC_KEY = re.compile(r"[A-Za-z0-9_-]{43}")
 VIA_FIX = ("via is the media you prefer answers over, in order, at most three and each once: internet, the scope over aamio.at, "
-           "or the medium of a transport, lan or sound. As text they are separated by commas, as lan,internet.")
+           "or the medium of a transport, as lan or bt, alone or with where you are reached on it as aamio transport here shows it, "
+           "as bt:8C:1D:55:03:7B:53. As text they are separated by commas, as bt:8C:1D:55:03:7B:53,internet.")
 KEY_FIX = ("key is your public key, the 43 characters aamio whoami shows as key. A card that names a medium other than internet "
            "carries it, and everyone within earshot hears it.")
+
+
+def medium_of(entry):
+    """The medium of a via entry: bt for bt:8C:1D:55:03:7B:53, internet for internet."""
+    return entry.split(":", 1)[0]
 
 
 class Refused(Exception):
@@ -92,23 +108,27 @@ def check_name(name):
 
 
 def _media(via):
-    """The media in a v, or None when the text is not one."""
-    media = via.split(",")
-    if len(media) > VIA_MOST or len(set(media)) != len(media) or any(MEDIUM.fullmatch(medium) is None for medium in media):
+    """The entries in a v, each a medium or medium:address, or None when the text is not one: at most VIA_MOST, each medium
+    once, and internet never with an address."""
+    entries = via.split(",")
+    if len(entries) > VIA_MOST or any(ENTRY.fullmatch(entry) is None for entry in entries):
         return None
-    return media
+    media = [medium_of(entry) for entry in entries]
+    if len(set(media)) != len(media) or any(entry != INTERNET and medium_of(entry) == INTERNET for entry in entries):
+        return None
+    return entries
 
 
 def check_via(via):
-    """The media a card asks answers over, or None. internet alone is what a card without v says, so it adds nothing."""
+    """The entries a card asks answers over, or None. internet alone is what a card without v says, so it adds nothing."""
     if via is None or via == "" or via == []:
         return None
-    if isinstance(via, list) and all(isinstance(medium, str) for medium in via):
+    if isinstance(via, list) and all(isinstance(entry, str) for entry in via):
         via = ",".join(via)
-    media = _media(via) if isinstance(via, str) else None
-    if media is None:
+    entries = _media(via) if isinstance(via, str) else None
+    if entries is None:
         raise Refused("invalid_via", VIA_FIX)
-    return None if media == [INTERNET] else media
+    return None if entries == [INTERNET] else entries
 
 
 def _public(key):
@@ -141,9 +161,9 @@ def make(address, name=None, expires=None, via=None, key=None):
         if not isinstance(expires, int) or isinstance(expires, bool) or EXPIRY.fullmatch(str(expires)) is None:
             raise Refused("invalid_expiry", "The time a card stops being good is Unix seconds, nine to eleven digits.")
         parts.append("t=%d" % expires)
-    if media is not None and key is None and any(medium != INTERNET for medium in media):
+    if media is not None and key is None and any(medium_of(entry) != INTERNET for entry in media):
         raise Refused("key_needed", "A card that asks for answers over %s carries the public key a listener binds that medium to. %s"
-                      % (", ".join(medium for medium in media if medium != INTERNET), KEY_FIX))
+                      % (", ".join(medium_of(entry) for entry in media if medium_of(entry) != INTERNET), KEY_FIX))
     if media is not None:
         parts.append("v=" + ",".join(media))
     if key is not None:
@@ -151,13 +171,14 @@ def make(address, name=None, expires=None, via=None, key=None):
     text = PREFIX + address + ("?" + "&".join(parts) if parts else "")
     size = len(text.encode("utf-8"))
     if size > MAX_BYTES:
-        raise Refused("card_too_long", "The card would be %d bytes, and one sound carries %d: shorten the name or leave it out, or name fewer media." % (size, MAX_BYTES))
+        raise Refused("card_too_long", "The card would be %d bytes, and one sound carries %d: shorten the name or leave it out, or name fewer media. "
+                      "Where a medium is reached takes room too: bt with its Bluetooth address is 18 bytes longer than bt alone." % (size, MAX_BYTES))
     return text
 
 
 def read(text):
     """The card in what was heard, as {"kind": "scope", "address", "name", "expires_at"}, with "via" and "key" when it
-    carries them, or NotUnderstood."""
+    carries them, or NotUnderstood. via is the entries as the card has them: a medium, or medium:address."""
     if not isinstance(text, str) or not text.startswith(PREFIX):
         raise NotUnderstood("not_an_aamio_card")
     address, question, query = text[len(PREFIX):].partition("?")

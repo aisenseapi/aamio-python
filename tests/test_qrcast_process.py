@@ -853,3 +853,46 @@ def test_an_unknown_call_is_said_as_the_other_two_editions_say_it():
     assert run(request("command", "nope"))["result"]["fix"] == "The add-on qrcast has no command called nope" + tail
     odd = dict(request("command", "nope"), name={"not": "a name"})
     assert run(odd)["result"]["fix"] == 'The add-on qrcast has no command called {"not":"a name"}' + tail
+
+
+# ----------------------------------------------------------------- where a medium is reached
+
+KEY = "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ"
+BT_HERE = "bt:8C:1D:55:03:7B:53"
+HERE_SAID = [{"transport": "bt", "medium": "bt", "here": [BT_HERE], "at": NOW}]
+
+
+def test_the_card_of_0_2_0_is_earshot_s_with_media_where_they_are_reached_and_the_key():
+    made = run(request("command", "card", address=ADDRESS, via=BT_HERE + ",internet", key=KEY))["result"]
+    assert made["card"] == "aamio:scope/%s?t=%d&v=%s,internet&k=%s" % (ADDRESS, NOW + 3600, BT_HERE, KEY)
+    assert made["card"] == sound_card.make(ADDRESS, None, NOW + 3600, [BT_HERE, "internet"], KEY), "a card seen and a card heard are one thing"
+    assert "everyone who sees the code" in made["note"] and "0.2.0" in made["note"]
+    said = run(request("command", "card", address=ADDRESS, via="bt"))
+    assert said["exit_code"] == 2 and said["result"]["reason"] == "key_needed"
+
+
+def test_over_mcp_show_puts_the_runtime_s_key_and_where_this_machine_is_reached_on_the_card():
+    def tool(**arguments):
+        asked = request("tool", "aamio_addon_qrcast_show", **arguments)
+        asked["own_key"], asked["here"] = KEY, HERE_SAID
+        return asked
+    screen = Screen()
+    said = run(tool(address=ADDRESS, via=["bt"]), display=screen)
+    assert said["exit_code"] == 0 and said["result"]["card"] == "aamio:scope/%s?t=%d&v=%s&k=%s" % (ADDRESS, NOW + 3600, BT_HERE, KEY)
+    said = run(tool(address=ADDRESS, via=["lan"]), display=Screen())
+    assert said["result"]["card"].endswith("&v=lan&k=" + KEY) and "without where you are reached on it" in said["result"]["note"]
+    said = run(tool(address=ADDRESS, via=[BT_HERE]), display=Screen())
+    assert said["exit_code"] == 2 and said["result"]["reason"] == "invalid_via"
+
+
+def test_a_card_seen_with_where_a_medium_is_reached_says_the_bind_and_binds_nothing(tmp_path):
+    text = sound_card.make(ADDRESS, "stue-tv", NOW + 3600, [BT_HERE], KEY)
+    said = run(request("command", "read", file=picture(tmp_path)), local=Local([text]))
+    assert said["result"]["status"] == "seen" and said["result"]["card"]["via"] == [BT_HERE]
+    assert "aamio transport bind stue-tv TRANSPORT --address %s" % BT_HERE in said["result"]["bind"]
+
+
+def test_a_bad_address_is_said_before_a_bad_via_as_before_0_2_0():
+    for kind, call in (("command", "card"), ("tool", "aamio_addon_qrcast_show")):
+        said = run(request(kind, call, address="not-an-address", via="x y", key=KEY))
+        assert said["exit_code"] == 2 and said["result"]["reason"] == "not_a_write_address", (kind, said)

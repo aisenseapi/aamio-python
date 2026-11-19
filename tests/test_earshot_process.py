@@ -993,3 +993,55 @@ def test_an_unknown_call_is_said_as_the_other_two_editions_say_it():
     assert run(request("command", "shout"))["result"]["fix"] == "The add-on earshot has no command called shout" + tail
     odd = dict(request("command", "shout"), name={"not": "a name"})
     assert run(odd)["result"]["fix"] == 'The add-on earshot has no command called {"not":"a name"}' + tail
+
+
+# ---------------------------------------------------------------- where a medium is reached
+
+BT_HERE = "bt:8C:1D:55:03:7B:53"
+HERE_SAID = [{"transport": "bt", "medium": "bt", "here": [BT_HERE], "at": NOW},
+             {"transport": "lan", "medium": "lan", "here": ["lan:10.0.0.7:47474", "lan:10.0.0.8:47474"], "at": NOW}]
+
+
+def test_over_mcp_a_medium_gets_where_this_machine_is_reached_and_a_model_names_no_machine():
+    def tool(**arguments):
+        asked = request("tool", "aamio_addon_earshot_broadcast", **arguments)
+        asked["own_key"], asked["here"] = KEY, HERE_SAID
+        return asked
+    aisense = Aisense()
+    said = run(tool(address=ADDRESS, via=["bt"]), aisense)
+    assert said["exit_code"] == 0 and aisense.encoded[-1][0] == "aamio:scope/%s?t=%d&v=%s&k=%s" % (ADDRESS, NOW + 3600, BT_HERE, KEY)
+    assert "without where you are reached" not in said["result"]["note"] and BT_HERE in said["result"]["note"]
+    run(tool(address=ADDRESS, via=["lan", "internet"]), aisense)
+    assert aisense.encoded[-1][0].endswith("&v=lan:10.0.0.7:47474,internet&k=" + KEY), "the first address the transport said"
+    said = run(tool(address=ADDRESS, via=["sound"]), aisense)
+    assert aisense.encoded[-1][0].endswith("&v=sound&k=" + KEY), "a medium no transport says where it is reached on goes alone"
+    assert "without where you are reached on it" in said["result"]["note"] and "aamio transport list" in said["result"]["note"]
+    sent = len(aisense.encoded)
+    said = run(tool(address=ADDRESS, via=[BT_HERE]), aisense)
+    assert said["exit_code"] == 2 and said["result"]["reason"] == "invalid_via" and "another machine" in said["result"]["fix"]
+    assert len(aisense.encoded) == sent, "refused before anything was sent"
+    said = run(tool(address=ADDRESS, name="rom-42", via=["bt", "internet"]), aisense)
+    assert said["exit_code"] == 2 and said["result"]["reason"] == "card_too_long" and "18 bytes" in said["result"]["fix"]
+
+
+def test_on_the_command_line_the_address_is_given_and_a_medium_without_one_says_how():
+    said = run(request("command", "card", address=ADDRESS, via=BT_HERE + ",internet", key=KEY))
+    assert said["exit_code"] == 0 and said["result"]["card"].endswith("&v=%s,internet&k=%s" % (BT_HERE, KEY))
+    assert "aamio transport here" not in said["result"]["note"]
+    said = run(request("command", "card", address=ADDRESS, via="bt", key=KEY))
+    assert said["exit_code"] == 0 and "aamio transport here bt" in said["result"]["note"] and "--via bt:ADDRESS" in said["result"]["note"]
+
+
+def test_a_card_heard_with_where_a_medium_is_reached_says_the_bind_with_the_address_and_binds_nothing():
+    heard = process._card_heard({"text": card.make(ADDRESS, "rom-42", NOW + 3600, [BT_HERE], KEY)}, "command", NOW)
+    assert heard["status"] == "heard" and heard["card"]["via"] == [BT_HERE] and heard["card"]["key"] == KEY
+    assert "aamio partner add rom-42 %s, then aamio transport bind rom-42 TRANSPORT --address %s" % (KEY, BT_HERE) in heard["bind"]
+    assert "medium bt" in heard["bind"] and "user's choice" in heard["bind"]
+    bare = process._card_heard({"text": card.make(ADDRESS, "rom-42", NOW + 3600, ["bt"], KEY)}, "command", NOW)
+    assert "--address" not in bare["bind"] and "nobody in particular" in bare["bind"]
+
+
+def test_a_bad_address_is_said_before_a_bad_via_as_before_0_5_0():
+    for kind, call in (("command", "card"), ("tool", "aamio_addon_earshot_broadcast")):
+        said = run(request(kind, call, address="not-an-address", via="x y", key=KEY))
+        assert said["exit_code"] == 2 and said["result"]["reason"] == "not_a_write_address", (kind, said)

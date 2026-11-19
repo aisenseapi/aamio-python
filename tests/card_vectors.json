@@ -1,0 +1,432 @@
+{
+ "about": "The card of earshot 0.5.0 and qrcast 0.2.0, the same in aamio-python, aamio-php and aamio-js: what make gives for each input, the card or the reason it is refused, and what read gives for each text, the card or the reason it is not understood. Made from the reference in aamio-python; every edition is tested against this file.",
+ "max_bytes": 128,
+ "make": [
+  {
+   "about": "a card as before 0.5.0: the address alone",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": null,
+   "key": null,
+   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena",
+   "bytes": 32
+  },
+  {
+   "about": "a name and a time",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": "rom-42",
+   "expires": 1794153600,
+   "via": null,
+   "key": null,
+   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?n=rom-42&t=1794153600",
+   "bytes": 54
+  },
+  {
+   "about": "media without addresses, and the key",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": 1794153600,
+   "via": [
+    "lan",
+    "internet"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794153600&v=lan,internet&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "bytes": 106
+  },
+  {
+   "about": "a Bluetooth address, as aamio-bt says it",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": 1794153600,
+   "via": [
+    "bt:8C:1D:55:03:7B:53"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794153600&v=bt:8C:1D:55:03:7B:53&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "bytes": 114
+  },
+  {
+   "about": "an address on the local network, and internet after it",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": 1794153600,
+   "via": [
+    "lan:192.168.2.22:47474",
+    "internet"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794153600&v=lan:192.168.2.22:47474,internet&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "bytes": 125
+  },
+  {
+   "about": "via as text, separated by commas",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": 1794153600,
+   "via": "bt:8C:1D:55:03:7B:53,internet",
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794153600&v=bt:8C:1D:55:03:7B:53,internet&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "bytes": 123
+  },
+  {
+   "about": "a medium no runtime knows today is carried the same",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "mesh-7:node.42_a"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=mesh-7:node.42_a&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "bytes": 97
+  },
+  {
+   "about": "internet alone is what a card without v says",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "internet"
+   ],
+   "key": null,
+   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena",
+   "bytes": 32
+  },
+  {
+   "about": "a medium beside internet needs the key",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "bt"
+   ],
+   "key": null,
+   "refused": "key_needed"
+  },
+  {
+   "about": "with an address too",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "bt:8C:1D:55:03:7B:53"
+   ],
+   "key": null,
+   "refused": "key_needed"
+  },
+  {
+   "about": "internet never has an address",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "internet:x"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "refused": "invalid_via"
+  },
+  {
+   "about": "a space is not in an address",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "bt:a b"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "refused": "invalid_via"
+  },
+  {
+   "about": "each medium once, with or without an address",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "bt",
+    "bt:8C:1D:55:03:7B:53"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "refused": "invalid_via"
+  },
+  {
+   "about": "an address of at most 64 characters",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "bt:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "refused": "invalid_via"
+  },
+  {
+   "about": "an address of 64 characters is one, though no card with a key has room for it",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "bt:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "refused": "card_too_long"
+  },
+  {
+   "about": "an empty address",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "bt:"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "refused": "invalid_via"
+  },
+  {
+   "about": "a medium in capitals",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "Bt:8C"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "refused": "invalid_via"
+  },
+  {
+   "about": "four media",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "bt",
+    "lan",
+    "sound",
+    "internet"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "refused": "invalid_via"
+  },
+  {
+   "about": "128 bytes is the most a card is",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": "ro",
+   "expires": 1794153600,
+   "via": [
+    "bt:8C:1D:55:03:7B:53",
+    "internet"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?n=ro&t=1794153600&v=bt:8C:1D:55:03:7B:53,internet&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "bytes": 128
+  },
+  {
+   "about": "one byte more",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": "rom",
+   "expires": 1794153600,
+   "via": [
+    "bt:8C:1D:55:03:7B:53",
+    "internet"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "refused": "card_too_long"
+  },
+  {
+   "about": "a scope key is never a public key",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "bt"
+   ],
+   "key": "abcdefghijklmnopqrstuvwxyz",
+   "refused": "a_key_not_a_public_key"
+  },
+  {
+   "about": "a key that is not one",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "bt"
+   ],
+   "key": "not-a-key",
+   "refused": "invalid_key"
+  },
+  {
+   "about": "a public key that is not canonical",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": [
+    "bt"
+   ],
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmB",
+   "refused": "invalid_key"
+  },
+  {
+   "about": "a key without a medium beside internet is carried",
+   "address": "k7rq2m4xw5tbz3yd6ena",
+   "name": null,
+   "expires": null,
+   "via": null,
+   "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "bytes": 78
+  }
+ ],
+ "read": [
+  {
+   "about": "a card of before",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena",
+   "card": {
+    "kind": "scope",
+    "address": "k7rq2m4xw5tbz3yd6ena",
+    "name": null,
+    "expires_at": null
+   }
+  },
+  {
+   "about": "a name and a time",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?n=rom-42&t=1794153600",
+   "card": {
+    "kind": "scope",
+    "address": "k7rq2m4xw5tbz3yd6ena",
+    "name": "rom-42",
+    "expires_at": 1794153600
+   }
+  },
+  {
+   "about": "a Bluetooth address and the key",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794153600&v=bt:8C:1D:55:03:7B:53&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": {
+    "kind": "scope",
+    "address": "k7rq2m4xw5tbz3yd6ena",
+    "name": null,
+    "expires_at": 1794153600,
+    "via": [
+     "bt:8C:1D:55:03:7B:53"
+    ],
+    "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ"
+   }
+  },
+  {
+   "about": "an address on the local network and internet",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=lan:192.168.2.22:47474,internet&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": {
+    "kind": "scope",
+    "address": "k7rq2m4xw5tbz3yd6ena",
+    "name": null,
+    "expires_at": null,
+    "via": [
+     "lan:192.168.2.22:47474",
+     "internet"
+    ],
+    "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ"
+   }
+  },
+  {
+   "about": "media without a key are read, and the listener is told",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=bt",
+   "card": {
+    "kind": "scope",
+    "address": "k7rq2m4xw5tbz3yd6ena",
+    "name": null,
+    "expires_at": null,
+    "via": [
+     "bt"
+    ]
+   }
+  },
+  {
+   "about": "a medium no runtime knows today",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=mesh-7:node.42_a&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": {
+    "kind": "scope",
+    "address": "k7rq2m4xw5tbz3yd6ena",
+    "name": null,
+    "expires_at": null,
+    "via": [
+     "mesh-7:node.42_a"
+    ],
+    "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ"
+   }
+  },
+  {
+   "about": "internet with an address",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=internet:x&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "not_understood": "invalid_via"
+  },
+  {
+   "about": "a space in an address",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=bt:a b&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "not_understood": "invalid_via"
+  },
+  {
+   "about": "a medium twice",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=bt,bt:8C:1D:55:03:7B:53&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "not_understood": "invalid_via"
+  },
+  {
+   "about": "four media",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=bt,lan,sound,internet&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "not_understood": "invalid_via"
+  },
+  {
+   "about": "an empty address",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=bt:&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "not_understood": "invalid_via"
+  },
+  {
+   "about": "an address of 64 characters is read",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=x:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": {
+    "kind": "scope",
+    "address": "k7rq2m4xw5tbz3yd6ena",
+    "name": null,
+    "expires_at": null,
+    "via": [
+     "x:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+    ],
+    "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ"
+   }
+  },
+  {
+   "about": "one of 65 is not",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=x:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "not_understood": "invalid_via"
+  },
+  {
+   "about": "a parameter this version does not know",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?x=1",
+   "not_understood": "not_this_version"
+  },
+  {
+   "about": "v twice",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=bt&v=lan",
+   "not_understood": "not_this_version"
+  },
+  {
+   "about": "a key that is a scope key",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=bt&k=abcdefghijklmnopqrstuvwxyz",
+   "not_understood": "invalid_key"
+  },
+  {
+   "about": "a key that is not canonical",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=bt&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmB",
+   "not_understood": "invalid_key"
+  },
+  {
+   "about": "not a card",
+   "text": "https://example.org/aamio:scope/k7rq2m4xw5tbz3yd6ena",
+   "not_understood": "not_an_aamio_card"
+  },
+  {
+   "about": "an address of 19 characters",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6en",
+   "not_understood": "not_a_write_address"
+  }
+ ]
+}

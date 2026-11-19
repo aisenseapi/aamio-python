@@ -17,7 +17,7 @@ authors = [{ name = "AI SENSE AS" }]
 # The first core that knows contract 3, which earshot-link is a transport under,
 # and the microphone: sounddevice's wheels for Windows and macOS carry PortAudio
 # with them.
-dependencies = ["aamio>=0.7.0", "sounddevice>=0.4.6"]
+dependencies = ["aamio>=0.7.1", "sounddevice>=0.4.6"]
 keywords = ["aamio", "agents", "mcp", "sound", "data-over-sound", "scope"]
 
 [project.urls]

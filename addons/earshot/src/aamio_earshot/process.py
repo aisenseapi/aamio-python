@@ -8,7 +8,11 @@ write address the caller gives, and a card heard goes back to the caller as
 data, untrusted, for the core's own scope add and board post. A card that
 names a medium other than internet carries a public key: on the command line
 the one the caller gives, and over MCP the runtime's own, which the core
-passes as own_key, so a model never puts another key on a card.
+passes as own_key, so a model never puts another key on a card. Over MCP a
+medium also gets where this machine is reached on it, as its transport told
+the core and the core passes as here; a model gives the medium alone, so it
+never puts another machine's address on a card either. Nothing here knows a
+medium: any transport that says where it is reached is carried the same way.
 
     kind    command | tool | probe
     name    card | broadcast | listen | decode
@@ -213,17 +217,64 @@ def _expires(arguments, now):
     return int(now) + valid_for
 
 
-def _card_of(arguments, kind, own_key, now):
-    """The card's text and its expiry. On the command line the key is the one given; over MCP it is the runtime's own,
-    and only when the card names a medium other than internet."""
+def _reached(entries, here):
+    """Each bare medium of a transport given where this machine is reached on it, as the core said it (here): the first
+    address of a transport with that medium that a card can carry. The entries, and the media no address was found for."""
+    found, unknown = [], []
+    for entry in entries:
+        medium = card.medium_of(entry)
+        if medium == card.INTERNET or entry != medium:
+            found.append(entry)
+            continue
+        address = next((address for transport in (here if isinstance(here, list) else []) if isinstance(transport, dict) and transport.get("medium") == medium
+                        for address in (transport.get("here") if isinstance(transport.get("here"), list) else [])
+                        if isinstance(address, str) and card.ENTRY.fullmatch(address) and card.medium_of(address) == medium), None)
+        if address is None:
+            unknown.append(medium)
+        found.append(address or entry)
+    return found, unknown
+
+
+def _card_of(arguments, kind, own_key, here, now):
+    """The card's text, its expiry, and the media it names without where they are reached.
+
+    On the command line the key and the addresses are the ones given. Over MCP
+    the key is the runtime's own, only when the card names a medium other than
+    internet, and each such medium gets where this machine is reached on it
+    from here: the model gives the medium alone.
+    """
     expires = _expires(arguments, now)
+    # The address and the name first, as card.make checks them: a bad address is said before a bad via, as in 0.4.0.
+    card.check_address(arguments.get("address"))
+    card.check_name(arguments.get("name"))
     via = arguments.get("via")
     if kind == "tool":
-        media = card.check_via(via)
-        key = own_key if media is not None and any(medium != card.INTERNET for medium in media) else None
+        entries = card.check_via(via)
+        if entries is not None and any(entry != card.medium_of(entry) for entry in entries):
+            raise card.Refused("invalid_via", "Over MCP give the media alone, as bt or lan: where this machine is reached on each comes from its own transports, so a card never names another machine.")
+        unknown = []
+        if entries is not None:
+            entries, unknown = _reached(entries, here)
+        key = own_key if entries is not None and any(card.medium_of(entry) != card.INTERNET for entry in entries) else None
+        via = entries
     else:
         key = arguments.get("key")
-    return card.make(arguments.get("address"), arguments.get("name"), expires, via, key), expires
+        entries = card.check_via(via)
+        unknown = [entry for entry in entries or [] if entry != card.INTERNET and entry == card.medium_of(entry)]
+    return card.make(arguments.get("address"), arguments.get("name"), expires, via, key), expires, unknown
+
+
+def _unreached(unknown, kind):
+    """What a card that names a medium without where it is reached leaves a listener without, or an empty string."""
+    if not unknown:
+        return ""
+    media = ", ".join(unknown)
+    if kind == "tool":
+        how = "No enabled transport on this machine says where it is reached over %s: aamio transport list shows the transports and what they said." % media
+    else:
+        how = "aamio transport here %s shows where this machine is reached on it, and --via %s:ADDRESS puts it on the card." % (unknown[0], unknown[0])
+    return (" The card names %s without where you are reached on it, so a listener's first ask goes to nobody in particular, as its transport sends that. %s"
+            % (media, how))
 
 
 def _says_more(text):
@@ -238,16 +289,16 @@ def _says_more(text):
 
 def card_text(arguments, now):
     try:
-        text, expires = _card_of(arguments, "command", None, now)
+        text, expires, unknown = _card_of(arguments, "command", None, None, now)
     except card.Refused as error:
         return refused(error.reason, error.fix)
     return {"status": "card", "card": text, "bytes": len(text.encode("utf-8")), "expires_at": expires,
-            "note": "This is the text the sound carries, and it fits a QR code as well. aamio addon earshot broadcast plays it." + _says_more(text)}
+            "note": "This is the text the sound carries, and it fits a QR code as well. aamio addon earshot broadcast plays it." + _says_more(text) + _unreached(unknown, "command")}
 
 
-def broadcast(arguments, kind, encode, play, pause, now, own_key=None):
+def broadcast(arguments, kind, encode, play, pause, now, own_key=None, here=None):
     try:
-        text, expires = _card_of(arguments, kind, own_key, now)
+        text, expires, unknown = _card_of(arguments, kind, own_key, here, now)
         mode = _mode(arguments.get("mode"), service.MODES, "audible")
         repeat = _whole(arguments.get("repeat"), 1, REPEAT_MAX, 1, "repeat")
         engine = _engine(arguments.get("engine"))
@@ -276,7 +327,7 @@ def broadcast(arguments, kind, encode, play, pause, now, own_key=None):
         if reason is not None:
             return refused("out_not_written", "%s could not be written whole: %s. Nothing was left there, so the same name can be given again." % (out, _why(failure)))
         return dict(said, status="written", file=out, bytes=len(sound),
-                    note="Nothing was played. Play the whole file, at its own speed, near the agents that listen: a speed change or a lossy conversion damages it.")
+                    note="Nothing was played. Play the whole file, at its own speed, near the agents that listen: a speed change or a lossy conversion damages it." + _unreached(unknown, kind))
     with tempfile.TemporaryDirectory(prefix="aamio-earshot-", ignore_cleanup_errors=True) as folder:
         path = os.path.join(folder, "card.wav")
         reason, failure = _write_new(path, sound)
@@ -292,7 +343,7 @@ def broadcast(arguments, kind, encode, play, pause, now, own_key=None):
     read_posts = _by(kind, "aamio board find --scope NAME --wait 25", "aamio_board_find with scope and wait")
     good = ("A listener turns the card down after %s, so a recording played later is not taken for it; the address itself does not expire, so use a new scope for the next room or occasion." % _when(expires)) if expires else "The card has no end, and neither does the address: use a new scope for the next room or occasion."
     return dict(said, status="played", repeat=repeat, player=player,
-                note="Played on this machine's speaker. Agents within earshot that were listening can now post into the scope: read their posts with %s, and answer one with %s. %s%s" % (read_posts, _by(kind, "aamio board answer POST TEXT --scope NAME", "aamio_board_answer"), good, _says_more(text)))
+                note="Played on this machine's speaker. Agents within earshot that were listening can now post into the scope: read their posts with %s, and answer one with %s. %s%s%s" % (read_posts, _by(kind, "aamio board answer POST TEXT --scope NAME", "aamio_board_answer"), good, _says_more(text), _unreached(unknown, kind)))
 
 
 def _heard(sound, mode, kind, decode, now, engine):
@@ -349,12 +400,19 @@ def _bind(found, name):
         return ("The card asks for answers over %s, and carries no key to bind one to: answer in the scope, over aamio.at." % ", ".join(media))
     trust = ("The card carries a public key, and a card is not signed: anyone within earshot could have played it. "
              "If you trust whoever played it, ")
-    medium = media[0] if media else None
-    if medium is None:
+    entry = media[0] if media else None
+    if entry is None:
         return trust + "aamio partner add %s %s keeps the key in your address book. The card names no medium beside internet: answer in the scope." % (name, found["key"])
-    return trust + ("aamio partner add %s %s, then aamio transport bind %s TRANSPORT, where TRANSPORT is the one aamio transport list shows with the medium %s, "
-                    "sends your messages to them over it. That is the user's choice, on the command line. Until then, answer in the scope, over aamio.at."
-                    % (name, found["key"], name, medium))
+    medium = card.medium_of(entry)
+    if entry != medium:
+        bind = "aamio transport bind %s TRANSPORT --address %s" % (name, entry)
+        where = " The first ask goes to that address, where the card says they are reached."
+    else:
+        bind = "aamio transport bind %s TRANSPORT" % name
+        where = " The card says nothing of where they are reached on %s, so the first ask goes to nobody in particular, as the transport sends that." % medium
+    return trust + ("aamio partner add %s %s, then %s, where TRANSPORT is the one aamio transport list shows with the medium %s, "
+                    "sends your messages to them over it.%s That is the user's choice, on the command line. Until then, answer in the scope, over aamio.at."
+                    % (name, found["key"], bind, medium, where))
 
 
 def listen(arguments, kind, decode, record, clock):
@@ -429,7 +487,7 @@ def handle(request, encode=None, decode=None, play=None, record=None, pause=None
     if kind == "command" and short == "card":
         return answer(card_text(arguments, now))
     if short == "broadcast":
-        return answer(broadcast(arguments, kind, encode, play, pause, now, request.get("own_key")))
+        return answer(broadcast(arguments, kind, encode, play, pause, now, request.get("own_key"), request.get("here")))
     if short == "listen":
         return answer(listen(arguments, kind, decode, record, clock))
     if short == "decode":

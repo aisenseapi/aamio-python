@@ -4,6 +4,20 @@ aamio-qrcast, the add-on. Dates are the day the version was committed; it is
 tagged on release, and the two are the same day. Every entry says what changed
 for somebody using it.
 
+## 0.2.0 - 2026-11-19
+
+- The card is Earshot's card of 0.5.0: `--via` (`via` over MCP) names the
+  media you prefer answers over, a transport's medium alone or with where you
+  are reached on it, and a card that names one carries your public key, from
+  `--key` on the command line and the runtime's own over MCP. Over MCP each
+  medium gets where this machine is reached on it from the runtime's own
+  transports. Only qrcast 0.2.0 and earshot 0.5.0 and newer read such a card;
+  without `--via` and `--key` it is the card earlier versions made. Needs
+  aamio 0.7.1.
+- A card seen with media and a key says how to bind a transport to it, with
+  `aamio partner add` and `aamio transport bind`, with `--address` when the
+  card says where, and binds nothing itself.
+
 ## 0.1.3 - 2026-11-14
 
 - ffmpeg and the opener of a picture start by their full path, from the

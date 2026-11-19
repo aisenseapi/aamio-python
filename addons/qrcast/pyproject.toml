@@ -16,7 +16,7 @@ license = { text = "MIT" }
 authors = [{ name = "AI SENSE AS" }]
 # The first core that knows contract 2 of aamio's add-ons. zxing-cpp reads the
 # codes, with wheels for Windows, macOS and Linux, and Pillow opens the pictures.
-dependencies = ["aamio>=0.6.27", "zxing-cpp>=2.2", "Pillow>=9.1"]
+dependencies = ["aamio>=0.7.1", "zxing-cpp>=2.2", "Pillow>=9.1"]
 keywords = ["aamio", "agents", "mcp", "qr", "qr-code", "camera", "scope"]
 
 [project.urls]
