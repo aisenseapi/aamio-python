@@ -266,6 +266,12 @@ class Link:
         self.loud = False
         self.floor = None
         self.loud_at = -1e9
+        # Frames given and not answered yet, and those of them the core has cancelled: a cancelled frame is answered
+        # cancelled if its first tone has not played. It was played all the same and said sent (a review of
+        # 20 November 2026).
+        self.turns = threading.Lock()
+        self.pending = set()
+        self.cancelled = set()
 
     def say(self, message):
         line = json.dumps(message, separators=(",", ":")) + "\n"
@@ -416,8 +422,40 @@ class Link:
             if not taken():
                 return
 
+    def given(self, frame_id):
+        """A frame the core gave, until it is answered."""
+        with self.turns:
+            self.pending.add(frame_id)
+
+    def cancel(self, frame_id):
+        """The core cancelled a frame. One already answered is ignored, as contract 3 says, and is not kept."""
+        with self.turns:
+            if frame_id in self.pending:
+                self.cancelled.add(frame_id)
+
+    def answered(self, frame_id):
+        with self.turns:
+            self.pending.discard(frame_id)
+            self.cancelled.discard(frame_id)
+
+    def cancelled_before_play(self, frame_id):
+        """Whether the frame was cancelled: asked just before its first tone, the last moment it can still be kept back."""
+        with self.turns:
+            return frame_id in self.cancelled
+
+    def not_played(self, message):
+        """The answer to a frame cancelled before its first tone: not sent, and nothing went into the air."""
+        self.say({"t": "error", "id": message["id"], "code": "cancelled", "message": "cancelled before its first tone: nothing was played"})
+        self.answered(message["id"])
+        self.say({"t": "ready", "credit": CREDIT, "sends_read": self.sends_read})
+
     def speak(self):
-        """Play what the core gives, one frame at a time, each when the air is quiet."""
+        """Play what the core gives, one frame at a time, each when the air is quiet.
+
+        A frame is sent from its first tone. A cancel that comes before it keeps
+        the frame back and answers cancelled; one that comes after is too late,
+        and the frame is played whole, since a packet cut short is noise to
+        whoever hears it (contract 3, B3.2)."""
         while not self.stopping:
             try:
                 message = self.sends.get(timeout=0.2)
@@ -429,11 +467,17 @@ class Link:
                 frame = None
             if frame is None or not 1 <= len(frame) <= codec.MAX_BYTES:
                 self.say({"t": "error", "id": message.get("id"), "code": "too_large", "message": "a frame is 1 to %d bytes" % codec.MAX_BYTES})
+                self.answered(message.get("id"))
                 self.say({"t": "ready", "credit": CREDIT, "sends_read": self.sends_read})
+                continue
+            if self.cancelled_before_play(message["id"]):
+                self.not_played(message)
                 continue
             pcm = codec.encode(frame, self.mode)[44:]
             lead = 2 * int(codec.LEAD_SECONDS * codec.SAMPLE_RATE)
-            self.own[hashlib.sha256(frame).digest()] = time.monotonic()
+            digest = hashlib.sha256(frame).digest()
+            self.own[digest] = time.monotonic()
+            kept_back = False
             try:
                 # Stopped in its own quiet because someone else began, the frame waits for the quiet after them; after
                 # LEAD_STOPS_MOST stops, as in a room where a sound begins every few seconds, it is played regardless.
@@ -441,12 +485,20 @@ class Link:
                     self.wait_for_quiet()
                     if self.stopping:
                         return
+                    if self.cancelled_before_play(message["id"]):
+                        kept_back = True
+                        break
                     if self.audio.play(pcm, lead, self._someone_began if stops < LEAD_STOPS_MOST else None):
                         break
             except Exception as error:
                 self.say({"t": "error", "id": message["id"], "code": "send_failed", "message": "the frame could not be played: %s: %s" % (error.__class__.__name__, error)})
             else:
+                if kept_back:
+                    self.own.pop(digest, None)
+                    self.not_played(message)
+                    continue
                 self.say({"t": "sent", "id": message["id"]})
+            self.answered(message["id"])
             self.say({"t": "ready", "credit": CREDIT, "sends_read": self.sends_read})
 
     def run(self):
@@ -463,9 +515,11 @@ class Link:
                     threading.Thread(target=self.hear, daemon=True).start()
             elif kind == "send":
                 self.sends_read += 1
+                self.given(message.get("id"))
                 self.sends.put(message)
             elif kind == "cancel":
-                pass  # a frame is played whole once it starts, and one that waits for quiet is played when its turn comes
+                # Kept back if its first tone has not played; a frame that has begun is played whole.
+                self.cancel(message.get("id"))
             elif kind == "stop":
                 break
         self.stopping = True

@@ -140,6 +140,46 @@ def test_a_port_in_use_is_down_until_it_opens_and_then_up_with_room(tmp_path):
         process.stop()
 
 
+def test_an_address_with_a_port_out_of_range_is_refused_and_the_transport_goes_on(tmp_path):
+    """A port out of range went to the socket: in Python it ended the transport, in PHP the datagram went to another
+    port and said sent (a review of 20 November 2026). Now it is refused before the socket, the same in all three."""
+    port, peer = free_ports(2)
+    (tmp_path / "a").mkdir()
+    radio = lan(tmp_path / "a", port, peer)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.settimeout(0.3)
+            good = listener.getsockname()[1]
+            bad = ["lan:127.0.0.1:0", "lan:127.0.0.1:65536", "lan:127.0.0.1:-1", "lan:127.0.0.1:99999999999", "lan:127.0.0.1:x", "bt:127.0.0.1:5"]
+            ids = [radio.send(b"AF" + bytes(20), to=address) for address in bad]
+            ok = radio.send(b"AF" + bytes(20), to="lan:127.0.0.1:%d" % good)
+            wait_for(radio, lambda p, events: all(p.status(frame_id) != "waiting" for frame_id in ids + [ok]))
+            assert [radio.status(frame_id) for frame_id in ids] == ["not_sent"] * len(bad)
+            assert all(radio.frames[frame_id]["reason"] == "bad_address" for frame_id in ids)
+            assert radio.last_error[2] == "an address is lan:<ip>:<port>, with a port from 1 to 65535"
+            assert radio.status(ok) == "sent", "the transport goes on, and the next good address gets its frame"
+            data, _ = listener.recvfrom(65535)
+            assert data.endswith(b"AF" + bytes(20))
+    finally:
+        radio.stop()
+
+
+def test_a_port_out_of_range_in_the_settings_is_refused_before_anything_starts(tmp_path, monkeypatch):
+    """Port 0 asked the system for any port, and here then named port 0, which nobody can reach (a review of
+    20 November 2026). PHP and Node refused it already; now all three do."""
+    import subprocess
+
+    monkeypatch.syspath_prepend(str(LAN))
+    from aamio_lan import transport as lan_transport
+
+    for value in ("0", "65536", "-5", "seven"):
+        env = dict(os.environ, PYTHONPATH=str(LAN), AAMIO_LAN_PORT=value)
+        said = subprocess.run([sys.executable, "-m", "aamio_lan.transport"], input="", env=env, capture_output=True, text=True, timeout=30)
+        assert said.returncode == 1 and "AAMIO_LAN_PORT must be a port from 1 to 65535" in said.stderr, (value, said.stderr)
+    assert lan_transport.peers_of("127.0.0.1:0, 127.0.0.1:65536, :4748, 127.0.0.1:4747") == [("127.0.0.1", 4747)]
+
+
 def test_a_datagram_of_another_kind_is_dropped(tmp_path):
     port, peer = free_ports(2)
     (tmp_path / "a").mkdir()

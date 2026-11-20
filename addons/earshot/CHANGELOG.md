@@ -6,6 +6,11 @@ for somebody using it.
 
 ## 0.5.0 - 2026-11-19
 
+- earshot-link keeps back a frame the core cancels before its first tone and
+  answers it cancelled, as contract 3 says; before, it played the frame all
+  the same and said sent. A frame whose first tone has played is played
+  whole, since a packet cut short is noise to whoever hears it.
+
 - A card can name the media the one who plays it prefers answers over, with
   `--via` (`via` over MCP), in order and at most three: internet, or the
   medium of a transport, as lan or bt. A card that names a medium other than

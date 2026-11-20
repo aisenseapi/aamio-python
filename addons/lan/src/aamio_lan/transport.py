@@ -41,6 +41,18 @@ RETRY_SECONDS = 2.0
 HERE_MOST = 4
 
 
+def port_of(text):
+    """A port from 1 to 65535, from its decimal digits, or ValueError. Out of range, a port went to the socket: in
+    Python it ended the transport, in PHP the datagram went to another port and said sent (a review of 20 November
+    2026). Port 0 asks the system to choose, and here would then name a port nobody can reach."""
+    if not isinstance(text, str) or not text.isascii() or not text.isdigit():
+        raise ValueError("a port is its decimal digits")
+    port = int(text)
+    if not 1 <= port <= 65535:
+        raise ValueError("a port is from 1 to 65535")
+    return port
+
+
 def peers_of(text):
     """host:port, comma separated: the ones that cannot be read are said on standard error and left out."""
     found = []
@@ -50,15 +62,18 @@ def peers_of(text):
             continue
         host, _, port = part.rpartition(":")
         try:
-            found.append((socket.gethostbyname(host), int(port)))
+            if not host:
+                # No host is no peer: the resolver read it as 0.0.0.0, where PHP and Node leave it out.
+                raise ValueError("no host")
+            found.append((socket.gethostbyname(host), port_of(port)))
         except (OSError, ValueError):
-            print("aamio-lan: %r is no host:port, and is left out" % part, file=sys.stderr, flush=True)
+            print("aamio-lan: %r is no host:port with a port from 1 to 65535, and is left out" % part, file=sys.stderr, flush=True)
     return found
 
 
 class Lan:
     def __init__(self):
-        self.port = int(os.environ.get("AAMIO_LAN_PORT", PORT))
+        self.port = port_of(os.environ.get("AAMIO_LAN_PORT", str(PORT)).strip())
         self.bind = os.environ.get("AAMIO_LAN_BIND", "0.0.0.0")
         broadcast = os.environ.get("AAMIO_LAN_BROADCAST", "255.255.255.255").strip()
         self.broadcast = None if broadcast.lower() in ("", "none") else broadcast
@@ -163,8 +178,10 @@ class Lan:
 
     def targets(self, to):
         if to is not None:
-            _, host, port = to.split(":", 2)
-            return [(host, int(port))]
+            medium, host, port = to.split(":", 2)
+            if medium != "lan" or not host:
+                raise ValueError("not a LAN address")
+            return [(host, port_of(port))]
         found = list(self.peers)
         if self.broadcast is not None:
             found.append((self.broadcast, self.port))
@@ -179,8 +196,8 @@ class Lan:
         to = message.get("to")
         try:
             targets = self.targets(to)
-        except (ValueError, IndexError):
-            return {"t": "error", "id": message["id"], "code": "bad_address", "message": "an address is lan:<ip>:<port>"}
+        except (ValueError, IndexError, AttributeError):
+            return {"t": "error", "id": message["id"], "code": "bad_address", "message": "an address is lan:<ip>:<port>, with a port from 1 to 65535"}
         if not targets:
             return {"t": "error", "id": message["id"], "code": "nowhere", "message": "no broadcast and no peers: a frame to nobody in particular has nowhere to go"}
         datagram = MAGIC + self.me + frame
@@ -224,8 +241,8 @@ def main():
     sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
     try:
         lan = Lan()
-    except ValueError as error:
-        print("aamio-lan: AAMIO_LAN_PORT is no port: %s" % error, file=sys.stderr, flush=True)
+    except ValueError:
+        print("aamio-lan: AAMIO_LAN_PORT must be a port from 1 to 65535", file=sys.stderr, flush=True)
         sys.exit(1)
     lan.run()
 

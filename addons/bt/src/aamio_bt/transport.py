@@ -30,6 +30,7 @@ import base64
 import json
 import os
 import re
+import select
 import socket
 import struct
 import sys
@@ -46,6 +47,13 @@ CONNECT_SECONDS = 10.0
 CONNECT_TRIES = 2
 # Connections at once: anyone in range can open one, and each holds a thread here, so more are closed as they come.
 CONNECTIONS_MOST = 16
+# A connection another machine opened says which machine it is within this, and a record that has begun comes whole
+# within this, or the connection is closed and its place is free. Connections that said nothing and records left half
+# done held all sixteen places for as long as anyone watched (a review of 20 November 2026). A connection that has
+# introduced itself may stay quiet: an answer may come over it later.
+INTRO_SECONDS = 10.0
+RECORD_SECONDS = 10.0
+POLL_SECONDS = 1.0
 # Bytes a second, from the tests between two machines: 42 to 64 KB/s.
 RATE = 40_000
 ADDRESS = re.compile(r"[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}")
@@ -191,11 +199,27 @@ class Bt:
         if device is not None:
             self.keep(device, conn)
         buffer = b""
+        # Only a connection another machine opened is held to the deadlines: one this side opened is its own.
+        introduced = not counted
+        opened = time.monotonic()
+        record_began = None
         try:
             while not self.stopping:
+                if counted:
+                    # select and not a timeout on the socket, which would apply to sending over it too.
+                    waiting, _, _ = select.select([conn], [], [], POLL_SECONDS)
+                    if not waiting:
+                        now = time.monotonic()
+                        if not introduced and now - opened > INTRO_SECONDS:
+                            raise ValueError("it said which machine it is in no %d seconds" % INTRO_SECONDS)
+                        if record_began is not None and now - record_began > RECORD_SECONDS:
+                            raise ValueError("a record did not come whole within %d seconds" % RECORD_SECONDS)
+                        continue
                 chunk = conn.recv(65536)
                 if not chunk:
                     break
+                if not buffer:
+                    record_began = time.monotonic()
                 buffer += chunk
                 while len(buffer) >= 6:
                     kind, length = buffer[3:4], struct.unpack(">H", buffer[4:6])[0]
@@ -204,7 +228,9 @@ class Bt:
                     if len(buffer) < 6 + length:
                         break
                     body, buffer = buffer[6:6 + length], buffer[6 + length:]
+                    record_began = time.monotonic() if buffer else None
                     if kind == b"H":
+                        introduced = True
                         named = self.device_of(body.decode("ascii", "replace"))
                         if device is None and named is not None:
                             device = named

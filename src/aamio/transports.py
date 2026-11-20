@@ -41,7 +41,7 @@ from .carrier import Carrier
 from .carry import CarryRefused
 from .crypto import is_key
 from .errors import CodedLookupError, CodedRuntimeError, CodedValueError
-from .transport_host import TransportFailed, TransportProcess, here_of
+from .transport_host import STOP_SECONDS, TransportFailed, TransportProcess, here_of
 
 PROFILE_VERSION = 1
 DEFAULT_PROFILE = "sealed"
@@ -390,6 +390,9 @@ class Service:
         self.thread = None
         self.stopping = threading.Event()
         self.stopped = False   # stop has been called: the service stops once, with its owner
+        # A start of a moment under way, by transport name: {"done": Event, "result": (here, how)}. One at a time per
+        # transport, never beside its ordinary start, and none after the stop (a review of 20 November 2026).
+        self.learning = {}
         # Where a runtime with a listener wants what comes in, and what it was given and has not had taken.
         self.offer = None
         self.offered = set()
@@ -591,32 +594,66 @@ class Service:
         a moment, as B2 allows for this alone, and stopped at its first ready:
         the ready says where it is reached, or that it says nothing of it.
         """
+        manifest = self.manifests().get(name)
+        if manifest is None:
+            raise CodedLookupError("transport_unknown", "no enabled transport is called %s. aamio addon list shows what is installed, and aamio addon enable %s lets it run here" % (name, name))
         with self.lock:
+            if self.stopped:
+                # Its owner has let go of the home: nothing starts any more, not even for a moment. Two lookups that
+                # overlapped a close started a transport after the next owner held the home (a review of
+                # 20 November 2026).
+                return None, "stopping"
             entry = self.running.get(name)
             process = entry["process"] if entry is not None else None
             if process is not None:
                 # Never a second one beside it: the two would fight over the medium, as a port or a channel.
                 return process.here, ("running" if process.readied else "starting")
-        manifest = self.manifests().get(name)
-        if manifest is None:
-            raise CodedLookupError("transport_unknown", "no enabled transport is called %s. aamio addon list shows what is installed, and aamio addon enable %s lets it run here" % (name, name))
+            waiting = self.learning.get(name)
+            mine = waiting is None
+            if mine:
+                waiting = self.learning[name] = {"done": threading.Event(), "result": (None, "not_ready")}
+        if not mine:
+            # One start of a moment per transport: a second lookup waits for the first one's answer.
+            if waiting["done"].wait(seconds + STOP_SECONDS):
+                return waiting["result"]
+            return None, "starting"
+        failure = None
+        try:
+            waiting["result"] = self._learn_once(name, manifest, seconds)
+        except (CodedRuntimeError, CodedLookupError) as error:
+            failure = error
+        finally:
+            with self.lock:
+                self.learning.pop(name, None)
+            waiting["done"].set()
+        if failure is not None:
+            raise failure
+        return waiting["result"]
+
+    def _learn_once(self, name, manifest, seconds):
+        """The start of a moment itself, reserved by learn_here: started, asked, stopped, and kept unless stopped meanwhile."""
         folder = working_folder(self.runtime.home, name)
         process = TransportProcess(name, manifest.__version__, process_command(manifest.start_module), folder,
                                    environment_for(manifest, folder, base=self.environ), log=self.runtime.log)
         try:
             process.start(CORE_VERSION, "python", folder)
             until = time.monotonic() + seconds
-            while not process.readied and time.monotonic() < until:
+            while not process.readied and time.monotonic() < until and not self.stopping.is_set():
                 process.poll(timeout=0.1)
         except (TransportFailed, OSError) as error:
             raise CodedRuntimeError("transport_down", "%s did not start to say where it is reached: %s" % (name, error)) from None
         finally:
             process.stop()
-        if not process.readied:
-            return None, "not_ready"
-        # Said nothing is kept too, as an empty list, so a transport over a medium without addresses is not started again
-        # for every card: the microphone of a transport over sound opened each time (the review of 19 November 2026).
-        self._here(name, manifest.medium, process.here or [], manifest.__version__)
+        with self.lock:
+            if self.stopped:
+                # Stopped while it started: an owner that has let go of the home writes nothing into it.
+                return None, "stopping"
+            if not process.readied:
+                return None, "not_ready"
+            # Said nothing is kept too, as an empty list, so a transport over a medium without addresses is not started
+            # again for every card: the microphone of a transport over sound opened each time (the review of
+            # 19 November 2026).
+            self._here(name, manifest.medium, process.here or [], manifest.__version__)
         return process.here, "learned"
 
     def here_for_addons(self):
@@ -664,6 +701,9 @@ class Service:
         now = time.monotonic()
         for name, entry in self.running.items():
             if entry["carrier"] is not None or entry["manifest"] is None or entry["down"] is not None or now < entry["next"]:
+                continue
+            if name in self.learning:
+                # Started for a moment just now, to say where it is reached: the ordinary start waits for that one to end.
                 continue
             manifest = entry["manifest"]
             folder = working_folder(self.runtime.home, name)
@@ -750,6 +790,11 @@ class Service:
                     entry["process"].stop()
                 entry["process"] = entry["carrier"] = None
             self.running.clear()
+            learning = list(self.learning.values())
+        # A start of a moment under way sees the stop, stops its process and keeps nothing: wait for it to end, so the
+        # home is let go of with no child of this owner left in it.
+        for waiting in learning:
+            waiting["done"].wait(STOP_SECONDS + 1)
 
     def drain(self, seconds=1.0):
         """Before a stop: what the carriers have queued is given to the transports and answered, for a moment at most.
@@ -1022,6 +1067,9 @@ def here(runtime, name):
         raise CodedLookupError("transport_unknown", "no enabled transport is called %s. aamio addon list shows what is installed, and aamio addon enable %s lets it run here" % (name, name))
     found, how = service.learn_here(name)
     medium = manifests[name].medium
+    if how == "stopping":
+        return {"transport": name, "medium": medium, "here": None,
+                "note": "This runtime is letting go of the home, so %s was not started and nothing was learned. Ask again from the aamio that owns it now." % name}
     if how == "starting":
         return {"transport": name, "medium": medium, "here": None,
                 "note": "%s is starting in this process and has not said it is ready yet: ask again in a moment." % name}

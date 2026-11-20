@@ -443,3 +443,117 @@ def test_transport_here_says_nothing_for_an_empty_list_as_for_none(bt_env, monke
         assert said["here"] == [] and "says nothing of where it is reached" in said["note"]
     finally:
         a.close()
+
+
+# ---------------------------------------------------------------- a start of a moment, one at a time (20 November 2026)
+
+def counting_processes(monkeypatch, delay=0.0):
+    """TransportProcess as the service makes it, counted, each start held back by delay so lookups overlap."""
+    made = []
+
+    class Counted(TransportProcess):
+        def start(self, *args, **kwargs):
+            made.append(self.name)
+            time.sleep(delay)
+            return super().start(*args, **kwargs)
+
+    monkeypatch.setattr(transports, "TransportProcess", Counted)
+    return made
+
+
+def test_two_lookups_at_once_start_one_transport_and_both_get_its_answer(bt_env, monkeypatch):
+    """Two overlapping lookups started two children for the same transport (a review of 20 November 2026)."""
+    import threading
+    from aamio.runtime import Runtime
+
+    (port,) = free_ports(1)
+    made = counting_processes(monkeypatch, delay=0.5)
+    a = Runtime(home=str(bt_env / "a"), host="http://127.0.0.1:9", archive=True)
+    try:
+        service = a.transport_service()
+        service.environ = dict(os.environ, AAMIO_BT_SIMULATE=str(port))
+        answers = []
+        threads = [threading.Thread(target=lambda: answers.append(service.learn_here("bt"))) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert made == ["bt"], "one start of a moment, and the second lookup waited for it"
+        assert sorted(how for _, how in answers) == ["learned", "learned"] and answers[0][0] == answers[1][0] == ["bt:127.0.0.1:%d" % port]
+    finally:
+        a.close()
+
+
+def test_after_the_stop_nothing_starts_even_for_a_moment(bt_env, monkeypatch):
+    from aamio.runtime import Runtime
+
+    made = counting_processes(monkeypatch)
+    a = Runtime(home=str(bt_env / "a"), host="http://127.0.0.1:9", archive=True)
+    try:
+        service = a.transport_service()
+        service.stop()
+        assert service.learn_here("bt") == (None, "stopping") and made == []
+        assert "letting go of the home" in transports.here(a, "bt")["note"]
+    finally:
+        a.close()
+
+
+def test_a_stop_while_a_transport_starts_for_a_moment_ends_it_and_keeps_nothing(bt_env, monkeypatch):
+    """The old owner neither leaves a child behind nor writes where the transport is reached into a home it let go of."""
+    import threading
+    from aamio.runtime import Runtime
+
+    (port,) = free_ports(1)
+    a = Runtime(home=str(bt_env / "a"), host="http://127.0.0.1:9", archive=True)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+        # The simulated channel is taken, so the transport says down and never ready.
+        holder.bind(("127.0.0.1", port))
+        holder.listen(1)
+        try:
+            service = a.transport_service()
+            service.environ = dict(os.environ, AAMIO_BT_SIMULATE=str(port))
+            answers = []
+            lookup = threading.Thread(target=lambda: answers.append(service.learn_here("bt")))
+            lookup.start()
+            deadline = time.monotonic() + 10
+            while "bt" not in service.learning and time.monotonic() < deadline:
+                time.sleep(0.05)
+            began = time.monotonic()
+            service.stop()
+            lookup.join(timeout=15)
+            assert answers == [(None, "stopping")] and time.monotonic() - began < 8, "the lookup ended with the stop, not after ten seconds"
+            assert service.learning == {} and "bt" not in transports.Config(a.home).here()
+        finally:
+            a.close()
+
+
+def test_the_ordinary_start_waits_while_a_transport_starts_for_a_moment(bt_env, monkeypatch):
+    import threading
+    from aamio.runtime import Runtime
+
+    made = counting_processes(monkeypatch)
+    a, b = homes(bt_env)
+    try:
+        transports.bind(a, "b", "bt")
+        service = a.transport_service()
+        with service.lock:
+            service._add(service.wanted())
+            service.learning["bt"] = {"done": threading.Event(), "result": (None, "not_ready")}
+            service._start_due()
+            assert made == [] and service.running["bt"]["process"] is None
+            del service.learning["bt"]
+    finally:
+        a.close()
+        b.close()
+
+
+def test_a_service_made_first_after_the_close_is_stopped_and_starts_nothing(bt_env, monkeypatch):
+    """A transport service made for the first time after close started out not stopped, so a lookup through it could
+    still start a child in a home another runtime may own (a review of 20 November 2026)."""
+    from aamio.runtime import Runtime
+
+    made = counting_processes(monkeypatch)
+    a = Runtime(home=str(bt_env / "a"), host="http://127.0.0.1:9", archive=True)
+    a.close()
+    service = a.transport_service()
+    assert service.stopped and service.learn_here("bt") == (None, "stopping") and made == []

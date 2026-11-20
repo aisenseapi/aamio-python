@@ -201,6 +201,59 @@ def test_the_transport_describes_a_half_duplex_medium_says_it_listens_and_gives_
         b.stop()
 
 
+def test_a_frame_cancelled_before_its_first_tone_is_not_played_and_one_that_began_is_played_whole(monkeypatch):
+    """The transport had the cancel before the playing began, and played the frame all the same and said sent (a review
+    of 20 November 2026). Contract 3: a frame not sent answers cancelled; over sound a frame is sent from its first tone."""
+    said, played = [], []
+    turn = threading.Event()
+    speaker = link.Link()
+    monkeypatch.setattr(speaker, "say", said.append)
+
+    class Played:
+        def play(self, pcm, lead=0, someone_began=None):
+            played.append(len(pcm))
+            return True
+
+    speaker.audio = Played()
+    # Each frame waits for its turn in the quiet here, until the test lets it go.
+    monkeypatch.setattr(speaker, "wait_for_quiet", lambda: turn.wait(10))
+    thread = threading.Thread(target=speaker.speak, daemon=True)
+    thread.start()
+
+    def answer_to(frame_id, seconds=20):
+        until = time.monotonic() + seconds
+        while time.monotonic() < until:
+            found = [item for item in said if item.get("id") == frame_id and item["t"] in ("sent", "error")]
+            if found:
+                return found[-1]
+            time.sleep(0.02)
+        return None
+
+    try:
+        speaker.given("f-1")
+        speaker.sends.put({"t": "send", "id": "f-1", "frame": frame64(bytes(range(40)))})
+        time.sleep(0.3)  # in its wait for the quiet
+        speaker.cancel("f-1")
+        turn.set()
+        assert answer_to("f-1") == {"t": "error", "id": "f-1", "code": "cancelled", "message": "cancelled before its first tone: nothing was played"}
+        assert played == [], "nothing went into the air"
+
+        speaker.given("f-2")
+        speaker.cancel("f-2")
+        speaker.sends.put({"t": "send", "id": "f-2", "frame": frame64(bytes(range(40)))})
+        assert answer_to("f-2")["code"] == "cancelled" and played == [], "a frame cancelled before its turn came is kept back too"
+
+        speaker.given("f-3")
+        speaker.sends.put({"t": "send", "id": "f-3", "frame": frame64(bytes(range(40)))})
+        assert answer_to("f-3") == {"t": "sent", "id": "f-3"} and len(played) == 1
+        speaker.cancel("f-3")
+        assert speaker.pending == set() and speaker.cancelled == set(), "a cancel after the answer is ignored and not kept"
+    finally:
+        speaker.stopping = True
+        turn.set()
+        thread.join(timeout=5)
+
+
 def test_a_probe_describes_and_never_opens_the_air():
     port, peer = free_ports(2)
     probe = Process(air(port, peer))

@@ -5551,6 +5551,10 @@ class Runtime:
 
             with self.__dict__.get("lock") or threading.RLock():
                 service = self.__dict__.setdefault("transport_service_", Service(self))
+                if getattr(self, "closed", False) and not service.stopped:
+                    # Made first after the runtime let go of its home: stopped from the start, so a lookup through it
+                    # starts nothing in a home another runtime may own now (a review of 20 November 2026).
+                    service.stop()
         return service
 
     def _bound_partner(self, to):

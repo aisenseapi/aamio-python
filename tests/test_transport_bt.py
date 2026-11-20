@@ -265,6 +265,42 @@ def test_two_homes_over_bluetooth_through_the_core_with_the_service_out_of_reach
         b.close()
 
 
+def test_connections_that_say_nothing_or_leave_a_record_half_done_give_their_places_back(tmp_path):
+    """Connections that said nothing and records left half done held all sixteen places for as long as anyone watched
+    (a review of 20 November 2026). A connection from another machine says which machine it is within ten seconds,
+    and a record that has begun comes whole within ten, or it is closed."""
+    (port,) = free_ports(1)
+    radio = bt(tmp_path / "a", port)
+    held = []
+    try:
+        for n in range(8):
+            held.append(socket.create_connection(("127.0.0.1", port), timeout=5))
+        for n in range(8):
+            conn = socket.create_connection(("127.0.0.1", port), timeout=5)
+            # Introduced, and then a frame begun and never finished.
+            conn.sendall(b"AB1H" + struct.pack(">H", 15) + b"127.0.0.1:%05d" % (41000 + n) + b"AB1F" + struct.pack(">H", 100) + bytes(10))
+            held.append(conn)
+        time.sleep(0.5)
+        full = socket.create_connection(("127.0.0.1", port), timeout=5)
+        full.settimeout(5)
+        assert full.recv(10) == b"", "while sixteen are held, the next one is closed as it comes"
+        full.close()
+        for conn in held:
+            conn.settimeout(15)
+            assert conn.recv(10) == b"", "closed when its time was up"
+        time.sleep(0.5)
+        legit = socket.create_connection(("127.0.0.1", port), timeout=5)
+        legit.sendall(b"AB1H" + struct.pack(">H", 15) + b"127.0.0.1:%05d" % 41999)
+        legit.settimeout(2)
+        with pytest.raises(socket.timeout):
+            legit.recv(10)
+        legit.close()
+    finally:
+        for conn in held:
+            conn.close()
+        radio.stop()
+
+
 def test_a_seventeenth_connection_from_others_is_closed_while_sixteen_are_open(tmp_path):
     """Anyone in range can open a connection, and each holds a thread in the transport, so there is a most."""
     (port,) = free_ports(1)

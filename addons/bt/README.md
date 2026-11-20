@@ -80,4 +80,8 @@ On a connection each record is `AB1`, a kind, two bytes of length and the
 body: `H`, the address of the machine that opened the connection, once and
 first, and `F`, one frame of contract 3, at most 8192 bytes. A connection that
 carries anything else is closed, and at most 16 that other machines opened are
-kept at once.
+kept at once. One that another machine opened has to say which machine it is
+within 10 seconds, and a record that has begun has to come whole within 10
+seconds, or the connection is closed and its place is free again. A
+connection that has said which machine it is may stay quiet: an answer may
+come over it later.
