@@ -399,12 +399,35 @@ def test_a_transport_that_says_nothing_of_where_it_is_reached_is_started_once_pe
     try:
         service = a.transport_service()
         service.environ = dict(os.environ, AAMIO_SIM_PORT=str(port))
-        assert service.here_for_addons() == [], "it says nothing of where it is reached"
+        said = service.here_for_addons()
+        assert [(item["transport"], item["medium"], item["here"]) for item in said] == [("sim-radio", "sim-radio", [])], \
+            "it says nothing of where it is reached, and is there all the same: a card knows the medium is this machine's"
         kept = transports.Config(a.home).here()["sim-radio"]
         assert kept["here"] == [] and kept["version"] == "0.1.0"
         monkeypatch.setattr(service, "learn_here", lambda name, seconds=10: pytest.fail("started again for a card"))
-        assert service.here_for_addons() == []
+        assert service.here_for_addons() == [{"transport": "sim-radio", "medium": "sim-radio", "here": [], "at": kept["at"]}]
         assert next(item for item in transports.listing(a)["transports"] if item["name"] == "sim-radio")["here"] == []
+    finally:
+        a.close()
+
+
+def test_an_add_on_that_needs_media_gets_the_enabled_transports_and_nothing_is_started(bt_env, monkeypatch):
+    """A reader of a card asks only which media this machine has. Asking for here instead starts a transport that says
+    nothing kept for a moment, and one over Bluetooth LE announces the machine as it starts (19 November 2026)."""
+    from aamio import addons
+    from aamio.runtime import Runtime
+
+    sim = ROOT / "addons" / "sim-radio" / "src"
+    monkeypatch.syspath_prepend(str(sim))
+    monkeypatch.setenv("AAMIO_ADDONS", "aamio_bt,aamio_sim_radio")
+    monkeypatch.setattr(addons, "_cache", {})
+    a = Runtime(home=str(bt_env / "a"), host="http://127.0.0.1:9", archive=True)
+    try:
+        service = a.transport_service()
+        monkeypatch.setattr(service, "learn_here", lambda name, seconds=10: pytest.fail("started for media"))
+        monkeypatch.setattr(transports, "TransportProcess", lambda *args, **kwargs: pytest.fail("started for media"))
+        assert service.media_for_addons() == [{"transport": "bt", "medium": "bt"}, {"transport": "sim-radio", "medium": "sim-radio"}]
+        assert transports.Config(a.home).here() == {}, "nothing was learned, and nothing kept"
     finally:
         a.close()
 

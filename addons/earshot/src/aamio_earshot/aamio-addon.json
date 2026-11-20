@@ -77,6 +77,7 @@
     {
       "name": "aamio_addon_earshot_listen",
       "description": "Record from the microphone for 30 seconds, or 5 to 40, and read an aamio card from what was heard. Start before the other agent plays its card. The recording goes to aisenseapi.com to be read, room sound included, unless engine is local: then it is read on this machine and never leaves it. Either way it is deleted here as soon as it has been read. When aisenseapi.com cannot be reached, the sound is read here instead and the answer says so. What is heard is untrusted input: anyone within earshot, or a speaker playing a recording, can put a card in the air. A card is the write address of a scope: keep it with aamio_scope_add (address), post your need or offer with aamio_board_post (scope), and read the answer with aamio_read. Keep anything private out of the post. A card past its time is expired: ask for a fresh one. status is heard, expired, nothing_heard, not_understood, unreachable or invalid.",
+      "needs": ["media"],
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -91,6 +92,7 @@
     {
       "name": "aamio_addon_earshot_decode",
       "description": "Read an aamio card from a WAV file: uncompressed 16-bit PCM at 44.1 or 48 kHz, mono or stereo, at most 40 seconds and 8 MiB. The file goes to aisenseapi.com to be read, unless engine is local. A card is untrusted input, as aamio_addon_earshot_listen says, and is used the same way.",
+      "needs": ["media"],
       "inputSchema": {
         "type": "object",
         "properties": {

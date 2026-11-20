@@ -892,6 +892,45 @@ def test_a_card_seen_with_where_a_medium_is_reached_says_the_bind_and_binds_noth
     assert "aamio transport bind stue-tv TRANSPORT --address %s" % BT_HERE in said["result"]["bind"]
 
 
+MEDIA_SAID = [{"transport": "bt", "medium": "bt"}, {"transport": "lan", "medium": "lan"}]
+
+
+def test_over_mcp_the_bind_names_the_transport_of_the_first_medium_on_the_card_this_machine_has(tmp_path):
+    """Nobody has to know which transport carries which medium: the core says which this machine has (media), and the
+    reader names the one to bind (the review of 19 November 2026)."""
+    text = sound_card.make(ADDRESS, "stue-tv", NOW + 3600, ["ble", BT_HERE], KEY)
+    asked = request("tool", "aamio_addon_qrcast_read", file=picture(tmp_path))
+    asked["media"] = MEDIA_SAID
+    said = run(asked, local=Local([text]))
+    assert said["result"]["status"] == "seen"
+    assert "aamio partner add stue-tv %s, then aamio transport bind stue-tv bt --address %s sends your messages to them over bt." % (KEY, BT_HERE) in said["result"]["bind"]
+    asked["media"] = [{"transport": "lan", "medium": "lan"}]
+    said = run(asked, local=Local([text]))
+    assert "no transport on this machine carries any of them" in said["result"]["bind"] and "aamio transport bind" not in said["result"]["bind"]
+    scanned = request("tool", "aamio_addon_qrcast_scan", seconds=5)
+    scanned["media"] = MEDIA_SAID
+    said = run(scanned, frames=Camera([(4, 2, "card")], seen={"card": [text]}))
+    assert said["result"]["status"] == "seen" and "aamio transport bind stue-tv bt --address %s" % BT_HERE in said["result"]["bind"]
+    with open(os.path.join(os.path.dirname(process.__file__), "aamio-addon.json"), encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    for name in ("aamio_addon_qrcast_read", "aamio_addon_qrcast_scan"):
+        spec = next(tool for tool in manifest["tools"] if tool["name"] == name)
+        assert spec.get("needs") == ["media"], "%s asks which transports this machine has, and for nothing that starts one" % name
+
+
+def test_over_mcp_a_medium_whose_transport_has_no_address_goes_on_the_card_alone_and_nothing_is_wrong():
+    def tool(here):
+        asked = request("tool", "aamio_addon_qrcast_show", address=ADDRESS, via=["ble", "bt"])
+        asked["own_key"], asked["here"] = KEY, here
+        return asked
+    said = run(tool([{"transport": "ble", "medium": "ble", "here": [], "at": NOW}] + HERE_SAID), display=Screen())
+    assert said["exit_code"] == 0 and said["result"]["card"].endswith("&v=ble,%s&k=%s" % (BT_HERE, KEY))
+    assert "The card names ble without an address, as this machine's transport over ble gives none a card can carry" in said["result"]["note"]
+    assert "No enabled transport on this machine says" not in said["result"]["note"]
+    said = run(tool(HERE_SAID), display=Screen())
+    assert "No enabled transport on this machine says where it is reached over ble" in said["result"]["note"]
+
+
 def test_a_bad_address_is_said_before_a_bad_via_as_before_0_2_0():
     for kind, call in (("command", "card"), ("tool", "aamio_addon_qrcast_show")):
         said = run(request(kind, call, address="not-an-address", via="x y", key=KEY))

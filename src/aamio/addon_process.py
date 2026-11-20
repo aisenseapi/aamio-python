@@ -65,9 +65,10 @@ MAX_ANSWER_BYTES = 1_000_000
 MAX_STDERR_BYTES = 65_536
 # How long a stopped process gets to go away before it is given up on.
 STOP_WAIT = 5.0
-# What a command or a tool may ask the core for: the runtime's public key, and where this machine's transports are
-# reached (here), for a card that says it. Never a partner's address, and never the home's key.
-NEEDS = ("own_key", "here")
+# What a command or a tool may ask the core for: the runtime's public key, where this machine's transports are reached
+# (here), for a card that says it, and which transports it has (media), for a reader of a card that names the one to
+# bind. Never a partner's address, and never the home's key.
+NEEDS = ("own_key", "here", "media")
 # What a transport may say it uses (contract 3, B1): shown before enable, never enforced, the ground for consent.
 TRANSPORT_PERMISSIONS = ("network_local", "network_internet", "bluetooth", "serial", "microphone", "speaker", "camera", "screen", "radio")
 TRANSPORT_PLATFORMS = ("linux", "darwin", "win32")
@@ -285,7 +286,7 @@ class Manifest:
                 self._wrong("runtime on the command %s is not true or false" % name)
             needs = spec.get("needs", [])
             if not isinstance(needs, list) or any(need not in NEEDS for need in needs):
-                self._wrong("needs on the command %s names something other than own_key and here" % name)
+                self._wrong("needs on the command %s names something other than own_key, here and media" % name)
             if needs and spec.get("runtime", True) is False:
                 self._wrong("the command %s needs %s and says it runs without a runtime" % (name, " and ".join(needs)))
             self._check_arguments(name, spec)
@@ -317,7 +318,7 @@ class Manifest:
                     self._wrong("subject on the tool %s is not an object of partner or message to a field of its schema" % spec["name"])
             needs = spec.get("needs", [])
             if not isinstance(needs, list) or any(need not in NEEDS for need in needs):
-                self._wrong("needs on the tool %s names something other than own_key and here" % spec["name"])
+                self._wrong("needs on the tool %s names something other than own_key, here and media" % spec["name"])
             if spec.get("annotations") is not None and not isinstance(spec["annotations"], dict):
                 self._wrong("annotations on the tool %s is not an object" % spec["name"])
 
@@ -742,7 +743,7 @@ def _failure(manifest, reason, fix):
     return {"result": {"status": "unreachable", "reason": reason, "fix": fix, "addon": manifest.NAME}, "exit_code": 5, "is_error": True}
 
 
-def run(manifest, kind, name, arguments, subject=None, own_key=None, state_dir=None, stderr=None, deadline=None, declared=True, here=None):
+def run(manifest, kind, name, arguments, subject=None, own_key=None, state_dir=None, stderr=None, deadline=None, declared=True, here=None, media=None):
     """One call to the add-on's process: the request on its standard input, its answer from standard output, within the deadline.
 
     stderr is a callable given what the process wrote to standard error, or None
@@ -762,6 +763,7 @@ def run(manifest, kind, name, arguments, subject=None, own_key=None, state_dir=N
         "subject": subject,
         "own_key": own_key,
         "here": here,
+        "media": media,
         "state_dir": state_dir,
         "deadline_seconds": deadline,
         "aamio": {"version": CORE_VERSION, "runtime": "python"},
@@ -873,8 +875,8 @@ def enable_note(distribution, environment, probed=True):
     ran = ("enable started it once just now, before the choice was recorded, to see that it answers as its manifest says." if probed
            else "It was enabled already, and nothing of it ran now.")
     return ("%s runs here from now on, in a process of its own for each call. %s "
-            "A call gets its arguments, a key aamio resolved for it, the runtime's public key and where this machine's transports are reached "
-            "where a call asks for them, a directory of its own under the home, and a short list of environment variables: the path, a temporary directory, "
+            "A call gets its arguments, a key aamio resolved for it, the runtime's public key, where this machine's transports are reached "
+            "and which transports it has, where a call asks for them, a directory of its own under the home, and a short list of environment variables: the path, a temporary directory, "
             "the locale, the interpreter's own settings, TLS roots and the proxy variables, which can carry credentials of their own%s, and never the "
             "home's key or the rest of your environment. Nothing it answers changes state in aamio. It runs with your own file permissions." % (distribution, ran, asked))
 
@@ -887,6 +889,15 @@ def here_of_transports(runtime):
         return runtime.transport_service().here_for_addons()
     except (RuntimeError, LookupError, ValueError, OSError) as error:
         raise Refused("here_unknown", "Where this machine's transports are reached could not be read: %s. aamio transport list shows them." % error, status="unreachable") from None
+
+
+def media_of_transports(runtime):
+    """What a call that needs media gets: each enabled transport's name and medium, as transports.Service.media_for_addons
+    finds it, from the manifests alone. Nothing is started. An empty list when no transport is enabled."""
+    try:
+        return runtime.transport_service().media_for_addons()
+    except (RuntimeError, LookupError, ValueError, OSError) as error:
+        raise Refused("media_unknown", "Which transports this machine has could not be read: %s. aamio transport list shows them." % error, status="unreachable") from None
 
 
 def state_dir(runtime, manifest):
@@ -969,7 +980,7 @@ def _run_command(manifest, name, spec, args, runtime):
     arguments = {}
     for argument in spec.get("arguments", []):
         arguments[_dest(argument["name"])] = getattr(args, _dest(argument["name"]), None)
-    subject = own_key = here = None
+    subject = own_key = here = media = None
     host = None
     try:
         for argument in spec.get("arguments", []):
@@ -984,6 +995,8 @@ def _run_command(manifest, name, spec, args, runtime):
             own_key = runtime.keys.public
         if "here" in spec.get("needs", []):
             here = here_of_transports(runtime)
+        if "media" in spec.get("needs", []):
+            media = media_of_transports(runtime)
     except Refused as refused:
         out(refusal(refused, host=host, **(_subject_fields(subject) if subject else {})))
         return 2
@@ -997,7 +1010,7 @@ def _run_command(manifest, name, spec, args, runtime):
         out(refusal(Refused(busy, "At most %d calls of the add-on %s run at once and %d start per minute here. Nothing was done. Try again shortly." % (MAX_AT_ONCE, manifest.NAME, MAX_PER_WINDOW), status="unreachable"), host=host))
         return 5
     try:
-        answer = run(manifest, "command", name, arguments, subject, own_key, directory, stderr=lambda text: (sys.stderr.write(text), sys.stderr.flush()), here=here)
+        answer = run(manifest, "command", name, arguments, subject, own_key, directory, stderr=lambda text: (sys.stderr.write(text), sys.stderr.flush()), here=here, media=media)
     finally:
         limits.give_back()
     if "raw" in answer:
@@ -1055,7 +1068,7 @@ def dispatch(manifest, runtime, name, arguments, ask):
             "given": extra,
         }, True)
     arguments = dict(arguments)
-    host = subject = own_key = here = None
+    host = subject = own_key = here = media = None
     try:
         if spec.get("host") and arguments.get(spec["host"]) is not None:
             host = arguments[spec["host"]] = normalise_host(arguments[spec["host"]])
@@ -1070,6 +1083,8 @@ def dispatch(manifest, runtime, name, arguments, ask):
             own_key = runtime.keys.public
         if "here" in spec.get("needs", []):
             here = here_of_transports(runtime)
+        if "media" in spec.get("needs", []):
+            media = media_of_transports(runtime)
         if host is not None and host not in allowed_hosts(runtime, manifest):
             answer = _consent(manifest, runtime, name, host, subject, arguments, ask, NoDialog)
             if answer is not None:
@@ -1084,7 +1099,7 @@ def dispatch(manifest, runtime, name, arguments, ask):
     if busy is not None:
         return result_of(refusal(Refused(busy, "At most %d calls of the add-on %s run at once and %d start per minute here. Nothing was done. Try again shortly." % (MAX_AT_ONCE, manifest.NAME, MAX_PER_WINDOW), status="unreachable"), host=host), True)
     try:
-        answer = run(manifest, "tool", name, arguments, subject, own_key, directory, here=here)
+        answer = run(manifest, "tool", name, arguments, subject, own_key, directory, here=here, media=media)
     finally:
         limits.give_back()
     if "raw" in answer:

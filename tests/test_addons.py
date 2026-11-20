@@ -565,7 +565,7 @@ if short == "mutter":
     sys.stderr.flush()
     print(json.dumps({"result": {"pong": True}}))
     sys.exit(0)
-print(json.dumps({"result": {"pong": True, "name": request["name"], "arguments": request["arguments"], "subject": request["subject"], "own_key": request["own_key"], "here": request.get("here"), "state_dir": request["state_dir"], "home_env": os.environ.get("AAMIO_HOME"), "addon_env": os.environ.get("AAMIO_ADDON"), "secret_env": os.environ.get("AAMIO_TEST_SECRET"), "passthru_env": os.environ.get("AAMIO_TEST_PASSTHRU"), "path_env": bool(os.environ.get("PATH")), "cwd": os.getcwd(), "no_current_directory": os.environ.get("NoDefaultCurrentDirectoryInExePath")}}))
+print(json.dumps({"result": {"pong": True, "name": request["name"], "arguments": request["arguments"], "subject": request["subject"], "own_key": request["own_key"], "here": request.get("here"), "media": request.get("media", "absent"), "state_dir": request["state_dir"], "home_env": os.environ.get("AAMIO_HOME"), "addon_env": os.environ.get("AAMIO_ADDON"), "secret_env": os.environ.get("AAMIO_TEST_SECRET"), "passthru_env": os.environ.get("AAMIO_TEST_PASSTHRU"), "path_env": bool(os.environ.get("PATH")), "cwd": os.getcwd(), "no_current_directory": os.environ.get("NoDefaultCurrentDirectoryInExePath")}}))
 """
 
 
@@ -581,6 +581,7 @@ def manifest_for(name, package, deadline=2, hosts=True, environment=None):
             "check": {"help": "a website and a partner", "arguments": [{"name": "site", "help": "the website", "host": True}, {"name": "--partner", "help": "a name in the address book", "required": True, "subject": "partner"}]},
             "file": {"help": "the runtime's own key", "needs": ["own_key"]},
             "where": {"help": "where this machine's transports are reached", "needs": ["here"]},
+            "media": {"help": "which transports this machine has", "needs": ["media"]},
             "local": {"help": "no home needed", "runtime": False, "arguments": [{"name": "path"}]},
             "sleep": {"help": "never answers"},
             "crash": {"help": "dies"},
@@ -677,7 +678,7 @@ def test_contract_two_enable_probes_and_the_commands_go_through_the_process(proc
     assert code == 0 and ran.read_text(encoding="utf-8") == "probe probe\n", "enable asked the process who it is, and nothing else of it ran"
     row = said["addons"][0]
     assert row["enabled"] is True and row["contract"] == 2 and row["version"] == "0.0.2"
-    assert row["commands"] == ["allow", "bytes", "check", "crash", "fail", "file", "flood", "forget", "garbage", "grumble", "list", "local", "mutter", "noisy", "ping", "sleep", "spill", "where"], "the manifest's commands, and the three the core gives an add-on with hosts"
+    assert row["commands"] == ["allow", "bytes", "check", "crash", "fail", "file", "flood", "forget", "garbage", "grumble", "list", "local", "media", "mutter", "noisy", "ping", "sleep", "spill", "where"], "the manifest's commands, and the three the core gives an add-on with hosts"
     assert row["mcp_tools"] == ["aamio_addon_demo2_ping", "aamio_addon_demo2_check", "aamio_addon_demo2_sleep"]
     assert "a process of its own" in said["note"] and "never the home's key" in said["note"]
     assert enabled_in(tmp_path) == {"enabled": ["demo2-pkg"]} and not imported.exists(), "recorded by distribution, and this process imported none of it"
@@ -708,6 +709,11 @@ def test_contract_two_enable_probes_and_the_commands_go_through_the_process(proc
     code, out, _ = main(["addon", "demo2", "where"], monkeypatch)
     got = json.loads(out)
     assert code == 0 and got["here"] == [] and got["own_key"] is None, "needs here: where this machine's transports are reached, none here, and no key with it"
+    assert got["media"] is None, "media only where a call asks for it, and the request always has the field"
+
+    code, out, _ = main(["addon", "demo2", "media"], monkeypatch)
+    got = json.loads(out)
+    assert code == 0 and got["media"] == [] and got["here"] is None and got["own_key"] is None, "needs media: which transports this machine has, none here"
 
     code, out, err = main(["addon", "demo2", "fail"], monkeypatch)
     assert code == 3 and json.loads(out) == {"status": "no", "fix": "x"} and "a note from the add-on" in err, "the add-on's result, code and note come back as they are"

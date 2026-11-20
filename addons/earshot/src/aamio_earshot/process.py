@@ -219,24 +219,28 @@ def _expires(arguments, now):
 
 def _reached(entries, here):
     """Each bare medium of a transport given where this machine is reached on it, as the core said it (here): the first
-    address of a transport with that medium that a card can carry. The entries, and the media no address was found for."""
-    found, unknown = [], []
+    address of a transport with that medium that a card can carry. The entries; the media no transport of this machine
+    said anything of, as one that is off (unknown); and the media its transport gives no address on that a card can
+    carry, as sound or Bluetooth LE (silent): those go on the card alone, and nothing is wrong."""
+    found, unknown, silent = [], [], []
+    transports = [transport for transport in (here if isinstance(here, list) else []) if isinstance(transport, dict)]
     for entry in entries:
         medium = card.medium_of(entry)
         if medium == card.INTERNET or entry != medium:
             found.append(entry)
             continue
-        address = next((address for transport in (here if isinstance(here, list) else []) if isinstance(transport, dict) and transport.get("medium") == medium
-                        for address in (transport.get("here") if isinstance(transport.get("here"), list) else [])
+        ours = [transport for transport in transports if transport.get("medium") == medium]
+        address = next((address for transport in ours for address in (transport.get("here") if isinstance(transport.get("here"), list) else [])
                         if isinstance(address, str) and card.ENTRY.fullmatch(address) and card.medium_of(address) == medium), None)
         if address is None:
-            unknown.append(medium)
+            (silent if ours else unknown).append(medium)
         found.append(address or entry)
-    return found, unknown
+    return found, unknown, silent
 
 
 def _card_of(arguments, kind, own_key, here, now):
-    """The card's text, its expiry, and the media it names without where they are reached.
+    """The card's text, its expiry, the media it names without where they are reached, and those of them this
+    machine's transport gives no address on (silent, over MCP alone).
 
     On the command line the key and the addresses are the ones given. Over MCP
     the key is the runtime's own, only when the card names a medium other than
@@ -252,29 +256,36 @@ def _card_of(arguments, kind, own_key, here, now):
         entries = card.check_via(via)
         if entries is not None and any(entry != card.medium_of(entry) for entry in entries):
             raise card.Refused("invalid_via", "Over MCP give the media alone, as bt or lan: where this machine is reached on each comes from its own transports, so a card never names another machine.")
-        unknown = []
+        unknown = silent = []
         if entries is not None:
-            entries, unknown = _reached(entries, here)
+            entries, unknown, silent = _reached(entries, here)
         key = own_key if entries is not None and any(card.medium_of(entry) != card.INTERNET for entry in entries) else None
         via = entries
     else:
         key = arguments.get("key")
         entries = card.check_via(via)
         unknown = [entry for entry in entries or [] if entry != card.INTERNET and entry == card.medium_of(entry)]
-    return card.make(arguments.get("address"), arguments.get("name"), expires, via, key), expires, unknown
+        silent = []
+    return card.make(arguments.get("address"), arguments.get("name"), expires, via, key), expires, unknown, silent
 
 
-def _unreached(unknown, kind):
-    """What a card that names a medium without where it is reached leaves a listener without, or an empty string."""
+def _unreached(unknown, kind, silent=()):
+    """What a card that names a medium without where it is reached leaves a listener without, or an empty string. A
+    medium this machine's transport gives no address on is said as such, and not as something to put right."""
+    said = ""
+    if silent:
+        media = " and ".join(silent)
+        said += (" The card names %s without an address, as this machine's transport over %s gives none a card can carry: "
+                 "a listener's first ask goes to nobody in particular, as its transport sends that." % (media, media))
     if not unknown:
-        return ""
+        return said
     media = ", ".join(unknown)
     if kind == "tool":
         how = "No enabled transport on this machine says where it is reached over %s: aamio transport list shows the transports and what they said." % media
     else:
         how = "aamio transport here %s shows where this machine is reached on it, and --via %s:ADDRESS puts it on the card." % (unknown[0], unknown[0])
-    return (" The card names %s without where you are reached on it, so a listener's first ask goes to nobody in particular, as its transport sends that. %s"
-            % (media, how))
+    return said + (" The card names %s without where you are reached on it, so a listener's first ask goes to nobody in particular, as its transport sends that. %s"
+                   % (media, how))
 
 
 def _says_more(text):
@@ -289,7 +300,7 @@ def _says_more(text):
 
 def card_text(arguments, now):
     try:
-        text, expires, unknown = _card_of(arguments, "command", None, None, now)
+        text, expires, unknown, _silent = _card_of(arguments, "command", None, None, now)
     except card.Refused as error:
         return refused(error.reason, error.fix)
     return {"status": "card", "card": text, "bytes": len(text.encode("utf-8")), "expires_at": expires,
@@ -298,7 +309,7 @@ def card_text(arguments, now):
 
 def broadcast(arguments, kind, encode, play, pause, now, own_key=None, here=None):
     try:
-        text, expires, unknown = _card_of(arguments, kind, own_key, here, now)
+        text, expires, unknown, silent = _card_of(arguments, kind, own_key, here, now)
         mode = _mode(arguments.get("mode"), service.MODES, "audible")
         repeat = _whole(arguments.get("repeat"), 1, REPEAT_MAX, 1, "repeat")
         engine = _engine(arguments.get("engine"))
@@ -327,7 +338,7 @@ def broadcast(arguments, kind, encode, play, pause, now, own_key=None, here=None
         if reason is not None:
             return refused("out_not_written", "%s could not be written whole: %s. Nothing was left there, so the same name can be given again." % (out, _why(failure)))
         return dict(said, status="written", file=out, bytes=len(sound),
-                    note="Nothing was played. Play the whole file, at its own speed, near the agents that listen: a speed change or a lossy conversion damages it." + _unreached(unknown, kind))
+                    note="Nothing was played. Play the whole file, at its own speed, near the agents that listen: a speed change or a lossy conversion damages it." + _unreached(unknown, kind, silent))
     with tempfile.TemporaryDirectory(prefix="aamio-earshot-", ignore_cleanup_errors=True) as folder:
         path = os.path.join(folder, "card.wav")
         reason, failure = _write_new(path, sound)
@@ -343,10 +354,10 @@ def broadcast(arguments, kind, encode, play, pause, now, own_key=None, here=None
     read_posts = _by(kind, "aamio board find --scope NAME --wait 25", "aamio_board_find with scope and wait")
     good = ("A listener turns the card down after %s, so a recording played later is not taken for it; the address itself does not expire, so use a new scope for the next room or occasion." % _when(expires)) if expires else "The card has no end, and neither does the address: use a new scope for the next room or occasion."
     return dict(said, status="played", repeat=repeat, player=player,
-                note="Played on this machine's speaker. Agents within earshot that were listening can now post into the scope: read their posts with %s, and answer one with %s. %s%s%s" % (read_posts, _by(kind, "aamio board answer POST TEXT --scope NAME", "aamio_board_answer"), good, _says_more(text), _unreached(unknown, kind)))
+                note="Played on this machine's speaker. Agents within earshot that were listening can now post into the scope: read their posts with %s, and answer one with %s. %s%s%s" % (read_posts, _by(kind, "aamio board answer POST TEXT --scope NAME", "aamio_board_answer"), good, _says_more(text), _unreached(unknown, kind, silent)))
 
 
-def _heard(sound, mode, kind, decode, now, engine):
+def _heard(sound, mode, kind, decode, now, engine, media=None):
     """What a recording carries, read by the engine asked for, or here when aisense cannot be reached."""
     used = engine
     reserve = None
@@ -365,10 +376,10 @@ def _heard(sound, mode, kind, decode, now, engine):
         return _fallback({"status": "nothing_heard", "reason": "nothing_heard", "fix": heard.fix, "engine": used}, reserve, "read")
     except service.Refused as error:
         return _fallback(refused(error.reason, error.fix, engine=used), reserve, "read")
-    return _fallback(dict(_card_heard(said, kind, now), engine=used), reserve, "read")
+    return _fallback(dict(_card_heard(said, kind, now, media), engine=used), reserve, "read")
 
 
-def _card_heard(said, kind, now):
+def _card_heard(said, kind, now, media=None):
     text = said.get("text") if isinstance(said.get("text"), str) else None
     try:
         found = card.read(text)
@@ -385,37 +396,63 @@ def _card_heard(said, kind, now):
     age = (" It is good until %s." % _when(found["expires_at"])) if found["expires_at"] is not None else " It says no time it stops being good, so it may be a recording of any age."
     heard = {"status": "heard", "card": found, "protocol": said.get("protocol"), "corrected_bits": said.get("corrected_bits"), "mode": said.get("mode"),
              "note": HEARD + age, "next": steps}
-    bind = _bind(found, name)
+    bind = _bind(found, name, media)
     if bind:
         heard["bind"] = bind
     return heard
 
 
-def _bind(found, name):
-    """What a card that names media or carries a key lets a listener do, said and never done: binding is the user's choice."""
-    media = [medium for medium in found.get("via") or [] if medium != card.INTERNET]
-    if not media and "key" not in found:
+def _ours(media):
+    """This machine's transports as (name, medium), from what the core said of them (media), or None when it said
+    nothing: on the command line, and from a core before 0.7.1."""
+    if not isinstance(media, list):
         return None
-    if media and "key" not in found:
-        return ("The card asks for answers over %s, and carries no key to bind one to: answer in the scope, over aamio.at." % ", ".join(media))
+    return [(item["transport"], item["medium"]) for item in media
+            if isinstance(item, dict) and all(isinstance(item.get(field), str) and card.ENTRY.fullmatch(item[field]) and card.medium_of(item[field]) == item[field]
+                                              for field in ("transport", "medium"))]
+
+
+def _bind(found, name, media=None):
+    """What a card that names media or carries a key lets a listener do, said and never done: binding is the user's choice.
+
+    With media, what the core said of this machine's transports over MCP, the first medium on the card that one of them
+    carries is the one to bind, under that transport's name, so nobody has to know which transport carries which medium.
+    Without it, on the command line, TRANSPORT stands for the transport (the review of 19 November 2026)."""
+    entries = [entry for entry in found.get("via") or [] if entry != card.INTERNET]
+    if not entries and "key" not in found:
+        return None
+    if entries and "key" not in found:
+        return ("The card asks for answers over %s, and carries no key to bind one to: answer in the scope, over aamio.at." % ", ".join(entries))
     trust = ("The card carries a public key, and a card is not signed: anyone within earshot could have played it. "
              "If you trust whoever played it, ")
-    entry = media[0] if media else None
-    if entry is None:
+    if not entries:
         return trust + "aamio partner add %s %s keeps the key in your address book. The card names no medium beside internet: answer in the scope." % (name, found["key"])
+    ours = _ours(media)
+    if ours is None:
+        entry, transport = entries[0], None
+    else:
+        entry, transport = next(((entry, mine) for entry in entries for mine, medium in ours if medium == card.medium_of(entry)), (None, None))
+        if entry is None:
+            asked = ", ".join(card.medium_of(entry) for entry in entries)
+            return trust + ("aamio partner add %s %s keeps the key in your address book. The card asks for answers over %s, and no transport on this machine "
+                            "carries %s: an add-on for one, enabled with aamio addon enable, lets you bind them over it. Until then, answer in the scope, over aamio.at."
+                            % (name, found["key"], asked, "it" if len(entries) == 1 else "any of them"))
     medium = card.medium_of(entry)
+    bind = "aamio transport bind %s %s" % (name, transport or "TRANSPORT")
     if entry != medium:
-        bind = "aamio transport bind %s TRANSPORT --address %s" % (name, entry)
+        bind += " --address %s" % entry
         where = " The first ask goes to that address, where the card says they are reached."
     else:
-        bind = "aamio transport bind %s TRANSPORT" % name
         where = " The card says nothing of where they are reached on %s, so the first ask goes to nobody in particular, as the transport sends that." % medium
-    return trust + ("aamio partner add %s %s, then %s, where TRANSPORT is the one aamio transport list shows with the medium %s, "
-                    "sends your messages to them over it.%s That is the user's choice, on the command line. Until then, answer in the scope, over aamio.at."
-                    % (name, found["key"], bind, medium, where))
+    if transport is None:
+        which, over = ", where TRANSPORT is the one aamio transport list shows with the medium %s," % medium, "it"
+    else:
+        which, over = "", transport if transport == medium else "%s, this machine's transport for %s" % (transport, medium)
+    return trust + ("aamio partner add %s %s, then %s%s sends your messages to them over %s.%s That is the user's choice, on the command line. "
+                    "Until then, answer in the scope, over aamio.at." % (name, found["key"], bind, which, over, where))
 
 
-def listen(arguments, kind, decode, record, clock):
+def listen(arguments, kind, decode, record, clock, media=None):
     """Records for up to 40 seconds and reads what was heard. The card is judged by the clock when the recording
     ended, the latest it can have been played, not when the call began: a card that runs out while the microphone
     is open is turned down."""
@@ -439,13 +476,13 @@ def listen(arguments, kind, decode, record, clock):
             return unreachable("recorder_failed", "The recorder said it was done, and left no recording. Check the microphone, or record the sound another way and read the file with decode.")
         # Gone from the disk before it goes anywhere.
         os.remove(path)
-    result = _heard(sound, mode, kind, decode, heard_at, engine)
+    result = _heard(sound, mode, kind, decode, heard_at, engine, media)
     result["recorded_seconds"] = seconds
     result["recorder"] = recorder
     return result
 
 
-def decode_file(arguments, kind, decode, clock):
+def decode_file(arguments, kind, decode, clock, media=None):
     try:
         mode = _mode(arguments.get("mode"), service.DECODE_MODES, "auto")
         engine = _engine(arguments.get("engine"))
@@ -464,7 +501,7 @@ def decode_file(arguments, kind, decode, clock):
         return refused("too_big", "%s is over 8 MiB, more than aisenseapi.com reads. Record at most 40 seconds of mono 16-bit PCM." % name)
     if not service.is_wav(sound):
         return refused("not_a_wav", "%s is not a WAV file. Record or convert it to uncompressed 16-bit PCM WAV at 44.1 or 48 kHz: MP3, AAC and WebM are not read." % name)
-    return _heard(sound, mode, kind, decode, clock(), engine)
+    return _heard(sound, mode, kind, decode, clock(), engine, media)
 
 
 def handle(request, encode=None, decode=None, play=None, record=None, pause=None, clock=None):
@@ -489,9 +526,9 @@ def handle(request, encode=None, decode=None, play=None, record=None, pause=None
     if short == "broadcast":
         return answer(broadcast(arguments, kind, encode, play, pause, now, request.get("own_key"), request.get("here")))
     if short == "listen":
-        return answer(listen(arguments, kind, decode, record, clock))
+        return answer(listen(arguments, kind, decode, record, clock, request.get("media")))
     if short == "decode":
-        return answer(decode_file(arguments, kind, decode, clock))
+        return answer(decode_file(arguments, kind, decode, clock, request.get("media")))
     return answer(refused("unknown_call", "The add-on %s has no %s called %s. aamio addon %s --help lists its commands, and aamio addon list its tools." % (NAME, said(kind), said(name), NAME)))
 
 

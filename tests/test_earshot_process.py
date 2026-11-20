@@ -1041,6 +1041,56 @@ def test_a_card_heard_with_where_a_medium_is_reached_says_the_bind_with_the_addr
     assert "--address" not in bare["bind"] and "nobody in particular" in bare["bind"]
 
 
+MEDIA_SAID = [{"transport": "bt", "medium": "bt"}, {"transport": "earshot-link", "medium": "sound"}, {"transport": "lan", "medium": "lan"}]
+
+
+def test_over_mcp_the_bind_names_the_transport_of_the_first_medium_on_the_card_this_machine_has():
+    """Nobody has to know which transport carries which medium: the core says which this machine has (media), and the
+    listener names the one to bind (the review of 19 November 2026)."""
+    text = card.make(ADDRESS, "rom-42", NOW + 3600, ["ble", BT_HERE], KEY)
+    heard = process._card_heard({"text": text}, "tool", NOW, MEDIA_SAID)
+    assert "aamio partner add rom-42 %s, then aamio transport bind rom-42 bt --address %s sends your messages to them over bt." % (KEY, BT_HERE) in heard["bind"]
+    assert "TRANSPORT" not in heard["bind"], "ble comes first on the card, and this machine has no transport for it"
+    sound = process._card_heard({"text": card.make(ADDRESS, "rom-42", NOW + 3600, ["sound"], KEY)}, "tool", NOW, MEDIA_SAID)
+    assert "aamio transport bind rom-42 earshot-link sends your messages to them over earshot-link, this machine's transport for sound." in sound["bind"]
+    assert "nobody in particular" in sound["bind"]
+    none = process._card_heard({"text": text}, "tool", NOW, [{"transport": "lan", "medium": "lan"}])
+    assert "aamio partner add rom-42 %s keeps the key" % KEY in none["bind"] and "no transport on this machine carries any of them" in none["bind"]
+    assert "aamio transport bind" not in none["bind"]
+    odd = process._card_heard({"text": text}, "tool", NOW, [{"transport": "bt x", "medium": "bt"}, "bt", {"medium": "bt"}, {"transport": "bt", "medium": "bt:x"}])
+    assert "no transport on this machine carries" in odd["bind"], "what is not a transport's name and medium is left out"
+    old = process._card_heard({"text": text}, "tool", NOW, None)
+    assert "aamio transport bind rom-42 TRANSPORT" in old["bind"] and "the medium ble" in old["bind"], "a core before 0.7.1 says nothing of media"
+
+
+def test_the_listen_and_decode_tools_take_the_media_the_core_gives():
+    heard = card.make(ADDRESS, "rom-42", NOW + 3600, ["lan", "internet"], KEY)
+    asked = request("tool", "aamio_addon_earshot_listen")
+    asked["media"] = MEDIA_SAID
+    said = run(asked, Aisense(text=heard), microphone=Microphone())
+    assert said["exit_code"] == 0 and "aamio transport bind rom-42 lan sends your messages to them over lan." in said["result"]["bind"]
+    with open(os.path.join(os.path.dirname(process.__file__), "aamio-addon.json"), encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    for name in ("aamio_addon_earshot_listen", "aamio_addon_earshot_decode"):
+        spec = next(tool for tool in manifest["tools"] if tool["name"] == name)
+        assert spec.get("needs") == ["media"], "%s asks which transports this machine has, and for nothing that starts one" % name
+
+
+def test_over_mcp_a_medium_whose_transport_has_no_address_goes_on_the_card_alone_and_nothing_is_wrong():
+    """As sound or Bluetooth LE: the core says the transport with an empty here (the review of 19 November 2026)."""
+    asked = request("tool", "aamio_addon_earshot_broadcast", address=ADDRESS, via=["ble", "bt"])
+    asked["own_key"], asked["here"] = KEY, [{"transport": "ble", "medium": "ble", "here": [], "at": NOW}] + HERE_SAID
+    aisense = Aisense()
+    said = run(asked, aisense)
+    assert said["exit_code"] == 0 and aisense.encoded[-1][0].endswith("&v=ble,%s&k=%s" % (BT_HERE, KEY))
+    note = said["result"]["note"]
+    assert "The card names ble without an address, as this machine's transport over ble gives none a card can carry" in note
+    assert "No enabled transport on this machine says" not in note, "nothing to put right"
+    asked["here"] = HERE_SAID
+    said = run(asked, aisense)
+    assert "No enabled transport on this machine says where it is reached over ble" in said["result"]["note"], "no transport said anything of ble"
+
+
 def test_a_bad_address_is_said_before_a_bad_via_as_before_0_5_0():
     for kind, call in (("command", "card"), ("tool", "aamio_addon_earshot_broadcast")):
         said = run(request(kind, call, address="not-an-address", via="x y", key=KEY))

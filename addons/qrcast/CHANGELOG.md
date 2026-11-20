@@ -17,6 +17,13 @@ for somebody using it.
 - A card seen with media and a key says how to bind a transport to it, with
   `aamio partner add` and `aamio transport bind`, with `--address` when the
   card says where, and binds nothing itself.
+- Over MCP the reader names the transport to bind: the first medium on the
+  card that one of this machine's transports carries, under that transport's
+  name, so nobody has to know which transport carries which medium. When none
+  does, it says so. On the command line TRANSPORT stands for it, as before.
+- Over MCP a medium whose transport on this machine gives no address, as
+  sound, goes on the card alone, and the note says why rather than what to
+  put right.
 
 ## 0.1.3 - 2026-11-14
 

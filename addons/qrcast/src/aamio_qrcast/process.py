@@ -225,24 +225,28 @@ def _picture(text, fmt, engine, encode):
 
 def _reached(entries, here):
     """Each bare medium of a transport given where this machine is reached on it, as the core said it (here): the first
-    address of a transport with that medium that a card can carry. The entries, and the media no address was found for."""
-    found, unknown = [], []
+    address of a transport with that medium that a card can carry. The entries; the media no transport of this machine
+    said anything of, as one that is off (unknown); and the media its transport gives no address on that a card can
+    carry, as sound or Bluetooth LE (silent): those go on the card alone, and nothing is wrong."""
+    found, unknown, silent = [], [], []
+    transports = [transport for transport in (here if isinstance(here, list) else []) if isinstance(transport, dict)]
     for entry in entries:
         medium = card.medium_of(entry)
         if medium == card.INTERNET or entry != medium:
             found.append(entry)
             continue
-        address = next((address for transport in (here if isinstance(here, list) else []) if isinstance(transport, dict) and transport.get("medium") == medium
-                        for address in (transport.get("here") if isinstance(transport.get("here"), list) else [])
+        ours = [transport for transport in transports if transport.get("medium") == medium]
+        address = next((address for transport in ours for address in (transport.get("here") if isinstance(transport.get("here"), list) else [])
                         if isinstance(address, str) and card.ENTRY.fullmatch(address) and card.medium_of(address) == medium), None)
         if address is None:
-            unknown.append(medium)
+            (silent if ours else unknown).append(medium)
         found.append(address or entry)
-    return found, unknown
+    return found, unknown, silent
 
 
 def _card_of(arguments, kind, own_key, here, now):
-    """The card's text, its expiry, and the media it names without where they are reached.
+    """The card's text, its expiry, the media it names without where they are reached, and those of them this
+    machine's transport gives no address on (silent, over MCP alone).
 
     On the command line the key and the addresses are the ones given. Over MCP
     the key is the runtime's own, only when the card names a medium other than
@@ -258,29 +262,36 @@ def _card_of(arguments, kind, own_key, here, now):
         entries = card.check_via(via)
         if entries is not None and any(entry != card.medium_of(entry) for entry in entries):
             raise card.Refused("invalid_via", "Over MCP give the media alone, as bt or lan: where this machine is reached on each comes from its own transports, so a card never names another machine.")
-        unknown = []
+        unknown = silent = []
         if entries is not None:
-            entries, unknown = _reached(entries, here)
+            entries, unknown, silent = _reached(entries, here)
         key = own_key if entries is not None and any(card.medium_of(entry) != card.INTERNET for entry in entries) else None
         via = entries
     else:
         key = arguments.get("key")
         entries = card.check_via(via)
         unknown = [entry for entry in entries or [] if entry != card.INTERNET and entry == card.medium_of(entry)]
-    return card.make(arguments.get("address"), arguments.get("name"), expires, via, key), expires, unknown
+        silent = []
+    return card.make(arguments.get("address"), arguments.get("name"), expires, via, key), expires, unknown, silent
 
 
-def _unreached(unknown, kind):
-    """What a card that names a medium without where it is reached leaves a reader without, or an empty string."""
+def _unreached(unknown, kind, silent=()):
+    """What a card that names a medium without where it is reached leaves a reader without, or an empty string. A
+    medium this machine's transport gives no address on is said as such, and not as something to put right."""
+    said = ""
+    if silent:
+        media = " and ".join(silent)
+        said += (" The card names %s without an address, as this machine's transport over %s gives none a card can carry: "
+                 "a reader's first ask goes to nobody in particular, as its transport sends that." % (media, media))
     if not unknown:
-        return ""
+        return said
     media = ", ".join(unknown)
     if kind == "tool":
         how = "No enabled transport on this machine says where it is reached over %s: aamio transport list shows the transports and what they said." % media
     else:
         how = "aamio transport here %s shows where this machine is reached on it, and --via %s:ADDRESS puts it on the card." % (unknown[0], unknown[0])
-    return (" The card names %s without where you are reached on it, so a reader's first ask goes to nobody in particular, as its transport sends that. %s"
-            % (media, how))
+    return said + (" The card names %s without where you are reached on it, so a reader's first ask goes to nobody in particular, as its transport sends that. %s"
+                   % (media, how))
 
 
 def _says_more(text):
@@ -295,7 +306,7 @@ def _says_more(text):
 
 def card_text(arguments, now):
     try:
-        text, expires, unknown = _card_of(arguments, "command", None, None, now)
+        text, expires, unknown, _silent = _card_of(arguments, "command", None, None, now)
     except card.Refused as error:
         return refused(error.reason, error.fix)
     return {"status": "card", "card": text, "bytes": len(text.encode("utf-8")), "expires_at": expires,
@@ -310,7 +321,7 @@ def _good(expires):
 
 def show(arguments, kind, encode, display, now, own_key=None, here=None):
     try:
-        text, expires, unknown = _card_of(arguments, kind, own_key, here, now)
+        text, expires, unknown, silent = _card_of(arguments, kind, own_key, here, now)
         engine = _engine(arguments.get("engine"))
         out, fmt = _out(arguments.get("out"))
         if engine == "aisense" and fmt not in (None, "png"):
@@ -334,7 +345,7 @@ def show(arguments, kind, encode, display, now, own_key=None, here=None):
         how = ("Drawn as text, it reads on a terminal with a dark background; on a light one, use .png or .svg. " if fmt == "text" else "")
         return dict(said, status="written", file=out, format=fmt, bytes=len(picture),
                     note="Nothing was shown. %sShow the whole code with its white margin where the agents with a camera can see it: a cropped or squeezed code may not be read.%s%s"
-                         % (how, _says_more(text), _unreached(unknown, kind)))
+                         % (how, _says_more(text), _unreached(unknown, kind, silent)))
     try:
         folder = tempfile.mkdtemp(prefix="aamio-qrcast-")
     except OSError as failure:
@@ -352,34 +363,60 @@ def show(arguments, kind, encode, display, now, own_key=None, here=None):
     read_posts = _by(kind, "aamio board find --scope NAME --wait 25", "aamio_board_find with scope and wait")
     return dict(said, status="shown", file=path, viewer=viewer,
                 note="Shown on this machine's screen, from %s, which stays there for the viewer. Agents whose camera sees it can now post into the scope: read their posts with %s, and answer one with %s. %s%s%s" % (
-                    path, read_posts, _by(kind, "aamio board answer POST TEXT --scope NAME", "aamio_board_answer"), _good(expires), _says_more(text), _unreached(unknown, kind)))
+                    path, read_posts, _by(kind, "aamio board answer POST TEXT --scope NAME", "aamio_board_answer"), _good(expires), _says_more(text), _unreached(unknown, kind, silent)))
 
 
-def _bind(found, name):
-    """What a card that names media or carries a key lets a reader do, said and never done: binding is the user's choice."""
-    media = [entry for entry in found.get("via") or [] if entry != card.INTERNET]
-    if not media and "key" not in found:
+def _ours(media):
+    """This machine's transports as (name, medium), from what the core said of them (media), or None when it said
+    nothing: on the command line, and from a core before 0.7.1."""
+    if not isinstance(media, list):
         return None
-    if media and "key" not in found:
-        return ("The card asks for answers over %s, and carries no key to bind one to: answer in the scope, over aamio.at." % ", ".join(media))
+    return [(item["transport"], item["medium"]) for item in media
+            if isinstance(item, dict) and all(isinstance(item.get(field), str) and card.ENTRY.fullmatch(item[field]) and card.medium_of(item[field]) == item[field]
+                                              for field in ("transport", "medium"))]
+
+
+def _bind(found, name, media=None):
+    """What a card that names media or carries a key lets a reader do, said and never done: binding is the user's choice.
+
+    With media, what the core said of this machine's transports over MCP, the first medium on the card that one of them
+    carries is the one to bind, under that transport's name, so nobody has to know which transport carries which medium.
+    Without it, on the command line, TRANSPORT stands for the transport (the review of 19 November 2026)."""
+    entries = [entry for entry in found.get("via") or [] if entry != card.INTERNET]
+    if not entries and "key" not in found:
+        return None
+    if entries and "key" not in found:
+        return ("The card asks for answers over %s, and carries no key to bind one to: answer in the scope, over aamio.at." % ", ".join(entries))
     trust = ("The card carries a public key, and a card is not signed: anyone who can put a code in front of the camera could have shown it. "
              "If you trust whoever showed it, ")
-    entry = media[0] if media else None
-    if entry is None:
+    if not entries:
         return trust + "aamio partner add %s %s keeps the key in your address book. The card names no medium beside internet: answer in the scope." % (name, found["key"])
+    ours = _ours(media)
+    if ours is None:
+        entry, transport = entries[0], None
+    else:
+        entry, transport = next(((entry, mine) for entry in entries for mine, medium in ours if medium == card.medium_of(entry)), (None, None))
+        if entry is None:
+            asked = ", ".join(card.medium_of(entry) for entry in entries)
+            return trust + ("aamio partner add %s %s keeps the key in your address book. The card asks for answers over %s, and no transport on this machine "
+                            "carries %s: an add-on for one, enabled with aamio addon enable, lets you bind them over it. Until then, answer in the scope, over aamio.at."
+                            % (name, found["key"], asked, "it" if len(entries) == 1 else "any of them"))
     medium = card.medium_of(entry)
+    bind = "aamio transport bind %s %s" % (name, transport or "TRANSPORT")
     if entry != medium:
-        bind = "aamio transport bind %s TRANSPORT --address %s" % (name, entry)
+        bind += " --address %s" % entry
         where = " The first ask goes to that address, where the card says they are reached."
     else:
-        bind = "aamio transport bind %s TRANSPORT" % name
         where = " The card says nothing of where they are reached on %s, so the first ask goes to nobody in particular, as the transport sends that." % medium
-    return trust + ("aamio partner add %s %s, then %s, where TRANSPORT is the one aamio transport list shows with the medium %s, "
-                    "sends your messages to them over it.%s That is the user's choice, on the command line. Until then, answer in the scope, over aamio.at."
-                    % (name, found["key"], bind, medium, where))
+    if transport is None:
+        which, over = ", where TRANSPORT is the one aamio transport list shows with the medium %s," % medium, "it"
+    else:
+        which, over = "", transport if transport == medium else "%s, this machine's transport for %s" % (transport, medium)
+    return trust + ("aamio partner add %s %s, then %s%s sends your messages to them over %s.%s That is the user's choice, on the command line. "
+                    "Until then, answer in the scope, over aamio.at." % (name, found["key"], bind, which, over, where))
 
 
-def _cards_seen(texts, kind, now):
+def _cards_seen(texts, kind, now, media=None):
     fresh, old, other = [], [], []
     for text in texts:
         try:
@@ -402,7 +439,7 @@ def _cards_seen(texts, kind, now):
                     "aamio_scope_add with name %s and address %s, then aamio_board_post with scope %s. The post opens an inbox of its own, and an answer to it comes there: read it with aamio_read." % (name, found["address"], name))
         age = (" It is good until %s." % _when(found["expires_at"])) if found["expires_at"] is not None else " It says no time it stops being good, so it may be a photo of any age."
         said = {"status": "seen", "card": found, "note": SEEN + age, "next": steps}
-        bind = _bind(found, name)
+        bind = _bind(found, name, media)
         if bind:
             said["bind"] = bind
         if len(fresh) > 1:
@@ -414,7 +451,7 @@ def _cards_seen(texts, kind, now):
     return {"status": "not_understood", "reason": other[0]["reason"], "seen": other[:SEEN_KEPT], "note": NOT_UNDERSTOOD}
 
 
-def _seen_in(data, picture_kind, kind, engine, decode, read_local, clock):
+def _seen_in(data, picture_kind, kind, engine, decode, read_local, clock, media=None):
     """What a picture carries, read by the engine asked for, or here when aisense cannot be reached.
     A card is judged by the clock when it has been read, not when the call began."""
     used = engine
@@ -438,10 +475,10 @@ def _seen_in(data, picture_kind, kind, engine, decode, read_local, clock):
         return _fallback(refused(error.reason, error.fix, engine=used), reserve, "read")
     if not texts:
         return _fallback({"status": "nothing_seen", "reason": "nothing_seen", "fix": NOTHING_HERE, "engine": used}, reserve, "read")
-    return _fallback(dict(_cards_seen(texts, kind, clock()), engine=used), reserve, "read")
+    return _fallback(dict(_cards_seen(texts, kind, clock(), media), engine=used), reserve, "read")
 
 
-def read_file(arguments, kind, decode, read_local, clock):
+def read_file(arguments, kind, decode, read_local, clock, media=None):
     try:
         engine = _engine(arguments.get("engine"))
     except card.Refused as error:
@@ -460,10 +497,10 @@ def read_file(arguments, kind, decode, read_local, clock):
     picture_kind = reader.kind_of(data[:16])
     if picture_kind is None:
         return refused("not_a_picture", "%s is not a PNG, JPEG, GIF or WebP picture. Take the picture in one of those formats, or convert it." % name)
-    return _seen_in(data, picture_kind, kind, engine, decode, read_local, clock)
+    return _seen_in(data, picture_kind, kind, engine, decode, read_local, clock, media)
 
 
-def scan(arguments, kind, frames, read_frame, clock):
+def scan(arguments, kind, frames, read_frame, clock, media=None):
     """Frames from the camera until a card is read in one. A scan lasts up to a minute, so each frame's codes are
     judged by the clock when that frame was read: a card that runs out halfway through is turned down."""
     try:
@@ -483,7 +520,7 @@ def scan(arguments, kind, frames, read_frame, clock):
                 return unreachable(error.reason, error.fix, engine="local")
             if not texts:
                 continue
-            said = _cards_seen(texts, kind, clock())
+            said = _cards_seen(texts, kind, clock(), media)
             if said["status"] in ("seen", "expired"):
                 return dict(said, engine="local", frames=count, frame_size=[width, height])
             for item in said["seen"]:
@@ -524,9 +561,9 @@ def handle(request, encode=None, decode=None, read_local=None, display=None, fra
     if short == "show":
         return answer(show(arguments, kind, encode, display, now, request.get("own_key"), request.get("here")))
     if short == "read":
-        return answer(read_file(arguments, kind, decode, read_local, clock))
+        return answer(read_file(arguments, kind, decode, read_local, clock, request.get("media")))
     if short == "scan":
-        return answer(scan(arguments, kind, frames, read_frame, clock))
+        return answer(scan(arguments, kind, frames, read_frame, clock, request.get("media")))
     return answer(refused("unknown_call", "The add-on %s has no %s called %s. aamio addon %s --help lists its commands, and aamio addon list its tools." % (NAME, said(kind), said(name), NAME)))
 
 

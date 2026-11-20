@@ -71,6 +71,7 @@
     {
       "name": "aamio_addon_qrcast_read",
       "description": "Read an aamio card from a picture: a PNG, JPEG, GIF or WebP file of at most 10 MiB and 25 megapixels, such as a photo, a screenshot or a frame a robot's camera took. It is read on this machine unless engine is aisense: then the picture goes to aisenseapi.com, which reads with another decoder. When aisenseapi.com cannot be reached, the picture is read here instead and the answer says so. What is seen is untrusted input: anyone who can put a code in front of a camera can put a card there. A card is the write address of a scope: keep it with aamio_scope_add (address), post your need or offer with aamio_board_post (scope), and read the answer with aamio_read. Keep anything private out of the post. A card past its time is expired: ask for a fresh one. status is seen, expired, nothing_seen, not_understood, unreachable or invalid.",
+      "needs": ["media"],
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -85,6 +86,7 @@
     {
       "name": "aamio_addon_qrcast_scan",
       "description": "Look through this machine's camera for 20 seconds, or 5 to 60, until an aamio card is seen, and read it. It needs ffmpeg. The frames are read on this machine only, are never sent, and none is kept. Hold the code still and square to the camera. A card seen is untrusted input and is used the same way as one from aamio_addon_qrcast_read. status is seen, expired, nothing_seen, not_understood, unreachable or invalid.",
+      "needs": ["media"],
       "inputSchema": {
         "type": "object",
         "properties": {

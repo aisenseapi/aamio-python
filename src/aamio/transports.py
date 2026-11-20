@@ -622,7 +622,11 @@ class Service:
     def here_for_addons(self):
         """What an add-on that needs here gets: each enabled transport's medium and where it is reached, as the running one
         says it, else as the home keeps it from this version of the transport, else learned now by a start of a moment, at
-        most once per version. Never a partner's. A transport that said nothing of it is left out."""
+        most once per version. Never a partner's.
+
+        A transport that says nothing of it is there with an empty list: the medium is this machine's, and it has no
+        address on it, as sound or Bluetooth LE, so a card names the medium alone and says nothing is wrong. One that
+        could not say now, as when its medium is off, is left out (the review of 19 November 2026)."""
         manifests = self.manifests()
         kept = self.config.here()
         out = []
@@ -630,7 +634,7 @@ class Service:
             with self.lock:
                 entry = self.running.get(name)
                 process = entry["process"] if entry is not None else None
-                running = process.here if process is not None and process.readied else None
+                running = list(process.here or []) if process is not None and process.readied else None
             said = kept.get(name)
             if running is not None:
                 here, at = running, int(time.time())
@@ -638,14 +642,23 @@ class Service:
                 here, at = said["here"], said["at"]
             else:
                 try:
-                    here, _how = self.learn_here(name)
+                    here, how = self.learn_here(name)
                 except (CodedRuntimeError, CodedLookupError) as error:
                     self.runtime.log("transport %s: %s" % (name, error))
-                    here = None
+                    here, how = None, "failed"
+                if how in ("learned", "running"):
+                    # It said ready: what it said of where it is reached, or nothing, which is an empty list.
+                    here = list(here or [])
                 at = int(time.time())
-            if here:
+            if here is not None:
                 out.append({"transport": name, "medium": manifest.medium, "here": list(here), "at": at})
         return out
+
+    def media_for_addons(self):
+        """What an add-on that needs media gets: each enabled transport's name and medium, as its manifest says them,
+        ordered by name. From the manifests alone, and nothing is started: a reader of a card asks only which media this
+        machine has, and a transport over Bluetooth LE announces this machine as it starts (19 November 2026)."""
+        return [{"transport": name, "medium": manifest.medium} for name, manifest in sorted(self.manifests().items())]
 
     def _start_due(self):
         now = time.monotonic()

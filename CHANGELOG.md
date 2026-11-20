@@ -11,6 +11,13 @@ not what moved in the source.
   TRANSPORT` starts an enabled transport for a moment to say it. `aamio
   transport list` shows it, and an add-on that asks for it gets it beside the
   public key: Earshot 0.5.0 and QRcast 0.2.0 put it on their cards over MCP.
+  A transport that says no address, as one over sound, is in what the add-on
+  gets with an empty list, so a card names its medium alone and says nothing
+  is wrong.
+- An add-on can ask which transports this machine has (`media` in `needs`):
+  each enabled transport's name and medium, read from the manifests, starting
+  none. Earshot 0.5.0 and QRcast 0.2.0 ask for it when they read a card over
+  MCP, and name the transport to bind.
 - `aamio transport bind PARTNER TRANSPORT --address ADDRESS` says where the
   partner is reached on the transport, from its card or from `aamio transport
   here` on its machine, also for a partner bound already. The first ask goes
