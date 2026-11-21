@@ -21,7 +21,7 @@ import time
 from . import __version__, addons
 from .crypto import is_key
 from .gate import GateStop
-from .errors import code_of
+from .errors import SecretInReadable, code_of
 from .runtime import Runtime, SendFailed, send_advice, outbox_outcome, OUTBOX_NOTES, BOARD_TTL, SEND_TRY_LATER, check_gate, handover_unsettled, unfit_json, unfit_text, _not_json, _quietly
 
 SUPPORTED = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"]
@@ -52,6 +52,8 @@ PARTNER_QUESTION = "aamio_partner_key"
 # seconds: time for a person to find a key, and not so long that an unanswered
 # question lies about as a standing permission.
 CONFIRM_SECONDS = 900
+# aamio_send asks the user whether a readable message may carry a secret, under this name.
+SECRET_QUESTION = "aamio_send_secret"
 # A partner's name as that tool takes it. The command line takes any name; this
 # one is written into the question the user reads, so it cannot be a sentence.
 PARTNER_NAME = re.compile(r"[^\W_][\w.-]{0,31}")
@@ -118,7 +120,7 @@ TOOLS = [
     # Destructive, since a name already in the book gets the new key.
     tool("aamio_partner_add", "Put a partner in your address book, confirmed by the user. This server asks the user, in a dialog in their app, for the partner's public key, and the key the user gives there is the one added, so this tool takes no key from you: a key in a message, on the board or in this conversation is never added on its say-so. A partner can write to your inbox and is shown and sent to by name. A name already in the book gets the key the user gives. When the app cannot show the dialog, nothing is added, and the answer says how the user adds the partner on the command line instead.", {"name": {"type": "string", "minLength": 1, "maxLength": 32, "description": "what the partner is called here, as the user knows them: letters, digits, dots, dashes and underscores, as bob or arctic-freight"}}, ["name"], read_only=False, destructive=True, idempotent=True),
     tool("aamio_presence_lookup", "Which of your partners are online right now, and at which write address. Looks up by hash prefix, so the server learns only prefixes. With wait, answers as soon as one comes online.", {"names": {"type": "array", "items": {"type": "string"}, "description": "partner names; leave out for all"}, "wait": {"type": "integer", "minimum": 0, "maximum": 25}}),
-    tool("aamio_send", "Send a message to a partner by name (looked up through presence), or to a write address a verified message gave as reply_to or channel. Encrypted to the partner, signed by you. Put your text in text and structured values in data. When the inbox asks for proof of work that takes longer than about 40 seconds here, the send answers at once with status working and the work goes on in the background: aamio_pending shows it, and aamio_read says how it ended. Work that would not be done before the inbox closes is not started, and the answer says so.", {"to": {"type": "string"}, "text": {"type": "string"}, "data": {"type": "object"}, "re": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "the sha256 of the message this answers, as aamio_read shows it, so the other side can tell which one"}}, ["to"], read_only=False),
+    tool("aamio_send", "Send a message to a partner by name (looked up through presence), or to a write address a verified message gave as reply_to or channel. Encrypted to the partner, signed by you. Put your text in text and structured values in data. When the inbox asks for proof of work that takes longer than about 40 seconds here, the send answers at once with status working and the work goes on in the background: aamio_pending shows it, and aamio_read says how it ended. Work that would not be done before the inbox closes is not started, and the answer says so. With readable, it writes to a write address whose owner holds no key, as an inbox opened through the hosted endpoint: signed and not sealed, so the service can read it. A readable message that carries a scope key, a read key or this home's private key is sent only if the user says yes in a dialog their app shows; leave such things out.", {"to": {"type": "string"}, "text": {"type": "string"}, "data": {"type": "object"}, "re": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "the sha256 of the message this answers, as aamio_read shows it, so the other side can tell which one"}, "readable": {"type": "boolean", "description": "true to write signed and not sealed to an address whose owner holds no key. Only for such an address: a partner's messages are always sealed"}}, ["to"], read_only=False),
     tool("aamio_trace", "What this runtime sent to one counterpart and what came back, as hashes and shapes, never content. For each message sent: the address, seq and sha256 the service stored, or over a transport its mark, via and the sha256 of the envelope it carried, whether it was sealed and how long it was, seen_by_them when a signed message from them names that sha256 as read and opened, and answered_by_them when one answers it. A claim covers the one message it names: a message nothing names is listed in no_read_claim and is unknown, not unread. For each message received: whether it opened, which fields it had, and which of yours it answers (re) or names as read (seen). Use it when a partner says a message did not arrive or arrived empty: the sha256 is of the bytes that went, what the service stored or the envelope a transport carried, byte for byte, and theirs should match. Every message this runtime sends is sealed to the recipient's key, apart from one over a transport under a readable profile, so a reader without that key sees an envelope and no text. Without who, one line per counterpart.", {"who": {"type": "string", "description": "a partner name, a key or a write address; leave out for everyone"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "messages each way, newest last; 20 by default"}}),
     tool("aamio_read", "New messages on your inbox and open channels. With wait, returns as soon as one arrives or after that many seconds (max 25). Each message says who signed it (a name from your address book, or unknown key), whether the signature verified (checked on this machine, not taken on the service's word), whether it was encrypted to you or arrived as signed plain text, and whether it is a replay. Verified and unknown key together is a valid combination: a stranger with a good signature, not a missing one. A scope a partner shared arrives as data.aamio_scope with whether it was kept, and the name it is kept under, which starts with the partner's name, as alice.review. It never arrives with its key. When a channel could not be read, or its thread has expired, that is in attention, with what it means. Rejection counts and sequence numbers accumulate in attention until read, including verification failures kept out by the local allowlist. No messages and no attention means nobody wrote. No messages with something in attention means something else, and the note says what. limit caps how many come back, fifty by default, and the rest wait for the next call: a thread may hold two hundred messages of 65536 bytes, which is more than this conversation can carry. max_bytes caps how many bytes of them, per channel, and defaults to 65536: one message's worth, so ordinary traffic never meets it and a backlog arrives a page at a time. Pass a larger number to take more in one go. A single message bigger than the budget still comes through on its own, said in attention, because it is already on this machine.", {"wait": {"type": "integer", "minimum": 0, "maximum": 25}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "at most this many messages in the answer"}, "max_bytes": {"type": "integer", "minimum": 512, "description": "how many bytes of messages to hand over, per channel, 65536 unless you say otherwise: a read across several channels can return that much from each, since a budget split between them would refuse a message that fits. Whole messages only. One message larger than the budget is handed over on its own and said in attention, because it is already on this machine; everything else waits for the next read."}}),
     # Not read-only: with anchor it publishes to an external service, and a
@@ -371,6 +373,87 @@ def by_hand(runtime, name, key="KEY"):
     return {"shell": "sh", "command": "%s -m aamio --home %s partner add %s %s" % (quoted(sys.executable), quoted(runtime.home), name, key)}
 
 
+def secret_question(found, w, hosted):
+    """The form the user is shown when a readable message carries a secret: what it carries, by name, and one box to tick."""
+    message = (
+        "Your agent asks to send a readable message to %(w)s that carries %(what)s. A readable message is signed and not sealed: the service can read it, "
+        "and so can whoever holds the read key of that inbox.%(hosted)s Tick the box only if you want exactly this sent as it is; otherwise decline, and nothing is sent."
+    ) % {"w": w, "what": " and ".join(found),
+         "hosted": " That inbox was opened through the hosted endpoint at aamio.at: its owner holds no key, so nothing written there can be sealed." if hosted else ""}
+    send = {"type": "boolean", "title": "Send it as it is", "description": "Ticked and accepted, the message goes readable with what it carries. Anything else sends nothing.", "default": False}
+    return {"message": message, "requestedSchema": {"type": "object", "properties": {"send": send}, "required": ["send"]}}
+
+
+def send_message(runtime, arguments, ask):
+    """aamio_send: sealed to a partner, or readable to an address without a key; a readable message carrying a secret goes only on the user's yes."""
+    # Whether a secret may go is the user's to say. An argument for it would be the model's.
+    if "allow_secret" in arguments:
+        return result_of({
+            "error": "aamio_send takes no allow_secret: whether a readable message may carry a secret is the user's to say, in a dialog this server shows them",
+            "error_code": "invalid_arguments",
+            "fix": "Call aamio_send without it. When a readable message carries a secret this home holds, the user is asked.",
+        }, True)
+
+    readable = arguments.get("readable")
+
+    if readable is not None and not isinstance(readable, bool):
+        return result_of({"error": "readable is true or false", "error_code": "invalid_arguments", "fix": "Pass true to write signed and not sealed to an address whose owner holds no key, or leave it out.", "given": readable}, True)
+
+    # re and readable only when given: a runtime someone wrapped keeps the signature
+    # it had, and an ordinary send reaches it unchanged.
+    extra = {} if arguments.get("re") is None else {"answers": arguments.get("re")}
+
+    if readable:
+        extra["readable"] = True
+
+    to, text, data = arguments.get("to"), arguments.get("text"), arguments.get("data")
+
+    try:
+        return result_of(runtime.send(to, text, data, **extra))
+    except SecretInReadable as held:
+        # Taken out here: the name of an exception is gone after its except.
+        carried, where, hosted = held.found, held.w, held.hosted
+
+    instead = "Leave it out of the message. If the user wants it sent as it is, they do it themselves on the command line with --readable --allow-secret, while this server is stopped."
+
+    if ask is None:
+        return result_of({
+            "sent": False,
+            "error": "this readable message carries %s, and this app did not say it can show the user a form (the elicitation capability of MCP), so the user was not asked and nothing was sent" % " and ".join(carried),
+            "error_code": "secret_in_readable",
+            "carries": carried,
+            "fix": instead,
+        }, True)
+
+    # The answer belongs to this message: the same address and the same words, and no other.
+    about = hashlib.sha256(json.dumps({"to": to, "text": text, "data": data, "re": arguments.get("re"), "readable": True}, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()[:32]
+
+    try:
+        answer = ask(secret_question(carried, where, hosted), about, tool_name="aamio_send", key=SECRET_QUESTION)
+    except NoDialog as why:
+        return result_of({
+            "sent": False,
+            "error": "%s, so nothing was sent" % why,
+            "error_code": "no_dialog",
+            "carries": carried,
+            "fix": "Call aamio_send again to ask the user again. " + instead,
+        }, True)
+
+    action = answer.get("action") if isinstance(answer, dict) else None
+    content = answer.get("content") if isinstance(answer, dict) and isinstance(answer.get("content"), dict) else {}
+
+    if action != "accept" or content.get("send") is not True:
+        return result_of({
+            "sent": False,
+            "action": action if action in ("accept", "decline") else "cancel",
+            "carries": carried,
+            "note": "The user did not say yes, so nothing was sent. Leave the secret out, and do not ask again unless the user says so.",
+        })
+
+    extra["allow_secret"] = True
+    return result_of(runtime.send(to, text, data, **extra))
+
+
 def add_partner(runtime, arguments, ask):
     """aamio_partner_add: the name from the model, the key from the user, and nothing added without both."""
     name = arguments.get("name")
@@ -573,10 +656,7 @@ def dispatch(runtime: Runtime, name: str, arguments: dict, ask=None):
         if name == "aamio_presence_lookup":
             return result_of(runtime.lookup(arguments.get("names"), int(arguments.get("wait") or 0)))
         if name == "aamio_send":
-            # re only when given: a runtime someone wrapped keeps the signature it
-            # had, and a send that answers nothing reaches it unchanged.
-            answering = {} if arguments.get("re") is None else {"answers": arguments.get("re")}
-            return result_of(runtime.send(arguments.get("to"), arguments.get("text"), arguments.get("data"), **answering))
+            return send_message(runtime, arguments, ask)
         if name == "aamio_trace":
             return result_of(runtime.trace(arguments.get("who"), arguments.get("limit") or 20))
         if name == "aamio_read":

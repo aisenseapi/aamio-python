@@ -437,6 +437,8 @@ def main(argv=None):
     p.add_argument("text")
     p.add_argument("--data", default=None, help="JSON object")
     p.add_argument("--re", default=None, help="the sha256 of the message this answers, as read shows it")
+    p.add_argument("--readable", action="store_true", help="to a write address whose owner holds no key, as an inbox opened through the hosted endpoint: signed and not sealed, so the service can read it. Only by choice")
+    p.add_argument("--allow-secret", action="store_true", help="with --readable: send it although it carries a scope key, a read key or the private key of this home, which are otherwise refused")
     p = sub.add_parser("trace", help="what was sent to one counterpart and what came back, as hashes: for when a message did not arrive, or arrived empty")
     p.add_argument("who", nargs="?", default=None, help="a partner name, a key or a write address; leave out for everyone")
     p.add_argument("--limit", default=20)
@@ -675,8 +677,17 @@ def run(args, runtime):
         out(runtime.lookup(args.names or None, args.wait))
     elif args.command == "send":
         data = json.loads(args.data) if args.data else None
+        if args.allow_secret and not args.readable:
+            out({"error": "--allow-secret goes with --readable, and a sealed message needs no leave: it is sealed to the partner", "error_code": "invalid_arguments"})
+            return 1
+        # Only what was asked for is passed, so a runtime someone wrapped keeps the call it had.
+        extra = {"answers": args.re} if getattr(args, "re", None) else {}
+        if args.readable:
+            extra["readable"] = True
+        if args.allow_secret:
+            extra["allow_secret"] = True
         try:
-            out(runtime.send(args.to, args.text, data, **({"answers": args.re} if getattr(args, "re", None) else {})))
+            out(runtime.send(args.to, args.text, data, **extra))
         except SendFailed as failed:
             return send_failed(failed, "send")
         except GateStop as stop:

@@ -31,6 +31,21 @@ class CodedRuntimeError(RuntimeError):
         self.error_code = code
 
 
+class SecretInReadable(CodedValueError):
+    """A readable message carries something this home holds that reads a scope, a thread or the home itself.
+
+    found says what, as "the key of scope team", never the value: the error is
+    shown, logged and handed to a model, and the value goes nowhere with it.
+    hosted is True when the inbox was opened through the hosted endpoint.
+    """
+
+    def __init__(self, message, found, w, hosted):
+        super().__init__("secret_in_readable", message)
+        self.found = list(found)
+        self.w = w
+        self.hosted = bool(hosted)
+
+
 def code_of(error):
     """The code of an error, or the name of its class when it has none."""
     code = getattr(error, "error_code", None)

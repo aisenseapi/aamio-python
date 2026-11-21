@@ -6,6 +6,19 @@ not what moved in the source.
 
 ## 0.7.1 - 2026-11-19
 
+- `aamio send ADDRESS TEXT --readable`, and `readable` on `aamio_send`, write
+  to an inbox whose owner holds no key, as one opened through the hosted
+  endpoint at aamio.at: signed and not sealed, so the service can read it.
+  Without it such an address is refused as before, and the refusal now says
+  the way. The answer says `readable`, and `opened_via: "hosted"` when the
+  inbox's gate or the service's answer said so.
+- A readable message that carries the key of one of your scopes, the read key
+  of your inbox or of a channel, or your private key, is not stored or sent
+  (`secret_in_readable`), and the error names what it carries, never the
+  value. `--allow-secret` sends it. Over MCP the user is asked in a dialog
+  their app shows, and the message goes only on their yes: `aamio_send` takes
+  no argument for it. Partners and addresses whose key is known are always
+  sealed (`readable_with_key`).
 - A transport is started for a moment, to say where it is reached, once at a
   time: a second lookup waits for the first one's answer, a failure included,
   the ordinary start waits for it to end, and after the runtime has let go of

@@ -114,6 +114,8 @@ class AamioClient:
         self.timeout = timeout
         self.board = (board or os.environ.get("AAMIO_BOARD") or DEFAULT_BOARD).rstrip("/")
         self.verifyum = (verifyum or os.environ.get("AAMIO_VERIFYUM") or VERIFYUM_MCP).rstrip("/")
+        # What X-Opened-Via said for each address whose gate was read: "hosted" or None.
+        self.opened_via = {}
 
     def http(self, method: str, url: str, body=None, headers=None, timeout=None, with_headers=False, keep_status=False, parse=True):
         """(status, body), or (status, body, headers) with with_headers. With parse false, body is the text as it came."""
@@ -219,6 +221,11 @@ class AamioClient:
             left = int(headers.get("x-seconds-left"))
         except (TypeError, ValueError):
             left = None
+        # How the inbox was opened, from X-Opened-Via, kept beside the answer:
+        # "hosted" for one opened through the hosted endpoint, whose owner may
+        # hold no key. A header for the same reason as the seconds left.
+        opened = headers.get("x-opened-via") if status == 200 else None
+        self.__dict__.setdefault("opened_via", {})[w] = opened.strip().lower() if isinstance(opened, str) and opened.strip() else None
         return status, data, left
 
     def read(self, w: str, read_key: str, after: int = 0, wait: int = 0, limit=None, max_bytes=None):

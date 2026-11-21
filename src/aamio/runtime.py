@@ -26,7 +26,7 @@ import time
 from . import storage
 from .client import AamioClient, DEFAULT_HOST, is_scope_address, is_scope_key, make_scope_key, normalize_allow, scope_address
 from .gate import GateStop, board_advised_bits, describe as describe_seconds, plan as gate_plan, solve as gate_solve, solve_board
-from .errors import CodedLookupError, CodedRuntimeError, CodedValueError
+from .errors import CodedLookupError, CodedRuntimeError, CodedValueError, SecretInReadable
 from .carry import CarryRefused
 from .crypto import Keys, board_delete_signing_input, board_signing_input, check_message, is_envelope, is_key, key_hash, presence_signing_input, sha256hex, thread_signing_input, unb64url
 
@@ -3355,20 +3355,94 @@ class Runtime:
 
     # ------------------------------------------------------------- send --
 
-    def send(self, to, text=None, data=None, reply_to=None, answers=None):
+    def send(self, to, text=None, data=None, reply_to=None, answers=None, readable=False, allow_secret=False):
         """to: a partner name, or a write address learned from presence or from a message.
 
         answers is the sha256 of the message this one answers, as read shows it.
         It goes in the sealed body as re, so the other side can tell which of its
         messages this is about.
+
+        readable sends to a write address whose owner holds no key this runtime
+        knows, as an inbox opened through the hosted endpoint at aamio.at: signed
+        and not sealed, so the service can read it, and so can whoever holds the
+        inbox's read key. It is the user's choice, never the default. A readable
+        message that carries something this home holds that reads, a scope's key,
+        the read key of one of its threads or its private key, is not stored or
+        sent, unless allow_secret says the user wants exactly that.
         """
         check_re(answers)
+        if not isinstance(readable, bool) or not isinstance(allow_secret, bool):
+            raise CodedValueError("invalid_arguments", "readable and allow_secret are true or false")
         # A partner bound to a transport goes over it, and never over HTTPS instead.
         bound = self._bound_partner(to)
         if bound is not None:
+            if readable:
+                raise CodedValueError("readable_with_key", "%s is a partner, and what goes to a partner is sealed to their key. Leave readable out: it is for an inbox whose owner holds no key, as one opened through the hosted endpoint at aamio.at" % bound["name"])
             return self._send_carried(bound, text, data, answers)
+        if readable:
+            return self._send(self._readable_address(to), None, None, text, data, reply_to, answers=answers, allow_secret=allow_secret)
         w, key, partner = self._recipient(to)
         return self._send(w, key, partner, text, data, reply_to, answers=answers)
+
+    def _readable_address(self, to):
+        """The write address a readable message goes to: one whose owner's key this runtime does not know.
+
+        A partner, a key, or an address whose key is known is refused: a message
+        there can be sealed, and a readable copy of it would be one nobody needed.
+        """
+        if isinstance(to, str) and re.fullmatch(r"[a-z2-7]{20}", to):
+            if self.peers.get(to) is not None:
+                raise CodedValueError("readable_with_key", "the key of address %s is known here, so a message to it goes sealed. Leave readable out" % to)
+            return to
+        partner = self.partner_by_name(to) if isinstance(to, str) else None
+        if partner is None and is_key(to):
+            partner = self.partner_by_key(to)
+        if partner is not None:
+            # The book's name for them, never what was given: that may be a key.
+            raise CodedValueError("readable_with_key", "%s is a partner, and what goes to a partner is sealed to their key. Leave readable out: it is for an inbox whose owner holds no key, as one opened through the hosted endpoint at aamio.at" % partner["name"])
+        # What was given is not said back: a key pasted where an address goes would be in the answer.
+        raise CodedValueError("unknown_address", "a readable message goes to a write address, 20 characters of a to z and 2 to 7, and what was given is not one")
+
+    def _secrets_held(self):
+        """What this home holds that reads something, as (what it is, the value). The value is for comparing, never for saying."""
+        held = []
+        for scope in list(getattr(self, "scopes", None) or []):
+            if isinstance(scope, dict) and isinstance(scope.get("key"), str) and scope["key"]:
+                held.append(("the key of scope %s" % scope.get("name"), scope["key"]))
+        for label, channel in list((getattr(self, "channels", None) or {}).items()):
+            read_key = getattr(channel, "read_key", None)
+            if isinstance(read_key, str) and read_key:
+                held.append(("the read key of your inbox" if label == "inbox" else "the read key of channel %s" % label, read_key))
+        held.append(("this home's private key", self.keys.seed.hex()))
+        return held
+
+    def _secrets_in(self, plaintext):
+        """Which of the secrets this home holds a message carries, by what they are. An exact copy, in any case; a key written another way is not seen."""
+        text = plaintext.decode("utf-8", "replace").lower() if isinstance(plaintext, bytes) else str(plaintext).lower()
+        found = []
+        for what, value in self._secrets_held():
+            if len(value) >= 16 and value.lower() in text and what not in found:
+                found.append(what)
+        return found
+
+    def opened_via(self, w):
+        """How the inbox at w was opened, as its gate said when it was read here: "hosted", or None when it did not say."""
+        return self._gate_marks().get(w)
+
+    def _stop_secrets(self, w, plaintext):
+        """A readable message that carries a secret this home holds stops here, before anything is stored, with what it carries named."""
+        found = self._secrets_in(plaintext)
+        if not found:
+            return
+        hosted = self.opened_via(w) == "hosted"
+        where = ("The inbox at %s was opened through the hosted endpoint at aamio.at: its owner holds no key, so nothing written there can be sealed. " % w) if hosted else ""
+        raise SecretInReadable(
+            "this readable message carries %s, and a readable message is signed and not sealed: the service can read it, and so can whoever holds the read key of %s. %s"
+            "Nothing was stored or sent. Leave it out, or share a scope with a partner sealed, with aamio scope share. If the user wants this sent as it is, "
+            "the user says so: on the command line with --allow-secret, and over MCP in the dialog their app shows, never on an agent's word."
+            % (" and ".join(found), w, where),
+            found, w, hosted,
+        )
 
     def _recipient(self, to):
         """Where a message for to goes, the key it is sealed to, and the partner's name when it is one.
@@ -3397,7 +3471,8 @@ class Runtime:
                     "no key known for address %s. A runtime learns whose an address is from presence, or from reply_to or channel in a "
                     "verified message; one pasted into text or data binds nothing. Send to the partner by name, answer a message at its "
                     "reply_to, or ask the owner to hand the address over: aamio_open_channel with to, or aamio board channel KEY --reply-to ADDRESS "
-                    "on the command line" % to
+                    "on the command line. If its owner holds no key, as an inbox opened through the hosted endpoint at aamio.at, write to it readable: "
+                    "signed and not sealed, so the service can read it (readable over MCP, --readable on the command line)" % to
                 )
             return to, key, None
         partner = self.partner_by_name(to)
@@ -3408,12 +3483,14 @@ class Runtime:
         # 410 asks for this partner and no other.
         return w, key, partner["name"]
 
-    def _send(self, w, key, partner, text=None, data=None, reply_to=None, archived_data=None, answers=None):
-        """One message sealed to key and written to w.
+    def _send(self, w, key, partner, text=None, data=None, reply_to=None, archived_data=None, answers=None, allow_secret=False):
+        """One message sealed to key and written to w, or readable when key is None.
 
         partner is the name presence is asked again with when that address has
         gone, and None for an address given as it is. archived_data stands in
         for data in the archive, for a message carrying what no file should.
+        A readable message is the plain body, signed: it is checked for the
+        secrets this home holds before an entry exists, unless allow_secret.
         """
         # What the inbox asks of writers is read before anything is stored, so
         # a requirement this client cannot meet stops here with its reason,
@@ -3426,8 +3503,21 @@ class Runtime:
         if data is not None:
             body["data"] = data
         body.update(self._conversation(key, answers))
+        if key is None:
+            # Sealing gives each message bytes of its own. A readable one is given
+            # them here, so the same words sent twice are two messages, not a
+            # replay of one, while a retry from the outbox sends the same bytes.
+            body["nonce"] = os.urandom(16).hex()
         plaintext = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        envelope = self.keys.seal(key, plaintext)
+        if key is None:
+            # Readable: the body itself, signed and not sealed. The bytes that
+            # would go are the bytes looked through, before anything is stored.
+            if not allow_secret:
+                self._stop_secrets(w, plaintext)
+            envelope = plaintext.decode("utf-8")
+        else:
+            envelope = self.keys.seal(key, plaintext)
+        who = (self.name_for_key(key) or key) if key is not None else w
         # The entry exists before the first attempt, and every retry sends the
         # same bytes. The recipient hashes those bytes, so a message that
         # lands twice is marked a replay there instead of acted on twice.
@@ -3444,14 +3534,17 @@ class Runtime:
             entry["work"] = {"bits": advice["bits"], "expected_seconds": int(advice["expected_seconds"]), "seconds_left": None if advice.get("seconds_left") is None else int(advice["seconds_left"])}
             self.save_outbox()
             threading.Thread(target=self._deliver_after_work, args=(entry, body, key, archived_data), daemon=True).start()
-            return {
-                "to": self.name_for_key(key) or key,
+            working = {
+                "to": who,
                 "w": w,
                 "message_id": entry["id"],
                 "status": "working",
                 "work": entry["work"],
                 "note": "This inbox asks for %d bits of proof of work, about %s here, so it is being done in the background and the message is sent when it is done. aamio_pending shows it until then, and the next aamio_read says how it ended." % (advice["bits"], describe_seconds(advice["expected_seconds"])),
             }
+            if key is None:
+                working.update(self._readable_said(w))
+            return working
 
         status, result = self._deliver(entry, budget=budget)
 
@@ -3464,7 +3557,9 @@ class Runtime:
             status, result = self._deliver(entry, budget=budget)
 
         archived = body if archived_data is None else dict(body, data=archived_data)
-        record = {"kind": "sent", "at": time.time(), "to": self.name_for_key(key) or key, "w": entry["w"], "status": status, "message_id": entry["id"], "outcome": entry["status"], "seq": (result or {}).get("seq") if isinstance(result, dict) else None, "sha256": (result or {}).get("sha256") if isinstance(result, dict) else None, "body": archived}
+        record = {"kind": "sent", "at": time.time(), "to": who, "w": entry["w"], "status": status, "message_id": entry["id"], "outcome": entry["status"], "seq": (result or {}).get("seq") if isinstance(result, dict) else None, "sha256": (result or {}).get("sha256") if isinstance(result, dict) else None, "body": archived}
+        if key is None:
+            record["readable"] = True
         # The archive is a record of the send, not the send. A full disk after
         # a 201 raised here, and the caller heard an error for a message that
         # was delivered, and might send it again as new bytes: a real duplicate.
@@ -3487,7 +3582,20 @@ class Runtime:
         # failure rides on the answer it does read. A review, 26 September.
         if entry.get("trace_error"):
             sent["trace_error"] = entry["trace_error"]
+        if key is None:
+            sent.update(self._readable_said(w, result))
         return sent
+
+    def _readable_said(self, w, result=None):
+        """What a readable send says beside its answer: that it went readable, how the inbox was opened when known, and what that means."""
+        opened = result.get("opened_via") if isinstance(result, dict) else None
+        opened = opened if isinstance(opened, str) and opened else self.opened_via(w)
+        said = {"readable": True}
+        if opened:
+            said["opened_via"] = opened
+        said["readable_note"] = ("Sent signed and not sealed: the service can read it, and so can whoever holds the read key of %s." % w) + (
+            " That inbox was opened through the hosted endpoint at aamio.at, whose owner holds no key: send no secret there." if opened == "hosted" else "")
+        return said
 
     def _archive_done(self, label, record, what):
         """Write the record of something that is done already, and say what went wrong instead of raising it.
@@ -3611,6 +3719,9 @@ class Runtime:
             gates[w] = data
             if left is not None:
                 self._gate_clock()[w] = (left, time.monotonic())
+            # How the inbox was opened, as its X-Opened-Via said, kept with the gate it came with.
+            marks = getattr(self.client, "opened_via", None)
+            self._gate_marks()[w] = marks.get(w) if isinstance(marks, dict) else None
             return data
 
         return {}
@@ -3619,6 +3730,13 @@ class Runtime:
         """The gate read for w, and the time it said, may belong to an inbox that is not there now."""
         getattr(self, "gates", {}).pop(w, None)
         self._gate_clock().pop(w, None)
+        self._gate_marks().pop(w, None)
+
+    def _gate_marks(self):
+        marks = getattr(self, "gate_marks", None)
+        if marks is None:
+            marks = self.gate_marks = {}
+        return marks
 
     def _plan_for(self, w):
         """What the gate of w asks, read again once before a no that rests on a gate read earlier.
@@ -3934,7 +4052,7 @@ class Runtime:
         archived = body if archived_data is None else dict(body, data=archived_data)
         # A failed archive write is said beside the outcome, never instead of
         # it: it used to raise here and take the promised note with it.
-        archive_error = self._archive_sent({"kind": "sent", "at": time.time(), "to": self.name_for_key(key) or key, "w": entry["w"], "status": status, "message_id": entry["id"], "outcome": entry["status"], "seq": (result or {}).get("seq") if isinstance(result, dict) else None, "sha256": (result or {}).get("sha256") if isinstance(result, dict) else None, "body": archived})
+        archive_error = self._archive_sent(dict({"kind": "sent", "at": time.time(), "to": self.name_for_key(key) or key or entry["w"], "w": entry["w"], "status": status, "message_id": entry["id"], "outcome": entry["status"], "seq": (result or {}).get("seq") if isinstance(result, dict) else None, "sha256": (result or {}).get("sha256") if isinstance(result, dict) else None, "body": archived}, **({"readable": True} if key is None else {})))
         tail = "" if archive_error is None else ". It could not be written to the sent archive (%s), which changes nothing about the delivery" % archive_error
 
         if status == 201:
