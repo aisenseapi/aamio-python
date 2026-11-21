@@ -677,14 +677,17 @@ def run(args, runtime):
         out(runtime.lookup(args.names or None, args.wait))
     elif args.command == "send":
         data = json.loads(args.data) if args.data else None
-        if args.allow_secret and not args.readable:
+        # Read as re is: a namespace made elsewhere, as a test or a wrapper makes one, need not carry the new flags.
+        readable = getattr(args, "readable", False) is True
+        allow_secret = getattr(args, "allow_secret", False) is True
+        if allow_secret and not readable:
             out({"error": "--allow-secret goes with --readable, and a sealed message needs no leave: it is sealed to the partner", "error_code": "invalid_arguments"})
             return 1
         # Only what was asked for is passed, so a runtime someone wrapped keeps the call it had.
         extra = {"answers": args.re} if getattr(args, "re", None) else {}
-        if args.readable:
+        if readable:
             extra["readable"] = True
-        if args.allow_secret:
+        if allow_secret:
             extra["allow_secret"] = True
         try:
             out(runtime.send(args.to, args.text, data, **extra))
