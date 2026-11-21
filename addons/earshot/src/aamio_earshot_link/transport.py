@@ -139,13 +139,14 @@ class Devices:
             name = "the default microphone"
         return "%s at %d Hz" % (name, self.rate)
 
-    def play(self, pcm, lead=0, someone_began=None):
+    def play(self, pcm, lead=0, stop_in_quiet=None):
         """Play to the end, closing the stream waits for what was written; or stop within the first lead bytes, the
-        quiet before the packet, when someone_began says so. Whether it was played."""
+        quiet before the packet, when stop_in_quiet says so: someone else began, or the frame was cancelled. Whether it
+        was played."""
         step = 2 * (codec.SAMPLE_RATE // 50)
         with self.sd.RawOutputStream(samplerate=codec.SAMPLE_RATE, channels=1, dtype="int16", device=self.output) as out:
             for at in range(0, lead, step):
-                if someone_began is not None and someone_began():
+                if stop_in_quiet is not None and stop_in_quiet():
                     out.abort()
                     return False
                 out.write(pcm[at:min(at + step, lead)])
@@ -214,7 +215,7 @@ class Air:
     def describe(self):
         return "the simulated air on port %d" % self.port
 
-    def play(self, pcm, lead=0, someone_began=None):
+    def play(self, pcm, lead=0, stop_in_quiet=None):
         """As Devices.play: whether it was played, or stopped in the quiet before the packet. Only a frame played counts
         towards the numbers AAMIO_EARSHOT_AIR_MUTE names."""
         step = CHUNK * 2
@@ -223,7 +224,7 @@ class Air:
         # A frame the test mutes takes its time in the air and reaches nobody, this transport included.
         reach = [] if number in self.mute else self.peers + [self.port]
         for n, at in enumerate(range(0, len(pcm), step)):
-            if at < lead and someone_began is not None and someone_began():
+            if at < lead and stop_in_quiet is not None and stop_in_quiet():
                 return False
             piece = AIR_MAGIC + pcm[at:at + step]
             for port in reach:
@@ -443,6 +444,11 @@ class Link:
         with self.turns:
             return frame_id in self.cancelled
 
+    def stop_in_quiet(self, frame_id, give_way):
+        """What play asks all through the quiet before the first tone: stop for a cancel of this frame, and, while the
+        frame still gives way, for someone else who began."""
+        return lambda: self.cancelled_before_play(frame_id) or (give_way and self._someone_began())
+
     def not_played(self, message):
         """The answer to a frame cancelled before its first tone: not sent, and nothing went into the air."""
         self.say({"t": "error", "id": message["id"], "code": "cancelled", "message": "cancelled before its first tone: nothing was played"})
@@ -481,6 +487,8 @@ class Link:
             try:
                 # Stopped in its own quiet because someone else began, the frame waits for the quiet after them; after
                 # LEAD_STOPS_MOST stops, as in a room where a sound begins every few seconds, it is played regardless.
+                # A cancel is heard all through that quiet, up to the first tone. It was asked only before the quiet,
+                # so one in its 250 ms played the frame all the same and said sent (a review of 21 November 2026).
                 for stops in range(LEAD_STOPS_MOST + 1):
                     self.wait_for_quiet()
                     if self.stopping:
@@ -488,7 +496,10 @@ class Link:
                     if self.cancelled_before_play(message["id"]):
                         kept_back = True
                         break
-                    if self.audio.play(pcm, lead, self._someone_began if stops < LEAD_STOPS_MOST else None):
+                    if self.audio.play(pcm, lead, self.stop_in_quiet(message["id"], stops < LEAD_STOPS_MOST)):
+                        break
+                    if self.cancelled_before_play(message["id"]):
+                        kept_back = True
                         break
             except Exception as error:
                 self.say({"t": "error", "id": message["id"], "code": "send_failed", "message": "the frame could not be played: %s: %s" % (error.__class__.__name__, error)})

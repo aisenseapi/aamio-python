@@ -254,6 +254,128 @@ def test_a_frame_cancelled_before_its_first_tone_is_not_played_and_one_that_bega
         thread.join(timeout=5)
 
 
+def speaking(monkeypatch, audio, someone_began=False):
+    """A Link that speaks through audio, with every quiet come at once: what it says, and a way to wait for an answer."""
+    said = []
+    speaker = link.Link()
+    monkeypatch.setattr(speaker, "say", said.append)
+    monkeypatch.setattr(speaker, "wait_for_quiet", lambda: None)
+    monkeypatch.setattr(speaker, "_someone_began", lambda: someone_began)
+    speaker.audio = audio(speaker)
+    thread = threading.Thread(target=speaker.speak, daemon=True)
+    thread.start()
+
+    def answer_to(frame_id, seconds=20):
+        until = time.monotonic() + seconds
+        while time.monotonic() < until:
+            found = [item for item in said if item.get("id") == frame_id and item["t"] in ("sent", "error")]
+            if found:
+                return found[-1]
+            time.sleep(0.02)
+        return None
+
+    return speaker, thread, answer_to
+
+
+class CancelledInTheQuiet:
+    """Plays the quiet before the first tone in steps, asking at each as the devices do, and has the core cancel the
+    frame at the second step of the round named: the quiet of the first round, or of the last, which no longer gives
+    way to anyone."""
+
+    def __init__(self, speaker, frame_id, round_of_cancel):
+        self.speaker, self.frame_id, self.round_of_cancel = speaker, frame_id, round_of_cancel
+        self.rounds, self.played = 0, []
+
+    def play(self, pcm, lead=0, stop_in_quiet=None):
+        self.rounds += 1
+        for step in range(5):
+            if step == 1 and self.rounds == self.round_of_cancel:
+                self.speaker.cancel(self.frame_id)
+            if stop_in_quiet is not None and stop_in_quiet():
+                return False
+        self.played.append(len(pcm))
+        return True
+
+
+@pytest.mark.parametrize("round_of_cancel, someone_began", [(1, False), (link.LEAD_STOPS_MOST + 1, True)], ids=["first round", "last round"])
+def test_a_cancel_in_the_quiet_before_the_first_tone_keeps_the_frame_back(monkeypatch, round_of_cancel, someone_began):
+    """The last check for a cancel came before play, and play then gave up to 250 ms of quiet before the first tone: a
+    cancel in that quiet played the frame all the same and said sent (a review of 21 November 2026). In the last round
+    the frame gives way to nobody, and a cancel still keeps it back."""
+    audio = {}
+    speaker, thread, answer_to = speaking(monkeypatch, lambda s: audio.setdefault("a", CancelledInTheQuiet(s, "f-1", round_of_cancel)), someone_began)
+    try:
+        speaker.given("f-1")
+        speaker.sends.put({"t": "send", "id": "f-1", "frame": frame64(bytes(range(40)))})
+        assert answer_to("f-1") == {"t": "error", "id": "f-1", "code": "cancelled", "message": "cancelled before its first tone: nothing was played"}
+        assert audio["a"].played == [] and audio["a"].rounds == round_of_cancel, "no tone went into the air"
+    finally:
+        speaker.stopping = True
+        thread.join(timeout=5)
+
+
+def test_the_speaker_writes_only_quiet_until_the_first_tone_and_stops_there_when_asked():
+    """The device path, with a stand-in for sounddevice: a stop asked in the quiet writes no tone and aborts the stream,
+    and a frame played whole is written as it is."""
+    written, aborted = [], []
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def write(self, data):
+            written.append(bytes(data))
+
+        def abort(self):
+            aborted.append(True)
+
+    class SoundDevice:
+        def RawOutputStream(self, **kwargs):
+            return Stream()
+
+    devices = link.Devices.__new__(link.Devices)
+    devices.sd, devices.output = SoundDevice(), None
+    lead = 2 * int(codec.LEAD_SECONDS * codec.SAMPLE_RATE)
+    pcm = bytes(lead) + b"\x7f\x10" * 2000
+    asked = []
+
+    def stop_in_quiet():
+        asked.append(True)
+        return len(asked) == 3
+
+    assert devices.play(pcm, lead, stop_in_quiet) is False
+    assert aborted == [True] and sum(len(piece) for piece in written) < lead, "only quiet was written, and the stream was aborted"
+    written.clear()
+    assert devices.play(pcm, lead, lambda: False) is True and b"".join(written) == pcm and aborted == [True]
+
+
+def test_the_simulated_air_sends_only_quiet_until_the_first_tone_and_stops_there_when_asked():
+    sent = []
+
+    class Socket:
+        def sendto(self, piece, to):
+            sent.append(piece)
+
+    air = link.Air.__new__(link.Air)
+    air.socket, air.peers, air.port, air.mute, air.played, air.speed = Socket(), [], 9, set(), 0, 1000.0
+    lead = 2 * int(codec.LEAD_SECONDS * codec.SAMPLE_RATE)
+    pcm = bytes(lead) + b"\x7f\x10" * 2000
+    asked = []
+
+    def stop_in_quiet():
+        asked.append(True)
+        return len(asked) == 3
+
+    assert air.play(pcm, lead, stop_in_quiet) is False and air.played == 0
+    assert sum(len(piece) - len(link.AIR_MAGIC) for piece in sent) < lead, "only quiet went into the air"
+    sent.clear()
+    assert air.play(pcm, lead, lambda: False) is True and air.played == 1
+    assert b"".join(piece[len(link.AIR_MAGIC):] for piece in sent) == pcm
+
+
 def test_a_probe_describes_and_never_opens_the_air():
     port, peer = free_ports(2)
     probe = Process(air(port, peer))

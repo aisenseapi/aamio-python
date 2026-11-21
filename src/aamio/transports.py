@@ -613,15 +613,20 @@ class Service:
             if mine:
                 waiting = self.learning[name] = {"done": threading.Event(), "result": (None, "not_ready")}
         if not mine:
-            # One start of a moment per transport: a second lookup waits for the first one's answer.
+            # One start of a moment per transport: a second lookup waits for the first one's answer, a failure
+            # included. Only the first was told why the start failed, and the second heard not_ready (a review of
+            # 21 November 2026).
             if waiting["done"].wait(seconds + STOP_SECONDS):
+                failed = waiting.get("failure")
+                if failed is not None:
+                    raise failed.__class__(failed.error_code, str(failed))
                 return waiting["result"]
             return None, "starting"
         failure = None
         try:
-            waiting["result"] = self._learn_once(name, manifest, seconds)
+            waiting["result"] = self._learn_once(name, manifest, seconds, waiting)
         except (CodedRuntimeError, CodedLookupError) as error:
-            failure = error
+            failure = waiting["failure"] = error
         finally:
             with self.lock:
                 self.learning.pop(name, None)
@@ -630,17 +635,26 @@ class Service:
             raise failure
         return waiting["result"]
 
-    def _learn_once(self, name, manifest, seconds):
-        """The start of a moment itself, reserved by learn_here: started, asked, stopped, and kept unless stopped meanwhile."""
+    def _learn_once(self, name, manifest, seconds, waiting):
+        """The start of a moment itself, reserved by learn_here: started, asked, stopped, and kept unless stopped meanwhile.
+
+        Its process is known to the service before it starts, so a stop can end it at any point (stop cancels it)."""
         folder = working_folder(self.runtime.home, name)
         process = TransportProcess(name, manifest.__version__, process_command(manifest.start_module), folder,
                                    environment_for(manifest, folder, base=self.environ), log=self.runtime.log)
+        with self.lock:
+            if self.stopped:
+                return None, "stopping"
+            waiting["process"] = process
         try:
             process.start(CORE_VERSION, "python", folder)
             until = time.monotonic() + seconds
             while not process.readied and time.monotonic() < until and not self.stopping.is_set():
                 process.poll(timeout=0.1)
         except (TransportFailed, OSError) as error:
+            if self.stopping.is_set():
+                # Ended by the stop while it started, which is no failure of the transport.
+                return None, "stopping"
             raise CodedRuntimeError("transport_down", "%s did not start to say where it is reached: %s" % (name, error)) from None
         finally:
             process.stop()
@@ -791,8 +805,14 @@ class Service:
                 entry["process"] = entry["carrier"] = None
             self.running.clear()
             learning = list(self.learning.values())
-        # A start of a moment under way sees the stop, stops its process and keeps nothing: wait for it to end, so the
-        # home is let go of with no child of this owner left in it.
+        # A start of a moment under way is ended here, before its process begins or while it waits for describe, and its
+        # process has ended when cancel returns: the home is let go of with no child of this owner left in it. The stop
+        # waited six seconds for it, and such a start can wait ten for describe alone and five more for its stop (a
+        # review of 21 November 2026). Any that registers after this finds the service stopped.
+        for waiting in learning:
+            process = waiting.get("process")
+            if process is not None:
+                process.cancel()
         for waiting in learning:
             waiting["done"].wait(STOP_SECONDS + 1)
 

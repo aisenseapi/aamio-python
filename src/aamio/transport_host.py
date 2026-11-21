@@ -180,13 +180,21 @@ class TransportProcess:
         self.out_cv = threading.Condition()
         self.closing = False
         self.write_failed = False
+        self.cancelled = False    # cancel has been called: the process never starts, or its start ends
+        self.start_lock = threading.Lock()
 
     # ---------------------------------------------------------- the process
 
     def start(self, aamio_version, runtime, state_dir, probe=False):
-        """hello, and the describe that answers it. With probe, the transport is asked to take nothing of its medium in use (B3)."""
-        self.process = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                        cwd=self.cwd, env=self.env, bufsize=0)
+        """hello, and the describe that answers it. With probe, the transport is asked to take nothing of its medium in use (B3).
+
+        A cancel from another thread keeps the process from being started, or ends the wait for describe: the owner's
+        stop then has the child gone at once, where it waited up to ten seconds here (a review of 21 November 2026)."""
+        with self.start_lock:
+            if self.cancelled:
+                self._fail(TransportFailed("transport_down", "stopped before it started"))
+            self.process = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            cwd=self.cwd, env=self.env, bufsize=0)
         threading.Thread(target=self._read_lines, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
         threading.Thread(target=self._write_lines, daemon=True).start()
@@ -196,6 +204,8 @@ class TransportProcess:
         hello_line = self._write(hello)
         until = self.clock() + DESCRIBE_SECONDS
         while self.properties is None:
+            if self.cancelled:
+                self._fail(TransportFailed("transport_down", "stopped while it started"))
             left = until - self.clock()
             if left <= 0:
                 self._fail(TransportFailed("transport_timeout", "no describe within %d seconds of hello: %s" % (DESCRIBE_SECONDS, self._silence(hello_line))))
@@ -314,6 +324,13 @@ class TransportProcess:
             self.failed = failure
             self.log("transport %s: %s" % (self.name, failure))
         raise failure
+
+    def cancel(self):
+        """Stop it from another thread, whether its start has not begun, is under way or is over: it is never started
+        after this, and its process has ended when this returns, stopped as B2 says."""
+        with self.start_lock:
+            self.cancelled = True
+        self.stop()
 
     def stop(self):
         """B2: stop, five seconds to go, then killed.

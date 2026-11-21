@@ -140,6 +140,42 @@ def test_a_transport_that_does_not_describe_itself_is_said_with_what_is_known_of
         process.stop()
 
 
+def test_a_cancel_keeps_a_start_from_beginning_and_ends_one_that_waits_for_describe(tmp_path):
+    """The owner's stop waited for a start of a moment that could take ten seconds for describe alone (a review of
+    21 November 2026). cancel, from another thread, ends it, and the process has ended when cancel returns."""
+    import threading
+
+    env = transport_host.environment([], base={"PATH": "", "SYSTEMROOT": __import__("os").environ.get("SYSTEMROOT", "")})
+    env["FAKE_TRANSPORT_MODE"] = "mute"
+    before = TransportProcess("fake", "0.1.0", [sys.executable, "-u", FAKE], str(tmp_path), env)
+    before.cancel()
+    with pytest.raises(TransportFailed) as failed:
+        before.start("0.0.0-test", "python", str(tmp_path))
+    assert failed.value.code == "transport_down" and "before it started" in str(failed.value) and before.process is None
+
+    during = TransportProcess("fake", "0.1.0", [sys.executable, "-u", FAKE], str(tmp_path), env)
+    outcome = []
+
+    def starting():
+        try:
+            during.start("0.0.0-test", "python", str(tmp_path))
+            outcome.append("described")
+        except TransportFailed as error:
+            outcome.append(error.code)
+
+    began = time.monotonic()
+    thread = threading.Thread(target=starting)
+    thread.start()
+    until = time.monotonic() + 10
+    while during.process is None and time.monotonic() < until:
+        time.sleep(0.02)
+    time.sleep(0.3)
+    during.cancel()
+    assert during.process is not None and during.process.poll() is not None, "its process has ended when cancel returns"
+    thread.join(timeout=5)
+    assert outcome == ["transport_down"] and time.monotonic() - began < 8, outcome
+
+
 def test_a_transport_that_never_answers_is_hung_after_three_deadlines_whatever_else_it_says(tmp_path):
     clock = Clock()
     process = start("silent", tmp_path, clock)

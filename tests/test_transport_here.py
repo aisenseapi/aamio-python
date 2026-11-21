@@ -51,10 +51,13 @@ def short_env(**more):
 
 
 def started(process, folder, seconds=15):
-    """Started with its medium open: the events until a ready gave room."""
+    """Started with its medium open: the events until a ready gave room.
+
+    What came with describe is kept for the first poll, so that poll is always made: a ready read in the same breath as
+    describe gave room before any poll, and its here was never among the events (a full run of 21 November 2026)."""
     folder.mkdir(parents=True, exist_ok=True)
     process.start("0.0.0-test", "python", str(folder))
-    events, until = [], time.monotonic() + seconds
+    events, until = list(process.poll(timeout=0)), time.monotonic() + seconds
     while process.room() <= 0:
         assert time.monotonic() < until, events
         events.extend(process.poll(timeout=0.05))
@@ -545,6 +548,84 @@ def test_the_ordinary_start_waits_while_a_transport_starts_for_a_moment(bt_env, 
     finally:
         a.close()
         b.close()
+
+
+def fake_processes(monkeypatch, mode, delay=0.0):
+    """TransportProcess as the service makes it, running the fake transport of the tests in mode, each start held back
+    by delay so lookups overlap."""
+    made = []
+    fake = str(pathlib.Path(__file__).parent / "fake_transport.py")
+
+    class Fake(TransportProcess):
+        def __init__(self, name, version, command, cwd, env, **kwargs):
+            super().__init__(name, version, [sys.executable, "-u", fake], cwd, dict(env, FAKE_TRANSPORT_MODE=mode), **kwargs)
+            made.append(self)
+
+        def start(self, *args, **kwargs):
+            time.sleep(delay)
+            return super().start(*args, **kwargs)
+
+    monkeypatch.setattr(transports, "TransportProcess", Fake)
+    return made
+
+
+def test_a_stop_during_a_slow_start_of_a_moment_has_its_child_gone_when_it_returns(bt_env, monkeypatch):
+    """A start of a moment can wait ten seconds for describe alone, and the stop waited six for it: the old owner let go
+    of the home while the child still ran (a review of 21 November 2026). The stop now ends the start itself."""
+    import threading
+    from aamio.runtime import Runtime
+
+    made = fake_processes(monkeypatch, "mute")
+    a = Runtime(home=str(bt_env / "a"), host="http://127.0.0.1:9", archive=True)
+    try:
+        service = a.transport_service()
+        answers = []
+        lookup = threading.Thread(target=lambda: answers.append(service.learn_here("bt")))
+        lookup.start()
+        deadline = time.monotonic() + 10
+        while not (made and made[0].process is not None) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert made and made[0].process is not None, "the child had begun"
+        time.sleep(0.5)  # well inside the ten seconds the start waits for a describe that never comes
+        began = time.monotonic()
+        service.stop()
+        took = time.monotonic() - began
+        assert made[0].process.poll() is not None, "the child had ended when stop returned"
+        lookup.join(timeout=15)
+        assert answers == [(None, "stopping")] and took < transports.STOP_SECONDS + 2, (answers, took)
+        assert "bt" not in transports.Config(a.home).here()
+    finally:
+        a.close()
+
+
+def test_two_lookups_at_once_get_the_same_failure_of_the_start_they_share(bt_env, monkeypatch):
+    """Only the first lookup was told why the start failed; the one that waited for it heard not_ready (a review of
+    21 November 2026)."""
+    import threading
+    from aamio.errors import CodedRuntimeError
+    from aamio.runtime import Runtime
+
+    made = fake_processes(monkeypatch, "bad_describe", delay=0.5)
+    a = Runtime(home=str(bt_env / "a"), host="http://127.0.0.1:9", archive=True)
+    try:
+        service = a.transport_service()
+        outcomes = []
+
+        def lookup():
+            try:
+                outcomes.append(("answer", service.learn_here("bt")))
+            except CodedRuntimeError as error:
+                outcomes.append((error.error_code, str(error)))
+
+        threads = [threading.Thread(target=lookup) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert len(made) == 1, "one start of a moment"
+        assert len(outcomes) == 2 and outcomes[0] == outcomes[1] and outcomes[0][0] == "transport_down", outcomes
+    finally:
+        a.close()
 
 
 def test_a_service_made_first_after_the_close_is_stopped_and_starts_nothing(bt_env, monkeypatch):
