@@ -365,6 +365,17 @@ def test_over_2026_07_28_a_yes_still_sends_when_the_home_no_longer_holds_the_key
     assert len(posted(service)) == 1
 
 
+def says_stop(fix):
+    """Whether the way on, for a call that sent nothing, says stop: a no stands, and a new send is the user's to ask for.
+
+    The way it said before, call again without requestState and inputResponses,
+    made a first call of it, which asks only about what the home holds by then:
+    a no about a secret removed since went unheard (a review of 21 November 2026).
+    """
+    return (isinstance(fix, str) and "This call sent nothing" in fix and "Do not try again on your own" in fix and "decline" in fix
+            and "explicitly asks" in fix and "again without requestState" not in fix and "to ask the user again" not in fix)
+
+
 def test_over_2026_07_28_an_answer_out_of_time_or_used_before_sends_nothing(monkeypatch):
     service, runtime = writer()
     key = scope_key(runtime)
@@ -377,6 +388,7 @@ def test_over_2026_07_28_an_answer_out_of_time_or_used_before_sends_nothing(monk
     calls = counting_sends(runtime)
     late = modern_call(runtime, arguments, 2, state=stale, answer=yes)
     assert late["result"]["structuredContent"]["sent"] is False and late["result"]["structuredContent"]["error_code"] == "no_dialog"
+    assert says_stop(late["result"]["structuredContent"]["fix"]), late["result"]["structuredContent"]["fix"]
     assert calls == [] and posted(service) == []
 
     fresh = modern_call(runtime, arguments, 3)["result"]["requestState"]
@@ -384,6 +396,7 @@ def test_over_2026_07_28_an_answer_out_of_time_or_used_before_sends_nothing(monk
     assert first["result"]["structuredContent"]["readable"] is True and len(posted(service)) == 1
     again = modern_call(runtime, arguments, 5, state=fresh, answer=yes)
     assert again["result"]["structuredContent"]["sent"] is False and again["result"]["structuredContent"]["error_code"] == "no_dialog"
+    assert says_stop(again["result"]["structuredContent"]["fix"]), "an answer used before may have sent already: the way on says stop"
     assert len(posted(service)) == 1, "an answer is taken once"
 
 
@@ -413,7 +426,7 @@ def test_a_continuation_that_cannot_go_on_as_it_is_sends_nothing(variant):
 
     said = answered["result"]["structuredContent"]
     assert said["sent"] is False and said["error_code"] == "no_dialog", said
-    assert "requestState" in said["fix"]
+    assert says_stop(said["fix"]), said["fix"]
     assert calls == [], "nothing that sends is called"
     assert posted(service) == []
 
@@ -441,6 +454,21 @@ def test_a_partner_named_like_an_address_is_reached_sealed_by_their_key():
 def test_the_trace_says_which_messages_go_unsealed():
     tool = next(tool for tool in mcp_server.TOOLS if tool["name"] == "aamio_trace")
     assert "apart from one sent readable and one over a transport under a readable profile, which are signed and not sealed" in tool["description"]
+    assert "The one sent readable goes to an address with no known key and has no line here" in tool["description"]
+    assert "keep the sha256 its send answer gave, and read no_trace as nothing recorded, not as nothing sent" in tool["description"]
+
+
+def test_a_readable_message_has_no_line_in_the_trace_and_its_answer_gives_the_sha256():
+    # What the trace tool says of it: the trace follows a counterpart's key, and
+    # this address has none, so the sha256 is in the answer and nowhere else here.
+    service, runtime = writer()
+
+    sent = runtime.send(ADDRESS, "hei", readable=True)
+
+    assert len(sent["sha256"]) == 64 and sent["sha256"] == posted(service)[0]["sha256"]
+    with pytest.raises(LookupError) as untraced:
+        runtime.trace(ADDRESS)
+    assert untraced.value.error_code == "no_trace"
 
 
 def test_a_partner_named_like_an_address_is_not_written_to_readable():

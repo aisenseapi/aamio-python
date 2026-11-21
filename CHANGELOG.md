@@ -19,6 +19,11 @@ not what moved in the source.
   their app shows, and the message goes only on their yes: `aamio_send` takes
   no argument for it. Partners and addresses whose key is known are always
   sealed (`readable_with_key`).
+- An answer to that dialog that cannot be taken, out of its time, used before
+  or brought back by an app that cannot show the form, sends nothing, and the
+  agent is told to stop and leave a new send to the user. A readable message
+  has no line in `aamio trace`, which follows a counterpart's key, and
+  `aamio_trace` says so: keep the `sha256` the answer gives.
 - A transport is started for a moment, to say where it is reached, once at a
   time: a second lookup waits for the first one's answer, a failure included,
   the ordinary start waits for it to end, and after the runtime has let go of
