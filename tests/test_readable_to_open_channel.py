@@ -387,6 +387,62 @@ def test_over_2026_07_28_an_answer_out_of_time_or_used_before_sends_nothing(monk
     assert len(posted(service)) == 1, "an answer is taken once"
 
 
+@pytest.mark.parametrize("variant", ["no form", "readable false", "readable left out", "an answer without a state", "another revision"])
+def test_a_continuation_that_cannot_go_on_as_it_is_sends_nothing(variant):
+    service, runtime = writer()
+    key = scope_key(runtime)
+    arguments = {"to": ADDRESS, "text": "the key is %s" % key, "readable": True}
+    state = modern_call(runtime, arguments, 1)["result"]["requestState"]
+    runtime.scope_remove("team")
+    calls = counting_sends(runtime)
+    resumed = dict(arguments)
+    params = {"name": "aamio_send", "arguments": resumed, "requestState": state, "inputResponses": {mcp_server.SECRET_QUESTION: {"action": "decline"}}}
+    capabilities, version = FORM, "2026-07-28"
+    if variant == "no form":
+        capabilities = {}
+    elif variant == "readable false":
+        resumed["readable"] = False
+    elif variant == "readable left out":
+        del resumed["readable"]
+    elif variant == "an answer without a state":
+        del params["requestState"]
+    else:
+        version = "2025-11-25"
+
+    answered = mcp_server.handle(runtime, request("tools/call", params, version=version, rid=2, capabilities=capabilities))
+
+    said = answered["result"]["structuredContent"]
+    assert said["sent"] is False and said["error_code"] == "no_dialog", said
+    assert "requestState" in said["fix"]
+    assert calls == [], "nothing that sends is called"
+    assert posted(service) == []
+
+
+def test_a_partner_named_like_an_address_is_reached_sealed_by_their_key():
+    service = Service()
+    a, c = runtime_for(service, "a"), runtime_for(service, "c")
+    a.ensure_inbox()
+    c.ensure_inbox()
+    c.publish_presence()
+    a.partner_add(ADDRESS, c.keys.public)
+
+    with pytest.raises(ValueError) as refused:
+        a.send(ADDRESS, "hei", readable=True)
+    assert refused.value.error_code == "readable_with_key"
+    assert "public key" in str(refused.value) and "aamio partner list" in str(refused.value)
+
+    sent = a.send(c.keys.public, "hei, forseglet")
+
+    assert "readable" not in sent and sent["w"] == c.channels["inbox"].w
+    [message] = service.threads[c.channels["inbox"].w]["messages"]
+    assert json.loads(message["body"]).get("e2ee") == "nacl.box.v1", "sealed to the partner the key names"
+
+
+def test_the_trace_says_which_messages_go_unsealed():
+    tool = next(tool for tool in mcp_server.TOOLS if tool["name"] == "aamio_trace")
+    assert "apart from one sent readable and one over a transport under a readable profile, which are signed and not sealed" in tool["description"]
+
+
 def test_a_partner_named_like_an_address_is_not_written_to_readable():
     service, runtime = writer()
     other = runtime_for(service, "named")

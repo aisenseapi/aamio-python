@@ -3397,7 +3397,7 @@ class Runtime:
             # A partner may be called by twenty letters that read as an address. Taken as one, a message meant for
             # them would go readable to an address nobody named (a review of 21 November 2026).
             if partner is not None:
-                raise CodedValueError("readable_with_key", "%s is the name of a partner as well as the shape of an address, and what goes to a partner is sealed to their key. Leave readable out, or give the address of the inbox itself" % to)
+                raise CodedValueError("readable_with_key", "%s is the name of a partner as well as the shape of a write address, and what goes to a partner is sealed to their key. To reach this partner, leave readable out and give their public key from the address book (aamio partner list)" % to)
             return to
         if partner is None and is_key(to):
             partner = self.partner_by_key(to)
