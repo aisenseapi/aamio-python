@@ -3390,11 +3390,15 @@ class Runtime:
         A partner, a key, or an address whose key is known is refused: a message
         there can be sealed, and a readable copy of it would be one nobody needed.
         """
+        partner = self.partner_by_name(to) if isinstance(to, str) else None
         if isinstance(to, str) and re.fullmatch(r"[a-z2-7]{20}", to):
             if self.peers.get(to) is not None:
                 raise CodedValueError("readable_with_key", "the key of address %s is known here, so a message to it goes sealed. Leave readable out" % to)
+            # A partner may be called by twenty letters that read as an address. Taken as one, a message meant for
+            # them would go readable to an address nobody named (a review of 21 November 2026).
+            if partner is not None:
+                raise CodedValueError("readable_with_key", "%s is the name of a partner as well as the shape of an address, and what goes to a partner is sealed to their key. Leave readable out, or give the address of the inbox itself" % to)
             return to
-        partner = self.partner_by_name(to) if isinstance(to, str) else None
         if partner is None and is_key(to):
             partner = self.partner_by_key(to)
         if partner is not None:
@@ -3428,6 +3432,23 @@ class Runtime:
     def opened_via(self, w):
         """How the inbox at w was opened, as its gate said when it was read here: "hosted", or None when it did not say."""
         return self._gate_marks().get(w)
+
+    def readable_check(self, to, text=None, data=None):
+        """What a readable message to `to` would carry of this home's secrets, and how the inbox there was opened.
+
+        Nothing is stored or sent. The recipient is taken as a readable send
+        takes it, and the gate is read as a send reads it first, which also
+        says how the inbox was opened. carries names the secrets, never their
+        values. A send looks again at the bytes it sends; this is for asking
+        the user before anything that sends is called.
+        """
+        bound = self._bound_partner(to)
+        if bound is not None:
+            raise CodedValueError("readable_with_key", "%s is a partner, and what goes to a partner is sealed to their key. Leave readable out: it is for an inbox whose owner holds no key, as one opened through the hosted endpoint at aamio.at" % bound["name"])
+        w = self._readable_address(to)
+        self._plan_for(w)
+        content = json.dumps({"text": text, "data": data}, ensure_ascii=False, separators=(",", ":"))
+        return {"w": w, "carries": self._secrets_in(content), "hosted": self.opened_via(w) == "hosted"}
 
     def _stop_secrets(self, w, plaintext):
         """A readable message that carries a secret this home holds stops here, before anything is stored, with what it carries named."""
@@ -3543,7 +3564,7 @@ class Runtime:
                 "note": "This inbox asks for %d bits of proof of work, about %s here, so it is being done in the background and the message is sent when it is done. aamio_pending shows it until then, and the next aamio_read says how it ended." % (advice["bits"], describe_seconds(advice["expected_seconds"])),
             }
             if key is None:
-                working.update(self._readable_said(w))
+                working.update(self._readable_said(w, delivered=False))
             return working
 
         status, result = self._deliver(entry, budget=budget)
@@ -3586,14 +3607,20 @@ class Runtime:
             sent.update(self._readable_said(w, result))
         return sent
 
-    def _readable_said(self, w, result=None):
-        """What a readable send says beside its answer: that it went readable, how the inbox was opened when known, and what that means."""
+    def _readable_said(self, w, result=None, delivered=True):
+        """What a readable send says beside its answer: that it goes readable, how the inbox was opened when known, and what that means.
+
+        delivered is False for a message still waiting for its work: it is not
+        sent yet, and the words say so rather than that it went (a review of 21
+        November 2026).
+        """
         opened = result.get("opened_via") if isinstance(result, dict) else None
         opened = opened if isinstance(opened, str) and opened else self.opened_via(w)
         said = {"readable": True}
         if opened:
             said["opened_via"] = opened
-        said["readable_note"] = ("Sent signed and not sealed: the service can read it, and so can whoever holds the read key of %s." % w) + (
+        said["readable_note"] = ("Sent signed and not sealed: the service can read it, and so can whoever holds the read key of %s." % w if delivered else
+                                 "Signed and not sealed, and not sent yet: once it is, the service can read it, and so can whoever holds the read key of %s." % w) + (
             " That inbox was opened through the hosted endpoint at aamio.at, whose owner holds no key: send no secret there." if opened == "hosted" else "")
         return said
 

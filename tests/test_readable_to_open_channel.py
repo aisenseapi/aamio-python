@@ -312,6 +312,113 @@ def test_over_2026_07_28_the_question_is_the_result_and_the_answer_belongs_to_th
     assert len(posted(service)) == 1
 
 
+def modern_call(runtime, arguments, rid, state=None, answer=None):
+    params = {"name": "aamio_send", "arguments": arguments}
+    if state is not None:
+        params["requestState"] = state
+    if answer is not None:
+        params["inputResponses"] = {mcp_server.SECRET_QUESTION: answer}
+    return mcp_server.handle(runtime, request("tools/call", params, rid=rid, capabilities=FORM))
+
+
+def counting_sends(runtime):
+    """Every call to send from here on, written down before it runs."""
+    calls = []
+    original = runtime.send
+
+    def send(*args, **kwargs):
+        calls.append(kwargs)
+        return original(*args, **kwargs)
+
+    runtime.send = send
+    return calls
+
+
+@pytest.mark.parametrize("answer", [{"action": "decline"}, {"action": "cancel"}, {"action": "accept", "content": {"send": False}}])
+def test_over_2026_07_28_a_no_stands_although_the_home_no_longer_holds_the_key(answer):
+    service, runtime = writer()
+    key = scope_key(runtime)
+    arguments = {"to": ADDRESS, "text": "the key is %s" % key, "readable": True}
+    asked = modern_call(runtime, arguments, 1)
+    assert asked["result"]["resultType"] == "input_required"
+
+    # The scope goes while the question is open: the message no longer carries a key this home holds.
+    runtime.scope_remove("team")
+    calls = counting_sends(runtime)
+    answered = modern_call(runtime, arguments, 2, state=asked["result"]["requestState"], answer=answer)
+
+    assert answered["result"]["structuredContent"]["sent"] is False, answered
+    assert calls == [], "nothing that sends is called on a no"
+    assert posted(service) == []
+
+
+def test_over_2026_07_28_a_yes_still_sends_when_the_home_no_longer_holds_the_key():
+    service, runtime = writer()
+    key = scope_key(runtime)
+    arguments = {"to": ADDRESS, "text": "the key is %s" % key, "readable": True}
+    asked = modern_call(runtime, arguments, 1)
+    runtime.scope_remove("team")
+
+    sent = modern_call(runtime, arguments, 2, state=asked["result"]["requestState"], answer={"action": "accept", "content": {"send": True}})
+
+    assert sent["result"]["structuredContent"]["readable"] is True
+    assert len(posted(service)) == 1
+
+
+def test_over_2026_07_28_an_answer_out_of_time_or_used_before_sends_nothing(monkeypatch):
+    service, runtime = writer()
+    key = scope_key(runtime)
+    arguments = {"to": ADDRESS, "text": "the key is %s" % key, "readable": True}
+    yes = {"action": "accept", "content": {"send": True}}
+
+    monkeypatch.setattr(mcp_server, "CONFIRM_SECONDS", -60)
+    stale = modern_call(runtime, arguments, 1)["result"]["requestState"]
+    monkeypatch.setattr(mcp_server, "CONFIRM_SECONDS", 900)
+    calls = counting_sends(runtime)
+    late = modern_call(runtime, arguments, 2, state=stale, answer=yes)
+    assert late["result"]["structuredContent"]["sent"] is False and late["result"]["structuredContent"]["error_code"] == "no_dialog"
+    assert calls == [] and posted(service) == []
+
+    fresh = modern_call(runtime, arguments, 3)["result"]["requestState"]
+    first = modern_call(runtime, arguments, 4, state=fresh, answer=yes)
+    assert first["result"]["structuredContent"]["readable"] is True and len(posted(service)) == 1
+    again = modern_call(runtime, arguments, 5, state=fresh, answer=yes)
+    assert again["result"]["structuredContent"]["sent"] is False and again["result"]["structuredContent"]["error_code"] == "no_dialog"
+    assert len(posted(service)) == 1, "an answer is taken once"
+
+
+def test_a_partner_named_like_an_address_is_not_written_to_readable():
+    service, runtime = writer()
+    other = runtime_for(service, "named")
+    runtime.partner_add(ADDRESS, other.keys.public)
+
+    with pytest.raises(ValueError) as refused:
+        runtime.send(ADDRESS, "hei", readable=True)
+
+    assert refused.value.error_code == "readable_with_key"
+    assert posted(service) == []
+
+
+def test_a_readable_message_waiting_for_its_work_is_not_said_to_be_sent():
+    service, runtime = writer()
+    runtime.client.gate_timed = lambda w: (200, {"require": {"pow": {"bits": 24}}}, 3600)
+    runtime.work_budget = 0.001
+    # The work is left undone: only what the call answers at once is looked at.
+    runtime._deliver_after_work = lambda *args, **kwargs: None
+
+    working = runtime.send(ADDRESS, "hei", readable=True)
+
+    assert working["status"] == "working" and working["readable"] is True
+    assert working["readable_note"].startswith("Signed and not sealed, and not sent yet")
+    assert posted(service) == []
+
+
+def test_the_instructions_say_readable_and_the_users_yes_and_still_fit():
+    assert "unsealed with readable, where a secret goes only on the user's yes" in mcp_server.INSTRUCTIONS
+    # Claude Code keeps 2048 bytes of them, as aamio-php checks too.
+    assert len(mcp_server.INSTRUCTIONS.encode("utf-8")) <= 2048
+
+
 def test_the_tool_says_readable_and_takes_it():
     tool = next(tool for tool in mcp_server.TOOLS if tool["name"] == "aamio_send")
     assert tool["inputSchema"]["properties"]["readable"]["type"] == "boolean"
