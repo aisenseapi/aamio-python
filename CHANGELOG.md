@@ -13,6 +13,9 @@ not what moved in the source.
   says so. A close while such a start is under way ends it, also while it
   waits for the transport to describe itself, and its process has ended when
   the runtime lets go of the home.
+- The README says what the board keeps of a scope: the address on each post,
+  and for up to 61 minutes after a find with the key a temporary read marker
+  with the address, never the key.
 
 - Where a machine is reached on a medium. A transport may say it on each
   `ready` (`here`, contract 3), the home keeps it, and `aamio transport here

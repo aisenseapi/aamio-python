@@ -379,6 +379,14 @@ def test_the_simulated_air_sends_only_quiet_until_the_first_tone_and_stops_there
     assert air.play(pcm, lead, stop_in_quiet) is False and air.played == 0
     assert sum(len(piece) - len(link.AIR_MAGIC) for piece in sent) < lead, "only quiet went into the air"
     sent.clear()
+
+    # The quiet ends exactly where a piece begins: the piece that begins with the first tone is asked about too, and is
+    # held back (a review of 21 November 2026).
+    aligned = 2 * link.CHUNK
+    frame = bytes(aligned) + b"\x7f\x10" * 10
+    assert air.play(frame, aligned, lambda: bool(sent)) is False and air.played == 0
+    assert sent == [link.AIR_MAGIC + frame[:aligned]], "one piece of quiet, and no tone"
+    sent.clear()
     assert air.play(pcm, lead, lambda: False) is True and air.played == 1
     assert b"".join(piece[len(link.AIR_MAGIC):] for piece in sent) == pcm
 

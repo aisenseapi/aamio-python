@@ -1,6 +1,7 @@
 """Scopes: board posts kept unlisted for a group, with the key kept out of the model's hands.
 
-The board holds nothing about a scope but the address on each post. The key is
+The board holds the address on each post and, for up to 61 minutes after a find
+with the key, a temporary read marker with the address, never the key. The key is
 the read capability and the address derived from it the write capability. This
 runtime gives each scope a name, keeps the key in scopes.json, passes it to a
 partner sealed, and takes it out of every message before anyone reads it, so a
