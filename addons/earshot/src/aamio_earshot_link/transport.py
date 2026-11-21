@@ -150,6 +150,11 @@ class Devices:
                     out.abort()
                     return False
                 out.write(pcm[at:min(at + step, lead)])
+            # Asked once more between the last of the quiet and the first tone: a cancel while the last quiet was written
+            # had the tone written all the same (a review of 21 November 2026).
+            if stop_in_quiet is not None and stop_in_quiet():
+                out.abort()
+                return False
             out.write(pcm[lead:])
         return True
 
@@ -224,7 +229,8 @@ class Air:
         # A frame the test mutes takes its time in the air and reaches nobody, this transport included.
         reach = [] if number in self.mute else self.peers + [self.port]
         for n, at in enumerate(range(0, len(pcm), step)):
-            if at < lead and stop_in_quiet is not None and stop_in_quiet():
+            # Asked before every piece that begins in the quiet, and before the one that begins with the first tone.
+            if at <= lead and stop_in_quiet is not None and stop_in_quiet():
                 return False
             piece = AIR_MAGIC + pcm[at:at + step]
             for port in reach:

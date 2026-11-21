@@ -351,6 +351,13 @@ def test_the_speaker_writes_only_quiet_until_the_first_tone_and_stops_there_when
     written.clear()
     assert devices.play(pcm, lead, lambda: False) is True and b"".join(written) == pcm and aborted == [True]
 
+    # A cancel that comes while the last of the quiet is written: the tone was written after it all the same (a review of
+    # 21 November 2026). Asked once more at the turn from quiet to tone, it is kept back.
+    written.clear()
+    aborted.clear()
+    assert devices.play(pcm, lead, lambda: sum(len(piece) for piece in written) >= lead) is False
+    assert aborted == [True] and b"".join(written) == pcm[:lead], "the whole quiet and no tone"
+
 
 def test_the_simulated_air_sends_only_quiet_until_the_first_tone_and_stops_there_when_asked():
     sent = []
