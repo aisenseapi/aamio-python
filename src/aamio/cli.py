@@ -442,7 +442,8 @@ def main(argv=None):
     p = sub.add_parser("trace", help="what was sent to one counterpart and what came back, as hashes: for when a message did not arrive, or arrived empty")
     p.add_argument("who", nargs="?", default=None, help="a partner name, a key or a write address; leave out for everyone")
     p.add_argument("--limit", default=20)
-    read_said = ("Every message on every inbox and transport, checked here first, in the order they arrived. "
+    read_said = ("Every message on every inbox and transport, checked here first. The messages one read returns are in the order they arrived; "
+                 "what --limit or --max-bytes leaves waits for the next read, and may have arrived earlier. "
                  "board replies --post ID keeps the answers that name one post, also from an older board inbox.")
     p = sub.add_parser("read", help=read_said, description=read_said)
     p.add_argument("--wait", default=0)
