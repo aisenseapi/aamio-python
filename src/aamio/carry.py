@@ -65,6 +65,10 @@ ED25519_SMALL_ORDER = frozenset(bytes.fromhex(value) for value in (
 class CarryRefused(Exception):
     """An envelope, a frame or a write refused, with the code the specification gives for it."""
 
+    # What was read of the envelope when it was refused after its sender was verified, so the carrier can say who it
+    # came from (A7). None for a refusal before that.
+    reading = None
+
     def __init__(self, code, detail=""):
         super().__init__(code + (": " + detail if detail else ""))
         self.code = code

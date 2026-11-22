@@ -3369,7 +3369,31 @@ class Runtime:
         for entry in result["online"]:
             if entry["name"] == partner["name"]:
                 return entry["w"], partner["key"]
-        raise CodedLookupError("partner_offline", "%s is not online right now" % partner["name"])
+        raise CodedLookupError("partner_offline", self._offline_said(partner, result.get("error")))
+
+    def _offline_said(self, partner, failed=None):
+        """Why a partner was not found over the internet, and the way over a transport when one is enabled here and the
+        partner is bound to none.
+
+        A field test over sound, Bluetooth, QR and LoRa on 22 November 2026 sent
+        to a device in earshot that was bound to no transport, and heard only
+        that it was not online. A lookup that failed was said the same way here
+        and in aamio-php, while the Node runtime said why.
+        """
+        name = partner["name"]
+        said = "%s is not online right now%s" % (name, ": " + failed if failed else "")
+        try:
+            enabled = list(self.transport_service().manifests())
+            bound = self._bound_partner(partner["key"]) is not None
+        except Exception:
+            # The advice never stands in the way of the refusal it is added to.
+            enabled, bound = [], True
+        if not enabled or bound:
+            return said
+        said += ". %s is bound to no transport, so it was only looked up over the internet" % name
+        if len(enabled) == 1:
+            return said + ". To reach %s over %s, which is enabled here: aamio transport bind %s %s" % (name, enabled[0], name, enabled[0])
+        return said + ". To reach %s over one of the transports enabled here, %s: aamio transport bind %s NAME" % (name, ", ".join(enabled), name)
 
     # ------------------------------------------------------------- send --
 

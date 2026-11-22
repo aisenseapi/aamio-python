@@ -57,12 +57,20 @@ SLACK = 2.0
 # message: the partner may have started again and taken it as expired (A6.8), and what it refuses is never answered over
 # the medium (A7), so every message after would be lost in it too. The next one asks for a new session.
 UNANSWERED_TRIES = 3
+# The newest refusal codes kept for a test or a log to read: in a long aamio serve the list grew for as long as it ran.
+REFUSALS_KEPT = 1000
+# Refusals said once for each partner, session and code; the set is emptied when it reaches this, so a line may come again.
+SAID_KEPT = 1024
+# What was turned away before a sender was known is said at most this often, in seconds: anyone in range can send it.
+UNVERIFIED_SAID_EVERY = 60
+KIND_NAMES = {carry.MESSAGE: "a message", carry.RECEIPT: "a receipt", carry.ASK: "an ask", carry.CHALLENGE: "a challenge",
+              carry.OPEN: "an open", carry.CLOSE: "a close"}
 
 
 class Carrier:
     def __init__(self, state, process, profile, known, clock=time.monotonic, wall=time.time, log=None,
                  retry_seconds=2.0, ask_retry_seconds=5.0, tries=carry_state.TRIES_DEFAULT, note=None,
-                 addresses=None, heard=None, name_of=None, on_here=None):
+                 addresses=None, heard=None, name_of=None, on_here=None, attention=None):
         self.state, self.process, self.profile, self.known = state, process, profile, list(known)
         # Told where a partner was heard from, fresh, so the home can keep it; told where the transport says it is reached.
         self.heard = heard or (lambda pk, address: None)
@@ -76,6 +84,8 @@ class Carrier:
         self.log = log or (lambda line: None)
         # What the user is to hear, as a message that is not sent again: where the runtime keeps attention, or the log.
         self.note = note or self.log
+        # What the user is to hear once, with a state of its own, as a message refused in a session that has expired.
+        self.attention = attention or (lambda state, text: self.log("transport %s: %s" % (self.process.name, text)))
         self.retry_seconds, self.ask_retry_seconds, self.tries = retry_seconds, ask_retry_seconds, tries
         rate_down = process.properties.get("rate_down")
         frame_down = process.properties.get("max_frame_down")
@@ -96,7 +106,10 @@ class Carrier:
         self.answered = {}       # (partner pk, session) this party may send in -> when its challenge came, in that order
         # partner pk -> the transport address it was last heard from fresh, or the home kept from before
         self.addresses = dict(addresses or {})
-        self.refused = []        # codes, for a test or a log to read
+        self.refused = []        # the newest codes, for a test or a log to read
+        self.refusals_said = set()  # (partner pk, session, code) of refusals said once
+        self.unverified = {}        # code -> how many were turned away before a sender was known, not said yet
+        self.unverified_said_at = None
         self.budget, self.budget_at = UNVERIFIED_PER_SECOND, clock()
         self.counter = 0
         known_set = set(self.known)
@@ -270,6 +283,7 @@ class Carrier:
                 self.log("transport %s: %s %s" % (self.process.name, event[1], event[2]))
             elif event[0] == "here":
                 self.on_here(event[1])
+        self._say_unverified()
         self._resend()
         self._flush()
         self.process.check_time()
@@ -278,7 +292,7 @@ class Carrier:
         try:
             envelope = self.reassembly.add(frame)
         except CarryRefused as refused:
-            self.refused.append(refused.code)
+            self._refused(refused.code)
             return
         if envelope is None:
             return
@@ -286,14 +300,14 @@ class Carrier:
         self.budget = min(UNVERIFIED_PER_SECOND, self.budget + (now - self.budget_at) * UNVERIFIED_PER_SECOND)
         self.budget_at = now
         if self.budget < 1:
-            self.refused.append("unverified_over_budget")
+            self._refused("unverified_over_budget")
             return
         self.budget -= 1
         try:
             result, reply, got = self.state.deliver(envelope, self.known, self.profile_of, now, int(self.wall()))
         except CarryRefused as refused:
-            # Refusals stay here (A7): logged and counted, never answered over the medium.
-            self.refused.append(refused.code)
+            # Refusals stay here (A7): said where the user sees it and counted, never answered over the medium.
+            self._refused(refused.code, refused.reading)
             return
         if source is not None and result == "accepted" and got.kind in (carry.CHALLENGE, carry.OPEN, carry.MESSAGE):
             # Fresh: a challenge answers an ask of ours, an open a challenge of ours, and a new message has a counter
@@ -340,6 +354,52 @@ class Carrier:
     def _window_tries(self, pk):
         # A challenge goes again one turn after it went, a turn being as long as a challenge and its open take.
         return max(1, int(self.profile_of(pk)["challenge_window"] / max(self.retry_seconds, SLACK * self.frame_seconds * 2 * self._frames(ANSWER_BYTES))))
+
+    def _refused(self, code, reading=None):
+        """A refusal, kept here and never answered over the medium (A7), and said where the user sees it, as A7 asks.
+
+        Once the sender was verified, it is said once for each partner, session
+        and code: a message in a session that has expired, as each session with
+        a challenge has after aamio starts again (A6.8), goes to attention, since
+        it was not stored and has to be sent again, and anything else to the log.
+        What was turned away before a sender was known is counted and said at
+        most once a minute, since anyone in range can send it. Until 22 November
+        2026 every refusal went into a list that only tests read.
+        """
+        self.refused.append(code)
+        del self.refused[:-REFUSALS_KEPT]
+        if reading is None:
+            self.unverified[code] = self.unverified.get(code, 0) + 1
+            self._say_unverified()
+            return
+        said = (reading.sender, reading.session, code)
+        if said in self.refusals_said:
+            return
+        if len(self.refusals_said) >= SAID_KEPT:
+            self.refusals_said.clear()
+        self.refusals_said.add(said)
+        who = self.name_of(reading.sender)
+        if code == "carry_session_expired":
+            self.attention("session_expired", "a message from %s came in a session this aamio can no longer take messages in, and was refused, so it "
+                                              "was not stored: the session was opened before this aamio started again, when its age can no longer be "
+                                              "measured, or it has outlived its lifetime (contract 3, A6.8). Refusals are not answered over the medium, "
+                                              "so %s's aamio takes a new session after three tries without a receipt (A7), and what it sent in the old "
+                                              "session has to be sent again from there." % (who, who))
+            return
+        self.log("transport %s: %s from %s was refused with %s, and refusals are not answered over the medium (contract 3, A7)"
+                 % (self.process.name, KIND_NAMES.get(reading.kind, "an envelope"), who, code))
+
+    def _say_unverified(self):
+        """What was turned away before a sender was known, counted by code, said at most once a minute (_refused)."""
+        if not self.unverified:
+            return
+        now = self.clock()
+        if self.unverified_said_at is not None and now - self.unverified_said_at < UNVERIFIED_SAID_EVERY:
+            return
+        self.unverified_said_at = now
+        counted = ", ".join("%s %d" % item for item in sorted(self.unverified.items()))
+        self.unverified = {}
+        self.log("transport %s: turned away before a sender was known, said at most once a minute: %s" % (self.process.name, counted))
 
     def _settled(self, pair, kind):
         for key, entry in list(self.control.items()):

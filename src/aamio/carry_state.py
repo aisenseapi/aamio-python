@@ -489,6 +489,16 @@ class CarryState:
     def _deliver(self, envelope, known, profile_in, mono, now, rnd, seal_rnd):
         t = self._tick(now)
         got = carry.read(envelope, self.keys, known, lambda pk, session: self._binding_for(pk, session, mono))
+        try:
+            return self._take(envelope, got, profile_in, mono, t, rnd, seal_rnd)
+        except CarryRefused as refused:
+            # Refused after the sender was verified: who and in which session go with it, so the carrier can say it where
+            # the user sees it (A7). Until 22 November 2026 a refusal said nothing of whom it came from.
+            refused.reading = got
+            raise
+
+    def _take(self, envelope, got, profile_in, mono, t, rnd, seal_rnd):
+        """What A6 and A7 make of an envelope that was read and its sender verified."""
         if callable(profile_in):
             profile_in = profile_in(got.sender)
         if got.mode != (carry.SEALED if profile_in["mode"] == "sealed" else carry.READABLE):

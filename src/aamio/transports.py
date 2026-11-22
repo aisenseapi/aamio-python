@@ -540,6 +540,18 @@ class Service:
             earlier = (getattr(runtime, "attention", None) or {}).get((name, "not_sent_again"))
         note(name, "not_sent_again", text if earlier is None else "%s %s" % (earlier["what"], text))
 
+    def _attention(self, name, state, text):
+        """What a carrier has to tell the user once, in attention under the transport's name and the state it gives, added
+        to what waits there unread under the same state, and the log where there is no attention."""
+        runtime = self.runtime
+        note = getattr(runtime, "_note_trouble", None)
+        if note is None:
+            runtime.log("transport %s: %s" % (name, text))
+            return
+        with runtime.lock:
+            earlier = (getattr(runtime, "attention", None) or {}).get((name, state))
+        note(name, state, text if earlier is None or text in earlier["what"] else "%s %s" % (earlier["what"], text))
+
     def _refresh(self):
         """Who each running carrier takes messages from, read again; a transport no partner is bound to any more is
         stopped, so it no longer holds its port, and one bound meanwhile is started (the follow-up check of 15 November)."""
@@ -739,7 +751,8 @@ class Service:
                 entry["carrier"] = Carrier(self.carry(), process, self.profile_for, self.known_for(name), log=self.runtime.log,
                                            note=lambda text, name=name: self._say(name, text), addresses=self._addresses_for(name),
                                            heard=lambda pk, address, name=name: self._heard(name, pk, address), name_of=self._name_of,
-                                           on_here=lambda here, name=name, medium=manifest.medium, version=manifest.__version__: self._here(name, medium, here, version))
+                                           on_here=lambda here, name=name, medium=manifest.medium, version=manifest.__version__: self._here(name, medium, here, version),
+                                           attention=lambda state, text, name=name: self._attention(name, state, text))
                 entry["process"] = process
                 self.runtime.log("transport %s: up" % name)
                 self._check_windows(name, entry["carrier"])

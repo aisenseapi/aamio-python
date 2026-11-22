@@ -487,6 +487,16 @@ def test_a_reader_stopped_in_the_middle_of_a_message_hands_nothing_half_over_and
             return carrier is not None and "carry_session_expired" in carrier.refused
 
         until(refused, 300, "a's message again, in the session b started again without")
+        # Said where b's user sees it (A7): until 22 November 2026 the refusal went into a list only tests read.
+        seen = []
+
+        def expired_said():
+            seen.extend(b.attention_taken())
+            return any(note["state"] == "session_expired" for note in seen)
+
+        until(expired_said, 30, "the refusal was never said where the user sees it")
+        said = next(note for note in seen if note["state"] == "session_expired")
+        assert said["channel"] == "earshot-link" and "not stored" in said["what"] and "sent again" in said["what"], said
         assert b.read(wait=0) == [], "nothing half over, and nothing in the old session"
         assert outcome(a, sent["a"]["mark"]) == "waiting"
         a.close()
