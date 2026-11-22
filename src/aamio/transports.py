@@ -50,6 +50,8 @@ CRASH_WINDOW, CRASHES_MOST = 600, 3
 WAIT_DEFAULT = 30
 # How long a start of a moment waits for a transport's first ready, to learn where it is reached (B2).
 LEARN_SECONDS = 10
+# How much of what a transport said of its medium, as status down, transport here passes on: its own words, kept short.
+DOWN_SAID_MOST = 300
 ADDRESS_FROM = ("you", "heard")
 # The window a profile for a slow medium is told to give, at the least.
 CHALLENGE_WINDOW_SLOW = 300
@@ -393,6 +395,10 @@ class Service:
         # A start of a moment under way, by transport name: {"done": Event, "result": (here, how)}. One at a time per
         # transport, never beside its ordinary start, and none after the stop (a review of 20 November 2026).
         self.learning = {}
+        # What a transport said of its medium the last time a start of a moment did not come up, by name: the reason
+        # transport here gives. A transport says it as status down on the protocol, not on standard error, and here said
+        # only that "the lines it wrote above" said why, with none written (a check of 22 November 2026).
+        self.down_said = {}
         # Where a runtime with a listener wants what comes in, and what it was given and has not had taken.
         self.offer = None
         self.offered = set()
@@ -649,8 +655,11 @@ class Service:
         try:
             process.start(CORE_VERSION, "python", folder)
             until = time.monotonic() + seconds
+            said = None
             while not process.readied and time.monotonic() < until and not self.stopping.is_set():
-                process.poll(timeout=0.1)
+                for event in process.poll(timeout=0.1):
+                    if event[0] == "status" and event[1] == "down" and isinstance(event[2], str) and event[2].strip():
+                        said = event[2].strip()[:DOWN_SAID_MOST]
         except (TransportFailed, OSError) as error:
             if self.stopping.is_set():
                 # Ended by the stop while it started, which is no failure of the transport.
@@ -663,7 +672,9 @@ class Service:
                 # Stopped while it started: an owner that has let go of the home writes nothing into it.
                 return None, "stopping"
             if not process.readied:
+                self.down_said[name] = said
                 return None, "not_ready"
+            self.down_said.pop(name, None)
             # Said nothing is kept too, as an empty list, so a transport over a medium without addresses is not started
             # again for every card: the microphone of a transport over sound opened each time (the review of
             # 19 November 2026).
@@ -1094,9 +1105,11 @@ def here(runtime, name):
         return {"transport": name, "medium": medium, "here": None,
                 "note": "%s is starting in this process and has not said it is ready yet: ask again in a moment." % name}
     if how == "not_ready":
+        said = service.down_said.get(name)
         return {"transport": name, "medium": medium, "here": None,
-                "note": "%s did not say it was ready within %d seconds, as when its medium is off or another program holds it, so nothing was learned. "
-                        "The lines it wrote above say why." % (name, LEARN_SECONDS)}
+                "note": "%s did not say it was ready within %d seconds, so nothing was learned. %s" % (
+                    name, LEARN_SECONDS, "It said: %s" % said if said else
+                    "It said nothing of why, as when its medium is off or another program holds it.")}
     if not found:
         # Nothing said and an empty list say the same: a card names the medium alone. found[0] below stopped on [] with
         # an IndexError (the Node port of 19 November 2026 found it).

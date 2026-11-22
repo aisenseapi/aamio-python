@@ -530,6 +530,27 @@ def test_a_stop_while_a_transport_starts_for_a_moment_ends_it_and_keeps_nothing(
             a.close()
 
 
+def test_transport_here_says_what_the_transport_said_when_it_did_not_come_up(bt_env):
+    """A transport says why on the protocol, as status down, and not on standard error: here said that the lines it wrote
+    above said why, with none written, and the reason was lost (a check of 22 November 2026)."""
+    from aamio.runtime import Runtime
+
+    (port,) = free_ports(1)
+    a = Runtime(home=str(bt_env / "a"), host="http://127.0.0.1:9", archive=True)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+        # The simulated channel is taken, so the transport says down and never ready.
+        holder.bind(("127.0.0.1", port))
+        holder.listen(1)
+        try:
+            a.transport_service().environ = dict(os.environ, AAMIO_BT_SIMULATE=str(port))
+            said = transports.here(a, "bt")
+        finally:
+            a.close()
+    assert said["here"] is None and "did not say it was ready within" in said["note"]
+    assert "It said: Bluetooth" in said["note"] and "could not be opened" in said["note"], said["note"]
+    assert "lines it wrote above" not in said["note"]
+
+
 def test_the_ordinary_start_waits_while_a_transport_starts_for_a_moment(bt_env, monkeypatch):
     import threading
     from aamio.runtime import Runtime
