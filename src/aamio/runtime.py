@@ -1531,7 +1531,7 @@ class Runtime:
             named = " (pid %s)" % held["pid"] if isinstance(held, dict) and isinstance(held.get("pid"), int) else ""
             # The other one may be someone else's, as a board agent on a shared machine: a home of your own comes first,
             # and stopping it only when it is yours (a field report of 22 November 2026, where "Stop it" was the advice).
-            raise CodedRuntimeError("home_in_use", "another aamio%s is using %s. Use a home of your own: --home DIR or AAMIO_HOME. "
+            raise CodedRuntimeError("home_in_use", "another aamio%s is using %s. Use a home of your own: --home DIR or AAMIO_HOME. A new home is a separate identity: if you need this one, wait for its owner. "
                                     "Stop the other aamio only if it is yours." % (named, self.home))
 
         try:
@@ -1574,7 +1574,7 @@ class Runtime:
             # let two runtimes write one home.
             raise CodedRuntimeError("home_in_use",
                 "could not determine whether aamio (pid %s) is still using %s; the lock is left untouched. Process inspection was "
-                "unavailable or inconclusive. Use a home of your own: --home DIR or AAMIO_HOME. If the other runtime is yours, stop it "
+                "unavailable or inconclusive. Use a home of your own: --home DIR or AAMIO_HOME. A new home is a separate identity: if you need this one, wait for its owner. If the other runtime is yours, stop it "
                 "or restore process inspection. Do not remove the lock unless you have independently confirmed its owner has stopped." % (held["pid"], self.home)
             )
 
@@ -1587,7 +1587,7 @@ class Runtime:
 
         if alive:
             raise CodedRuntimeError("home_in_use",
-                "another aamio (pid %s) is using %s. Use a home of your own: --home DIR or AAMIO_HOME. Stop the other aamio only if it "
+                "another aamio (pid %s) is using %s. Use a home of your own: --home DIR or AAMIO_HOME. A new home is a separate identity: if you need this one, wait for its owner. Stop the other aamio only if it "
                 "is yours. If no aamio is running, the one that took the lock stopped without letting go of it: delete %s and start "
                 "again." % (held["pid"], self.home, self._path("lock"))
             )

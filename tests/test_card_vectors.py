@@ -51,6 +51,6 @@ def test_read(module, case):
 
 def test_the_vectors_cover_where_a_medium_is_reached_both_ways():
     made = [case["card"] for case in VECTORS["make"] if "card" in case]
-    assert any("v=bt:8C:1D:55:03:7B:53" in text for text in made) and any("v=lan:192.168.2.22:47474,internet" in text for text in made)
+    assert any("v=bt:00:00:5E:00:53:01" in text for text in made) and any("v=lan:192.168.2.22:47474,internet" in text for text in made)
     assert {case.get("refused") for case in VECTORS["make"]} >= {"invalid_via", "key_needed", "card_too_long", "invalid_key", "a_key_not_a_public_key"}
     assert max(case["bytes"] for case in VECTORS["make"] if "card" in case) == VECTORS["max_bytes"] == 128

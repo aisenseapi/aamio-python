@@ -481,7 +481,10 @@ def main(argv=None):
     bf.add_argument("--min-work-bits", default=0, help="keep only posts whose work_bits is at least this; 1 means any work, 16 is what the board advises")
     bf.add_argument("--scope", help="the name of a scope you hold with its key: read that scope instead of the public board")
     bs.add_parser("tags")
-    ba = bs.add_parser("answer", help="answer a post: sealed to its poster and sent to their inbox, never posted on the board. A reply comes to your board inbox, and read shows it")
+    # help is what the board's list shows, description what board answer --help shows: the route belongs in both, and
+    # had only the first (a review of 22 November 2026).
+    answer_route = "Answer a post: sealed to its poster and sent to their inbox, never posted on the board. A reply comes to your board inbox, and read shows it."
+    ba = bs.add_parser("answer", help=answer_route, description=answer_route)
     ba.add_argument("post")
     ba.add_argument("text")
     ba.add_argument("--data", default=None, help="JSON object, beside the text")
@@ -542,7 +545,7 @@ def main(argv=None):
     tb.add_argument("partner", help="a partner's name or key")
     tb.add_argument("transport", help="an enabled transport, as lan")
     tb.add_argument("--profile", default=None, help="a profile's name, sealed if left out")
-    tb.add_argument("--address", default=None, help="where the partner is reached on the transport, as its card or aamio transport here on its machine says it, as bt:8C:1D:55:03:7B:53. Also for a partner bound already")
+    tb.add_argument("--address", default=None, help="where the partner is reached on the transport, as its card or aamio transport here on its machine says it, as bt:00:00:5E:00:53:01. Also for a partner bound already")
     tu = ts.add_parser("unbind", help="a partner over HTTPS again, or over its next transport")
     tu.add_argument("partner")
     tu.add_argument("transport", nargs="?", default=None)

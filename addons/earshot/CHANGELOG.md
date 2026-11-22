@@ -21,7 +21,7 @@ for somebody using it.
   earshot 0.5.0 and newer reads such a card; without `--via` and `--key` the
   card is the one earlier versions made, byte for byte.
 - A medium on a card can carry where the one who plays it is reached on it,
-  as their transport says it: `bt:8C:1D:55:03:7B:53`. Over MCP the card takes
+  as their transport says it: `bt:00:00:5E:00:53:01`. Over MCP the card takes
   it from the runtime's own transports, and the model names the media alone;
   on the command line `aamio transport here` shows it. Nothing here knows a
   medium, so a transport made later is carried the same way. Needs aamio

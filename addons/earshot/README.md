@@ -57,13 +57,13 @@ A card can say more when the one who plays it asks. `--via` names the media
 they prefer answers over, in order, at most three: internet, the scope over
 aamio.at, which is what a card without it means, or the medium of a transport,
 as lan or bt. A transport's medium can carry where they are reached on it, as
-the transport says it: `bt:8C:1D:55:03:7B:53` or `lan:192.168.2.22:47474`.
+the transport says it: `bt:00:00:5E:00:53:01` or `lan:192.168.2.22:47474`.
 A card that names a medium other than internet carries their public key,
 which a listener binds that transport to.
 
 ```text
 aamio:scope/k7rq2m4xw5tbz3yd6ena?n=rom-42&t=1794200000&v=lan,internet&k=KEY
-aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794200000&v=bt:8C:1D:55:03:7B:53&k=KEY
+aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794200000&v=bt:00:00:5E:00:53:01&k=KEY
 ```
 
 Over MCP the card takes both from the runtime: the key is its own, and each
@@ -73,7 +73,7 @@ machine's address on a card. On the command line you give them: the key as
 `aamio whoami` shows it, and the address as `aamio transport here bt` shows it:
 
 ```bash
-aamio addon earshot broadcast k7rq2m4xw5tbz3yd6ena --via bt:8C:1D:55:03:7B:53 --key=KEY
+aamio addon earshot broadcast k7rq2m4xw5tbz3yd6ena --via bt:00:00:5E:00:53:01 --key=KEY
 ```
 
 Nothing in Earshot knows what a medium is. A transport made after this one,

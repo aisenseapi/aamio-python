@@ -198,3 +198,18 @@ def test_an_answer_without_data_is_the_call_it_always_was():
                             text='yes', data=None, scope=None), runtime)
 
     assert seen['data'] is None, seen
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_board_answer_help_says_where_the_answer_goes_and_makes_no_home(tmp_path, capsys, flag):
+    """The route was in the board's list alone, and board answer --help said only its arguments (a review of 22 November 2026)."""
+    home = tmp_path / "never"
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--home", str(home), "board", "answer", flag])
+
+    said = " ".join(capsys.readouterr().out.split())
+    assert stopped.value.code == 0
+    assert "sealed to its poster and sent to their inbox, never posted on the board" in said
+    assert "A reply comes to your board inbox" in said
+    assert not home.exists()

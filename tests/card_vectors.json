@@ -41,10 +41,10 @@
    "name": null,
    "expires": 1794153600,
    "via": [
-    "bt:8C:1D:55:03:7B:53"
+    "bt:00:00:5E:00:53:01"
    ],
    "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
-   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794153600&v=bt:8C:1D:55:03:7B:53&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794153600&v=bt:00:00:5E:00:53:01&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
    "bytes": 114
   },
   {
@@ -65,9 +65,9 @@
    "address": "k7rq2m4xw5tbz3yd6ena",
    "name": null,
    "expires": 1794153600,
-   "via": "bt:8C:1D:55:03:7B:53,internet",
+   "via": "bt:00:00:5E:00:53:01,internet",
    "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
-   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794153600&v=bt:8C:1D:55:03:7B:53,internet&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794153600&v=bt:00:00:5E:00:53:01,internet&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
    "bytes": 123
   },
   {
@@ -111,7 +111,7 @@
    "name": null,
    "expires": null,
    "via": [
-    "bt:8C:1D:55:03:7B:53"
+    "bt:00:00:5E:00:53:01"
    ],
    "key": null,
    "refused": "key_needed"
@@ -145,7 +145,7 @@
    "expires": null,
    "via": [
     "bt",
-    "bt:8C:1D:55:03:7B:53"
+    "bt:00:00:5E:00:53:01"
    ],
    "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
    "refused": "invalid_via"
@@ -214,11 +214,11 @@
    "name": "ro",
    "expires": 1794153600,
    "via": [
-    "bt:8C:1D:55:03:7B:53",
+    "bt:00:00:5E:00:53:01",
     "internet"
    ],
    "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
-   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?n=ro&t=1794153600&v=bt:8C:1D:55:03:7B:53,internet&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "card": "aamio:scope/k7rq2m4xw5tbz3yd6ena?n=ro&t=1794153600&v=bt:00:00:5E:00:53:01,internet&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
    "bytes": 128
   },
   {
@@ -227,7 +227,7 @@
    "name": "rom",
    "expires": 1794153600,
    "via": [
-    "bt:8C:1D:55:03:7B:53",
+    "bt:00:00:5E:00:53:01",
     "internet"
    ],
    "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
@@ -300,14 +300,14 @@
   },
   {
    "about": "a Bluetooth address and the key",
-   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794153600&v=bt:8C:1D:55:03:7B:53&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794153600&v=bt:00:00:5E:00:53:01&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
    "card": {
     "kind": "scope",
     "address": "k7rq2m4xw5tbz3yd6ena",
     "name": null,
     "expires_at": 1794153600,
     "via": [
-     "bt:8C:1D:55:03:7B:53"
+     "bt:00:00:5E:00:53:01"
     ],
     "key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ"
    }
@@ -366,7 +366,7 @@
   },
   {
    "about": "a medium twice",
-   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=bt,bt:8C:1D:55:03:7B:53&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+   "text": "aamio:scope/k7rq2m4xw5tbz3yd6ena?v=bt,bt:00:00:5E:00:53:01&k=ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
    "not_understood": "invalid_via"
   },
   {

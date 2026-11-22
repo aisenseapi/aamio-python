@@ -2,7 +2,7 @@
 
     aamio:scope/k7rq2m4xw5tbz3yd6ena
     aamio:scope/k7rq2m4xw5tbz3yd6ena?n=stue-tv&t=1794200000
-    aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794200000&v=bt:8C:1D:55:03:7B:53&k=KEY
+    aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794200000&v=bt:00:00:5E:00:53:01&k=KEY
 
 The same card as the earshot add-on's, read by the same rules, so a card seen
 and a card heard are one thing: the shared vectors in the tests hold both to
@@ -21,7 +21,7 @@ the one who shows it prefers answers over, in order, at most three, each once:
 internet, the scope over aamio.at as a card without v means, or the medium of
 a transport as its manifest names it, as lan or bt, alone or with where they
 are reached on it as the transport says it (contract 3, B3: here), as
-bt:8C:1D:55:03:7B:53. k is their public key, 43 characters of base64url, which
+bt:00:00:5E:00:53:01. k is their public key, 43 characters of base64url, which
 a reader binds a transport to; a card that names a medium other than internet
 carries it. Nothing here knows what a medium is: a transport made tomorrow is
 carried the same way, and a medium a reader has no transport for is said
@@ -55,13 +55,13 @@ VIA_MOST = 3
 PUBLIC_KEY = re.compile(r"[A-Za-z0-9_-]{43}")
 VIA_FIX = ("via is the media you prefer answers over, in order, at most three and each once: internet, the scope over aamio.at, "
            "or the medium of a transport, as lan or bt, alone or with where you are reached on it as aamio transport here shows it, "
-           "as bt:8C:1D:55:03:7B:53. As text they are separated by commas, as bt:8C:1D:55:03:7B:53,internet.")
+           "as bt:00:00:5E:00:53:01. As text they are separated by commas, as bt:00:00:5E:00:53:01,internet.")
 KEY_FIX = ("key is your public key, the 43 characters aamio whoami shows as key. A card that names a medium other than internet "
            "carries it, and everyone who sees the code can read it.")
 
 
 def medium_of(entry):
-    """The medium of a via entry: bt for bt:8C:1D:55:03:7B:53, internet for internet."""
+    """The medium of a via entry: bt for bt:00:00:5E:00:53:01, internet for internet."""
     return entry.split(":", 1)[0]
 
 

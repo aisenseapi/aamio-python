@@ -384,7 +384,7 @@ Where a machine is reached on a medium is the transport's to say: each one says 
 
 ```bash
 aamio transport here bt
-aamio transport bind nordlys bt --address bt:8C:1D:55:03:7B:53
+aamio transport bind nordlys bt --address bt:00:00:5E:00:53:01
 ```
 
 After that, where a partner is reached moves with every fresh envelope from it: a challenge to an ask of yours, an open to a challenge of yours, or a new message. An ask never moves it, since anyone who heard one can play it again from another machine. When the address stops answering, as when the partner sits at another machine than the day before, every second ask goes to nobody in particular, as the transport sends that. `aamio transport list` shows where each transport and each partner is reached, and whether you gave the address or it was heard. A send that finds nobody says what the transport said of the last frame it could not send.

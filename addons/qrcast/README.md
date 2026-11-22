@@ -73,7 +73,7 @@ it, as the transport says it. A card that names a medium other than internet
 carries your public key, which a reader binds that transport to:
 
 ```text
-aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794200000&v=bt:8C:1D:55:03:7B:53&k=KEY
+aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794200000&v=bt:00:00:5E:00:53:01&k=KEY
 ```
 
 Over MCP the code takes both from the runtime: its own key, and where this

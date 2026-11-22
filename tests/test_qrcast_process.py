@@ -858,7 +858,7 @@ def test_an_unknown_call_is_said_as_the_other_two_editions_say_it():
 # ----------------------------------------------------------------- where a medium is reached
 
 KEY = "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ"
-BT_HERE = "bt:8C:1D:55:03:7B:53"
+BT_HERE = "bt:00:00:5E:00:53:01"
 HERE_SAID = [{"transport": "bt", "medium": "bt", "here": [BT_HERE], "at": NOW}]
 
 

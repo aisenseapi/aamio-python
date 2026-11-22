@@ -72,7 +72,7 @@ def bt(folder, port, peers=()):
 # ------------------------------------------------------------- here, in the host
 
 def test_here_is_a_short_list_of_the_transport_s_own_addresses():
-    assert here_of(["bt:8C:1D:55:03:7B:53"], "bt") == ["bt:8C:1D:55:03:7B:53"]
+    assert here_of(["bt:00:00:5E:00:53:01"], "bt") == ["bt:00:00:5E:00:53:01"]
     assert here_of(["lan:10.0.0.7:47474", "lan:10.0.0.8:47474"], "lan") == ["lan:10.0.0.7:47474", "lan:10.0.0.8:47474"]
     assert here_of([], "bt") == []
     for bad in (["lan:10.0.0.7:47474"], ["bt:"], ["bt:a b"], ["bt:x", "bt:x"], ["bt:%d" % n for n in range(5)], "bt:x", [7], ["bt:" + "x" * 126], None):
@@ -87,11 +87,11 @@ def test_a_ready_with_here_is_said_once_and_a_here_that_cannot_be_taken_stops_no
     def take(**message):
         return process._take(("line", json.dumps(dict({"t": "ready", "credit": 1, "sends_read": 0}, **message)).encode("utf-8")))
 
-    assert take(here=["bt:8C:1D:55:03:7B:53"]) == [("here", ["bt:8C:1D:55:03:7B:53"])]
-    assert take(here=["bt:8C:1D:55:03:7B:53"]) == [], "the same again is nothing new"
+    assert take(here=["bt:00:00:5E:00:53:01"]) == [("here", ["bt:00:00:5E:00:53:01"])]
+    assert take(here=["bt:00:00:5E:00:53:01"]) == [], "the same again is nothing new"
     assert take(here=["lan:10.0.0.7:47474"]) == [] and "here is not taken" in logged[-1]
-    assert process.here == ["bt:8C:1D:55:03:7B:53"] and process.room() == 1 and process.failed is None, "a hint never stops a transport"
-    assert take() == [] and process.here == ["bt:8C:1D:55:03:7B:53"], "a ready without here leaves it as it was"
+    assert process.here == ["bt:00:00:5E:00:53:01"] and process.room() == 1 and process.failed is None, "a hint never stops a transport"
+    assert take() == [] and process.here == ["bt:00:00:5E:00:53:01"], "a ready without here leaves it as it was"
     assert take(here=["bt:DC:FB:48:D5:EA:C0"]) == [("here", ["bt:DC:FB:48:D5:EA:C0"])], "another day, another address"
 
 
@@ -357,10 +357,10 @@ def test_bind_with_an_address_checks_it_and_sets_it_for_a_partner_bound_already(
         with pytest.raises(CodedValueError) as again:
             transports.bind(a, "b", "bt")
         assert again.value.error_code == "transport_already_bound" and "--address" in str(again.value)
-        moved = transports.bind(a, "b", "bt", address="bt:8C:1D:55:03:7B:53")
-        assert moved["address"] == "bt:8C:1D:55:03:7B:53" and len(moved["routes"]) == 1
+        moved = transports.bind(a, "b", "bt", address="bt:00:00:5E:00:53:01")
+        assert moved["address"] == "bt:00:00:5E:00:53:01" and len(moved["routes"]) == 1
         with pytest.raises(CodedValueError) as other:
-            transports.bind(a, "b", "bt", profile="slow", address="bt:8C:1D:55:03:7B:53")
+            transports.bind(a, "b", "bt", profile="slow", address="bt:00:00:5E:00:53:01")
         assert other.value.error_code == "transport_already_bound" and "unbind first" in str(other.value)
         transports.unbind(a, "b", "bt")
         assert transports.Config(a.home).addresses() == {}, "an unbind takes where the partner is reached with it"
@@ -379,8 +379,8 @@ def test_a_hint_file_that_cannot_be_read_stops_no_send(bt_env):
         config = transports.Config(a.home)
         assert config.addresses() == {} and config.here() == {}
         assert transports.listing(a)["bindings"][0]["partner"] == "b"
-        config.set_address(b.keys.public, "bt", "bt:8C:1D:55:03:7B:53", "you", 1)
-        assert config.addresses()[b.keys.public]["bt"]["address"] == "bt:8C:1D:55:03:7B:53", "written again whole"
+        config.set_address(b.keys.public, "bt", "bt:00:00:5E:00:53:01", "you", 1)
+        assert config.addresses()[b.keys.public]["bt"]["address"] == "bt:00:00:5E:00:53:01", "written again whole"
     finally:
         a.close()
         b.close()
