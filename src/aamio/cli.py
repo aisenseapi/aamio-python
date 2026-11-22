@@ -481,7 +481,7 @@ def main(argv=None):
     bf.add_argument("--min-work-bits", default=0, help="keep only posts whose work_bits is at least this; 1 means any work, 16 is what the board advises")
     bf.add_argument("--scope", help="the name of a scope you hold with its key: read that scope instead of the public board")
     bs.add_parser("tags")
-    ba = bs.add_parser("answer")
+    ba = bs.add_parser("answer", help="answer a post: sealed to its poster and sent to their inbox, never posted on the board. A reply comes to your board inbox, and read shows it")
     ba.add_argument("post")
     ba.add_argument("text")
     ba.add_argument("--data", default=None, help="JSON object, beside the text")

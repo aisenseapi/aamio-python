@@ -1529,7 +1529,10 @@ class Runtime:
             # The owner writes its pid just after it takes the lock, so a
             # moment may pass with none, or an old one, there to name.
             named = " (pid %s)" % held["pid"] if isinstance(held, dict) and isinstance(held.get("pid"), int) else ""
-            raise CodedRuntimeError("home_in_use", "another aamio%s is using %s. Stop it, or use a different AAMIO_HOME." % (named, self.home))
+            # The other one may be someone else's, as a board agent on a shared machine: a home of your own comes first,
+            # and stopping it only when it is yours (a field report of 22 November 2026, where "Stop it" was the advice).
+            raise CodedRuntimeError("home_in_use", "another aamio%s is using %s. Use a home of your own: --home DIR or AAMIO_HOME. "
+                                    "Stop the other aamio only if it is yours." % (named, self.home))
 
         try:
             self._check_older_owner()
@@ -1571,8 +1574,8 @@ class Runtime:
             # let two runtimes write one home.
             raise CodedRuntimeError("home_in_use",
                 "could not determine whether aamio (pid %s) is still using %s; the lock is left untouched. Process inspection was "
-                "unavailable or inconclusive. Stop the other runtime or restore process inspection, or use a different AAMIO_HOME. "
-                "Do not remove the lock unless you have independently confirmed its owner has stopped." % (held["pid"], self.home)
+                "unavailable or inconclusive. Use a home of your own: --home DIR or AAMIO_HOME. If the other runtime is yours, stop it "
+                "or restore process inspection. Do not remove the lock unless you have independently confirmed its owner has stopped." % (held["pid"], self.home)
             )
 
         if alive and isinstance(held.get("at"), (int, float)):
@@ -1584,8 +1587,9 @@ class Runtime:
 
         if alive:
             raise CodedRuntimeError("home_in_use",
-                "another aamio (pid %s) is using %s. Stop it, or use a different AAMIO_HOME. If no aamio is running, "
-                "the one that took the lock stopped without letting go of it: delete %s and start again." % (held["pid"], self.home, self._path("lock"))
+                "another aamio (pid %s) is using %s. Use a home of your own: --home DIR or AAMIO_HOME. Stop the other aamio only if it "
+                "is yours. If no aamio is running, the one that took the lock stopped without letting go of it: delete %s and start "
+                "again." % (held["pid"], self.home, self._path("lock"))
             )
 
     def _let_go_of_owner_lock(self):
@@ -2982,7 +2986,10 @@ class Runtime:
         archive_error = self._archive_done("board", {"kind": "answered", "at": time.time(), "post": post["id"], "w": post["w"], "status": status, "message_id": entry["id"], "outcome": entry["status"], "body": body}, "the answer %s" % entry["id"])
         if status != 201:
             raise SendFailed(entry["status"], entry["id"], status, result, trace_error=entry.get("trace_error"), archive_error=archive_error)
-        answer = {"post": post["id"], "w": post["w"], "message_id": entry["id"], "seq": result["seq"], "at": result["at"], "replies_arrive_on": "board", "reply_to": channel.w}
+        # replies_arrive_on names this runtime's board inbox, and was read as the board itself: the note says where the
+        # answer went and where a reply comes (a field report of 22 November 2026).
+        answer = {"post": post["id"], "w": post["w"], "message_id": entry["id"], "seq": result["seq"], "at": result["at"], "replies_arrive_on": "board", "reply_to": channel.w,
+                  "note": "Sealed to the poster and sent to their inbox, the w of the post. Nothing was posted on the board. A reply comes to your board inbox at reply_to, and read shows it."}
         if "met" in result:
             answer["met"] = result["met"]
             answer["proof_id"] = result.get("proof_id")
