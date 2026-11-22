@@ -442,7 +442,9 @@ def main(argv=None):
     p = sub.add_parser("trace", help="what was sent to one counterpart and what came back, as hashes: for when a message did not arrive, or arrived empty")
     p.add_argument("who", nargs="?", default=None, help="a partner name, a key or a write address; leave out for everyone")
     p.add_argument("--limit", default=20)
-    p = sub.add_parser("read")
+    read_said = ("Every message on every inbox and transport, checked here first, in the order they arrived. "
+                 "board replies --post ID keeps the answers that name one post, also from an older board inbox.")
+    p = sub.add_parser("read", help=read_said, description=read_said)
     p.add_argument("--wait", default=0)
     p.add_argument("--limit", default=None, help="at most this many messages")
     p.add_argument("--max-bytes", default=None, dest="max_bytes",
@@ -489,7 +491,9 @@ def main(argv=None):
     ba.add_argument("text")
     ba.add_argument("--data", default=None, help="JSON object, beside the text")
     ba.add_argument("--scope", help="the name of the scope the post is in")
-    br = bs.add_parser("replies", help="answers to your posts. This filters. read shows everything on the inbox, including messages that name no post and bodies that could not be opened")
+    replies_said = ("answers to your posts. This filters, and --post ID keeps those that name one post, from every board inbox, "
+                    "the older ones too. read shows everything on the inbox, including messages that name no post and bodies that could not be opened")
+    br = bs.add_parser("replies", help=replies_said, description=replies_said)
     br.add_argument("--post")
     br.add_argument("--wait", default=0)
     bw = bs.add_parser("withdraw")

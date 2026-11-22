@@ -670,6 +670,17 @@ def is_message_hash(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
+def arrival(message):
+    """What read orders by across its channels: when the message arrived, one without a time last. Python's sort keeps
+    the order they came in between equals.
+
+    A read handed the messages over channel by channel, so an answer that came on a board inbox stood apart from the
+    rest, and one on an older board inbox apart again (a field report of 22 November 2026).
+    """
+    at = message.get("at") if isinstance(message, dict) else None
+    return (0, at) if isinstance(at, (int, float)) and not isinstance(at, bool) else (1, 0)
+
+
 def message_shape(body, envelope):
     """What a message was made of, for the trace, without what it said."""
     shape = {
@@ -5429,6 +5440,7 @@ class Runtime:
             said = [part for part in (limit_said, budget_said, here_said) if part]
             if said:
                 self._note_trouble("read", "more", " ".join([said[0]] + [part[0].upper() + part[1:] for part in said[1:]]))
+            collected.sort(key=arrival)
             self._carried_handed_over(collected)
             return collected
         # With a listener running, the messages are already here: it fetched them
@@ -5534,6 +5546,7 @@ class Runtime:
             labels = ", ".join(dict.fromkeys(entry.get("channel") or entry.get("w") for entry in held))
             self._note_trouble("read", "more", "this read stopped at the byte budget it asked for on %s, %d bytes of messages per channel. The rest is here in the order it arrived and the next read hands it over; nothing was dropped and nothing changed places." % (labels, max_bytes))
 
+        collected.sort(key=arrival)
         self._carried_handed_over(collected)
         return collected
 
