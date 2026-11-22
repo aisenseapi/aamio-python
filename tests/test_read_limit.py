@@ -128,7 +128,10 @@ def test_the_room_left_by_one_channel_is_what_the_next_is_asked_for():
 
     first = runtime.read(limit=50)
 
-    assert len(first) == 50 and seqs(first)[30:] == list(range(1, 21))
+    # Each channel's share, in its own order: read gives the two together in the order they arrived (22 November 2026).
+    assert len(first) == 50
+    assert [entry["seq"] for entry in first if entry["channel"] == "inbox"] == list(range(1, 31))
+    assert [entry["seq"] for entry in first if entry["channel"] == "side"] == list(range(1, 21))
     assert runtime.channels["inbox"].after == 30 and runtime.channels["side"].after == 20
     assert seqs(runtime.read(limit=50)) == list(range(21, 31))
 
