@@ -24,7 +24,7 @@ aamio transport bind NAME bt --address bt:XX:XX:XX:XX:XX:XX
 aamio send NAME "over Bluetooth"
 ```
 
-aamio-bt needs aamio 0.7.0 or later, and 0.7.1 for addresses. From then on a
+aamio-bt needs aamio 0.7.1 or later, which pip brings with it. From then on a
 message to that partner goes over Bluetooth, and never over HTTPS instead. The
 partner binds your key the same way. Only the process that owns the home runs
 the transport: `aamio serve`, and `aamio send` or `aamio read --wait` while
