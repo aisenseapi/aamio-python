@@ -3371,6 +3371,13 @@ class Runtime:
                 return entry["w"], partner["key"]
         raise CodedLookupError("partner_offline", self._offline_said(partner, result.get("error")))
 
+    # A name a command line takes as one word in every shell: a letter first, so that neither an option nor a number is
+    # read into it, then letters, digits, dots, dashes and underscores. Any other name is given in a command as the
+    # partner's key, which is 43 characters of base64url: a partner's name may hold spaces, quotes and what a shell reads
+    # as its own, and "Ada Lovelace" was two words (the review of 23 November 2026). A key that begins with a dash is a
+    # key on the command line here and in the other two runtimes.
+    BARE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,63}")
+
     def _offline_said(self, partner, failed=None):
         """Why a partner was not found over the internet, and the way over a transport when one is enabled here and the
         partner is bound to none.
@@ -3391,9 +3398,10 @@ class Runtime:
         if not enabled or bound:
             return said
         said += ". %s is bound to no transport, so it was only looked up over the internet" % name
+        word, by = (name, "") if self.BARE_NAME.fullmatch(name) else (partner["key"], ", naming the partner by its key")
         if len(enabled) == 1:
-            return said + ". To reach %s over %s, which is enabled here: aamio transport bind %s %s" % (name, enabled[0], name, enabled[0])
-        return said + ". To reach %s over one of the transports enabled here, %s: aamio transport bind %s NAME" % (name, ", ".join(enabled), name)
+            return said + ". To reach %s over %s, which is enabled here%s: aamio transport bind %s %s" % (name, enabled[0], by, word, enabled[0])
+        return said + ". To reach %s over one of the transports enabled here, %s%s: aamio transport bind %s NAME" % (name, ", ".join(enabled), by, word)
 
     # ------------------------------------------------------------- send --
 

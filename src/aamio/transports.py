@@ -542,7 +542,11 @@ class Service:
 
     def _attention(self, name, state, text):
         """What a carrier has to tell the user once, in attention under the transport's name and the state it gives, added
-        to what waits there unread under the same state, and the log where there is no attention."""
+        to what waits there unread under the same state, and the log where there is no attention.
+
+        A text that waits there already leaves what waits as it is, and goes to the log. It replaced what waited, and what
+        another partner had said in it was gone unread: alice, then carol, then alice in another session left alice alone
+        (the review of 23 November 2026)."""
         runtime = self.runtime
         note = getattr(runtime, "_note_trouble", None)
         if note is None:
@@ -550,7 +554,10 @@ class Service:
             return
         with runtime.lock:
             earlier = (getattr(runtime, "attention", None) or {}).get((name, state))
-        note(name, state, text if earlier is None or text in earlier["what"] else "%s %s" % (earlier["what"], text))
+        if earlier is not None and text in earlier["what"]:
+            runtime.log("transport %s: %s" % (name, text))
+            return
+        note(name, state, text if earlier is None else "%s %s" % (earlier["what"], text))
 
     def _refresh(self):
         """Who each running carrier takes messages from, read again; a transport no partner is bound to any more is

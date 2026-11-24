@@ -14,6 +14,7 @@ from aamio import carry, carry_state
 from aamio.carrier import REFUSALS_KEPT, Carrier
 from aamio.carry_state import CarryState
 from aamio.crypto import Keys
+from aamio.runtime import Runtime
 
 A, B, C = Keys(bytes(range(32))), Keys(bytes(range(32, 64))), Keys(bytes(range(64, 96)))
 NOW = 1_794_700_000
@@ -144,3 +145,50 @@ def test_the_list_of_refusal_codes_keeps_only_the_newest():
 
     assert carrier.refused == ["frame_bad_length"] * REFUSALS_KEPT, "a long aamio serve kept every code for as long as it ran"
     assert len([line for line in lines if "before a sender was known" in line]) == 1
+
+
+def opened(sender, b):
+    """sender has asked b for a session, answered b's challenge, and b has taken the open: the session."""
+    known = [A.public_raw, C.public_raw]
+    session, ask = sender.ask(B.public_raw, PROFILE, 0.0)
+    _, challenge, _ = b.deliver(ask, known, PROFILE, 0.0, NOW)
+    _, opening, _ = sender.deliver(challenge, [B.public_raw], PROFILE, 0.0, NOW)
+    assert b.deliver(opening, known, PROFILE, 0.0, NOW)[0] == "accepted"
+    return session
+
+
+def test_a_refusal_said_again_keeps_what_another_partner_said_unread(tmp_path):
+    """alice, then carol, then alice in her other session: alice's text waited there already, and it replaced what waited,
+    so carol's was gone before anyone read it (the review of 23 November 2026). Through the coupling the transport
+    service gives its carriers, into the runtime's attention, where a read takes it once."""
+    a, c, b = CarryState(A), CarryState(C), CarryState(B)
+    first, second, carols = opened(a, b), opened(a, b), opened(c, b)
+    b.restart()
+    runtime = Runtime(home=str(tmp_path / "b"), host="http://127.0.0.1:9")
+    try:
+        runtime.partner_add("alice", A.public)
+        runtime.partner_add("carol", C.public)
+        service, medium, lines = runtime.transport_service(), Medium(), []
+        runtime.log = lines.append
+        carrier = Carrier(b, medium, PROFILE, [A.public_raw, C.public_raw], clock=Clock(), wall=lambda: NOW, log=lines.append,
+                          name_of=service._name_of, attention=lambda state, text: service._attention("stub", state, text))
+
+        hear(carrier, medium, a.send(B.public_raw, first, b"1", PROFILE))
+        hear(carrier, medium, c.send(B.public_raw, carols, b"2", PROFILE))
+        hear(carrier, medium, a.send(B.public_raw, second, b"3", PROFILE))
+
+        assert carrier.refused == ["carry_session_expired"] * 3
+        taken = runtime.attention_taken()
+        assert [(note["channel"], note["state"]) for note in taken] == [("stub", "session_expired")], taken
+        said = taken[0]["what"]
+        assert said.count("a message from alice") == 1 and said.count("a message from carol") == 1, said
+        assert lines[-1].startswith("transport stub: a message from alice") and "carol" not in lines[-1], "the third is in the log: %s" % lines
+        assert runtime.attention_taken() == [], "read once, and then gone"
+
+        third = opened(a, b)
+        b.restart()
+        hear(carrier, medium, a.send(B.public_raw, third, b"4", PROFILE))
+        again = runtime.attention_taken()
+        assert len(again) == 1 and "a message from alice" in again[0]["what"] and "carol" not in again[0]["what"], again
+    finally:
+        runtime.close()
