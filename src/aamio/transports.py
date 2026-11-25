@@ -58,6 +58,11 @@ CHALLENGE_WINDOW_SLOW = 300
 # How often a running carrier's list of whom it takes messages from is read again: a partner removed meanwhile, over MCP
 # or by another runtime on the same home, is taken from no longer than this after.
 KNOWN_REFRESH = 2.0
+# The loop that drives the transports waits for what they say outside its lock, at most LOOP_WAIT between two rounds,
+# and lets go of the lock for at least LOOP_YIELD between two. It waited for their lines under the lock and took the lock
+# again at once, so a send on a slow machine waited three to four minutes in start (finding 8 of the field report of
+# 25 November 2026).
+LOOP_WAIT, LOOP_YIELD = 0.02, 0.002
 # How often a file under transports/ is tried again while another program holds it, as an indexer or a sync client
 # does on Windows for a moment, and how long between: a replace that met a reader is not a file that cannot be written.
 # Within this process readers and writers take turns under a lock of the folder's own, so they never meet.
@@ -391,6 +396,8 @@ class Service:
         self.running = {}     # transport name -> {"manifest", "process", "carrier", "crashes", "next", "down"}
         self.thread = None
         self.stopping = threading.Event()
+        # Set when a transport says something, or a send has something for one: the loop waits on it outside the lock.
+        self.wake = threading.Event()
         self.stopped = False   # stop has been called: the service stops once, with its owner
         # A start of a moment under way, by transport name: {"done": Event, "result": (here, how)}. One at a time per
         # transport, never beside its ordinary start, and none after the stop (a review of 20 November 2026).
@@ -752,7 +759,7 @@ class Service:
             manifest = entry["manifest"]
             folder = working_folder(self.runtime.home, name)
             process = TransportProcess(name, manifest.__version__, process_command(manifest.start_module), folder,
-                                       environment_for(manifest, folder, base=self.environ), log=self.runtime.log)
+                                       environment_for(manifest, folder, base=self.environ), log=self.runtime.log, wake=self.wake)
             try:
                 process.start(CORE_VERSION, "python", folder)
                 entry["carrier"] = Carrier(self.carry(), process, self.profile_for, self.known_for(name), log=self.runtime.log,
@@ -788,12 +795,13 @@ class Service:
         self.runtime.log("transport %s: down: %s, started again in %d seconds" % (name, error, RESTART_AFTER[len(entry["crashes"]) - 1]))
 
     def pump(self, timeout=0.02):
-        """One round: every carrier pumped, transports that are due started again, and what came in offered."""
+        """One round: every carrier pumped, transports that are due started again, and what came in offered. Whether a
+        carrier runs after it, as read under the lock."""
         with self.lock:
             if self.stopped:
                 # The loop's thread may have waited for the lock while stop held it: no round after the stop, which
                 # could add a transport and start it with nobody left to stop it.
-                return
+                return False
             now = time.monotonic()
             if now - self.known_at >= KNOWN_REFRESH:
                 self.known_at = now
@@ -808,18 +816,28 @@ class Service:
             self._start_due()
             if self.offer is not None:
                 self._offer()
+            return any(entry["carrier"] is not None for entry in self.running.values())
 
     def _loop(self):
         while not self.stopping.is_set():
             try:
-                self.pump()
+                # Nothing is waited for under the lock: what a transport said is taken as it is.
+                carrying = self.pump(timeout=0.0)
             except Exception as error:
                 # The state closed after a write that failed, or something else no carrier caught: said, and tried again.
                 self.runtime.log("transports: %s: %s" % (error.__class__.__name__, error))
                 self.stopping.wait(1.0)
                 continue
-            if not any(entry["carrier"] is not None for entry in self.running.values()):
+            if not carrying:
                 self.stopping.wait(0.2)
+                continue
+            # Outside the lock: a moment in which a send or a read can take it, then until a transport says something or a
+            # round is due. Under the lock, with the lock taken again at once, a send on a machine with four slow cores
+            # waited three to four minutes in start while this loop went round (finding 8 of the field report of
+            # 25 November 2026). The wake is cleared before the round that takes what woke it.
+            time.sleep(LOOP_YIELD)
+            self.wake.wait(LOOP_WAIT)
+            self.wake.clear()
 
     def stop(self):
         # From here on nothing is added or started: a start that waited for the lock finds the service stopped.
@@ -941,6 +959,8 @@ class Service:
                 # beside it only adds frames, and on a half-duplex medium they take each other's turns.
                 if not carrier.asking(pk):
                     carrier.open(pk)
+                    # The loop gives the ask to the transport now, not at its next round.
+                    self.wake.set()
                 asked["carrier"] = carrier
             return False
 
@@ -955,6 +975,7 @@ class Service:
                 key = carrier.send(pk, self._session(carrier, pk), content)
             except CarryRefused as refused:
                 raise CodedValueError(refused.code, "%s. Nothing was sent." % refused) from None
+            self.wake.set()
             # What went, as the outbox keeps it: the envelope, and its sha256.
             written = self.carry().durable["outbox"][key]
             envelope = bytes.fromhex(written["envelope"])

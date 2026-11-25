@@ -329,7 +329,12 @@ class Carrier:
             self._control(reply, source, "open", pair, self._window_tries(got.sender), window - self._airtime(ANSWER_BYTES))
             return
         if got.kind == carry.OPEN:
-            self._settled(pair, "challenge")
+            # A session the partner asked for is open: every challenge to it ends, the one this answers and any made since,
+            # as a challenge ends every ask (above). A device that asked twice, the first answer being slow, opened its
+            # session with the first challenge, and the second went again every two seconds through the whole window of
+            # 480 seconds, taking the turns of receipts and answers on a slow line (finding 10 of the field report of
+            # 25 November 2026). A copy of an open never comes this far: it is refused as carry_nonce_used.
+            self._opened(got.sender)
             return
         if got.kind == carry.RECEIPT:
             self.messages.pop(carry_state.mark(got.sender, got.content[1:9], int.from_bytes(got.content[9:13], "big")), None)
@@ -342,8 +347,10 @@ class Carrier:
             self._control(reply, source, "challenge", pair, self._window_tries(got.sender), window - self._airtime(ANSWER_BYTES))
             return
         # A message: its receipt goes back. A bound one may have opened its session itself, its open lost (A6.2 point 6),
-        # so the challenge is not sent again either.
-        self._settled(pair, "challenge")
+        # and then no challenge to the partner goes again, as after an open. One in a session that was open before ends
+        # nothing: a challenge asked for since may still be needed.
+        if self._pending(pair, "challenge"):
+            self._opened(got.sender)
         if reply is not None:
             self._queue(reply, source)
         if result == "accepted" and got.kind == carry.MESSAGE:
@@ -404,6 +411,15 @@ class Carrier:
     def _settled(self, pair, kind):
         for key, entry in list(self.control.items()):
             if entry["pair"] == pair and entry["kind"] == kind:
+                del self.control[key]
+
+    def _pending(self, pair, kind):
+        return any(entry["pair"] == pair and entry["kind"] == kind for entry in self.control.values())
+
+    def _opened(self, partner_pk):
+        """The partner has opened a session it asked for: no challenge to it goes again, for that session or another."""
+        for key, entry in list(self.control.items()):
+            if entry["pair"][0] == partner_pk and entry["kind"] == "challenge":
                 del self.control[key]
 
     def _resend(self):

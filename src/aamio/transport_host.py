@@ -151,13 +151,15 @@ def check_properties(properties):
 class TransportProcess:
     """One running transport: start it, give it frames within its room, and read what it says."""
 
-    def __init__(self, name, version, command, cwd, env, clock=time.monotonic, log=None):
+    def __init__(self, name, version, command, cwd, env, clock=time.monotonic, log=None, wake=None):
         self.name, self.version = name, version
         self.command, self.cwd, self.env = command, cwd, env
         self.clock = clock
         self.log = log or (lambda line: None)
         self.process = None
         self.lines = queue.Queue()
+        # Set whenever a line is kept for the next poll: the owner's loop waits on it outside its lock (see Service._loop).
+        self.wake = wake
         self.early = []           # what the transport said before start returned, for the first poll after it
         self.said = 0             # lines taken from the transport in all
         self.last_words = collections.deque(maxlen=3)   # the last lines it wrote on standard error
@@ -239,18 +241,24 @@ class TransportProcess:
                 # The stream was closed by stop: the process is gone as far as this host is concerned.
                 chunk = b""
             if not chunk:
-                self.lines.put(("closed", None))
+                self._put(("closed", None))
                 return
             pending += chunk
             while b"\n" in pending:
                 line, pending = pending.split(b"\n", 1)
                 if len(line) > LINE_LIMIT:
-                    self.lines.put(("too_long", None))
+                    self._put(("too_long", None))
                     return
-                self.lines.put(("line", line))
+                self._put(("line", line))
             if len(pending) > LINE_LIMIT:
-                self.lines.put(("too_long", None))
+                self._put(("too_long", None))
                 return
+
+    def _put(self, item):
+        """What the transport said, kept for the next poll, with the owner's loop woken for it."""
+        self.lines.put(item)
+        if self.wake is not None:
+            self.wake.set()
 
     def _read_stderr(self):
         window_start, taken, dropped = self.clock(), 0, 0

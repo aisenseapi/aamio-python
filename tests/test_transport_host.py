@@ -843,3 +843,39 @@ def test_a_bound_message_whose_open_was_lost_opens_its_session_and_the_challenge
     assert [content for _pk, _session, _counter, content, _key in carrier.inbox] == [b"hei uten open"]
     assert carrier.control == {}, "the challenge is not sent again: the message opened the session"
 
+
+# ------------------------------------------------------------------ the field report of 25 November 2026
+
+@pytest.mark.parametrize("opening", ["open", "bound message"])
+def test_an_open_ends_every_challenge_to_that_partner_and_none_goes_again(opening):
+    """Finding 10: a device asked twice, the first answer being slow, and got two challenges. It opened its session with
+    the first, and the second went again about every 2 seconds through the whole challenge window of 480 seconds, taking
+    the turns of receipts and answers on a slow line. An open ends every challenge to the partner, as a challenge ends
+    every ask to it, and so does a bound message whose open was lost."""
+    clock, profile = Clock(), carry_state.profile(mode="sealed")
+    at_a = CarryState(A)
+    medium = Medium(room=1000, frame=128)
+    carrier = Carrier(CarryState(B), medium, profile, [A.public_raw], clock=clock, wall=lambda: NOW)
+    first, ask = at_a.ask(B.public_raw, profile, 0.0)
+    medium.events = [("received", None, frame) for frame in carry.split(ask, 128)]
+    carrier.pump()
+    first_challenge = carry.reassemble(medium.given)
+    given = len(medium.given)
+    clock.now += 1.0
+    _second, asked_again = at_a.ask(B.public_raw, profile, 1.0)
+    medium.events = [("received", None, frame) for frame in carry.split(asked_again, 128)]
+    carrier.pump()
+    assert [entry["kind"] for entry in carrier.control.values()] == ["challenge", "challenge"]
+    assert len(medium.given) > given, "the second ask has a challenge of its own"
+    _, opens, _ = at_a.deliver(first_challenge, [B.public_raw], profile, 1.5, NOW)
+    if opening == "bound message":
+        opens = at_a.send(B.public_raw, first, b"hei", profile)
+    medium.events = [("received", None, frame) for frame in carry.split(opens, 128)]
+    carrier.pump()
+    assert carrier.control == {}, "the session is open: neither challenge goes again"
+    given = len(medium.given)
+    for _ in range(10):
+        clock.now += 2.1
+        carrier.pump()
+    assert len(medium.given) == given, "and nothing goes out again in the twenty seconds after"
+
