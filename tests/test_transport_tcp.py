@@ -5,9 +5,11 @@ core speaks to them. Readable and sealed, a message goes each way with its recei
 core learns where each is reached. Around that, what the transport promises: the listener answers keepalives, a
 connection that goes silent is closed and the side that connected comes back on the same name, a new connection takes a
 name over, a name not allowed is refused, the limits close what breaks them, TLS with a pin and without one, a proxy
-with CONNECT that never hears its password said, settings it cannot start with, and the name kept in its own folder.
+with CONNECT that never hears its password said, settings it cannot start with, the name kept in its own folder, and a
+stop that leaves no task pending.
 """
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -742,3 +744,157 @@ def test_the_name_is_made_once_and_kept_in_its_own_folder(tmp_path):
         assert re.fullmatch(r"[a-z0-9]{16}", kept) and names == ["tcp:@" + kept] * 2
     finally:
         p.stop()
+
+
+# ---------------------------------------------------------------- stopping
+
+
+def stopped(folder, before_stop, **settings):
+    """The transport started and stopped as the core does it, with before_stop(said) run in between, said being the lines
+    of standard error so far, and everything it said once its process has ended, so a line written as Python shuts down
+    is not missed."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("AAMIO_")}
+    env.update({"AAMIO_TCP_" + key.upper(): value for key, value in settings.items()}, PYTHONPATH=str(TCP))
+    folder.mkdir(parents=True, exist_ok=True)
+    process = subprocess.Popen([sys.executable, "-u", "-m", "aamio_tcp.transport"], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True, encoding="utf-8")
+    said = []
+
+    def read(stream, into):
+        for line in iter(stream.readline, ""):
+            into.append(line)
+
+    readers = [threading.Thread(target=read, args=(process.stderr, said), daemon=True),
+               threading.Thread(target=read, args=(process.stdout, []), daemon=True)]
+    for reader in readers:
+        reader.start()
+    hello = {"t": "hello", "aamio_addon": 3, "aamio": {"version": "0.0.0-test", "runtime": "python"}, "state_dir": str(folder)}
+    try:
+        process.stdin.write(json.dumps(hello) + "\n")
+        process.stdin.flush()
+        before_stop(said)
+        process.stdin.write('{"t":"stop"}\n')
+        process.stdin.flush()
+        process.stdin.close()
+        process.wait(timeout=15)
+        for reader in readers:
+            reader.join(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    return process.returncode, "".join(said)
+
+
+# Found between two machines over the internet on 26 November 2026: at every stop, Python said on standard error that a
+# task was destroyed while it was pending, a wait to connect again on the side that connects, and on the side that
+# listens a connection in, whose TLS waited for the other side to answer the close. The core logged it. Nothing was lost,
+# but a stop has to end what it started.
+def test_a_stop_while_it_waits_to_connect_again_leaves_no_task_pending(tmp_path):
+    def waiting(said):
+        until = time.monotonic() + 15
+        while not any("could not be reached" in line for line in said):
+            assert time.monotonic() < until, said
+            time.sleep(0.05)
+        time.sleep(0.3)  # into the wait before it tries again
+
+    code, said = stopped(tmp_path, waiting, peers="tcp:127.0.0.1:%d" % free_port(), name="stoppingside1")
+    assert code == 0, said
+    assert "Task was destroyed" not in said and "Traceback" not in said, said
+
+
+@pytest.mark.parametrize("tls", [False, True], ids=["plain", "tls"])
+def test_a_stop_with_a_connection_in_leaves_no_task_pending(tmp_path, tls):
+    port, held, settings, context = free_port(), [], {}, None
+    if tls:
+        cert, key, _ = certificate(tmp_path / "cert")
+        settings = {"cert": str(cert), "key": str(key)}
+        context = ssl.create_default_context(cafile=str(cert))
+
+    def connected(said):
+        until = time.monotonic() + 10
+        while True:
+            try:
+                sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+                break
+            except OSError:
+                assert time.monotonic() < until, said
+                time.sleep(0.1)
+        if context is not None:
+            sock = context.wrap_socket(sock, server_hostname="127.0.0.1")
+        held.append(sock)
+        sock.sendall(b"AAMIO-TCP/1 @incomingside1\n")
+        assert greeted(sock), said
+
+    try:
+        code, said = stopped(tmp_path / "p", connected, listen="127.0.0.1:%d" % port, **settings)
+    finally:
+        for sock in held:
+            sock.close()
+    assert code == 0, said
+    assert "Task was destroyed" not in said and "Traceback" not in said, said
+
+
+def stopped_in_process(side, seconds=5):
+    """Stop a transport made in this process the way a stop line does, wait until its loop has ended, and give back the
+    tasks the loop still holds. Whether Python then says a pending one was destroyed depends on what it collects as it
+    shuts down; a task left on the loop is the cause, and is there every time."""
+    side.stopping = True
+    done = threading.Event()
+    asyncio.run_coroutine_threadsafe(side._shutdown(done), side.loop)
+    done.wait(2.0)
+    until = time.monotonic() + seconds
+    while side.loop.is_running():
+        assert time.monotonic() < until, "the loop did not end"
+        time.sleep(0.05)
+    return [task for task in asyncio.all_tasks(side.loop) if not task.done()]
+
+
+@pytest.mark.parametrize("case", ["waiting to connect again", "a tls connection in", "a tls connection out"])
+def test_a_stop_ends_every_task_of_its_loop(tmp_path, case):
+    sys.path.insert(0, str(TCP))
+    made, held = [], []
+    try:
+        from aamio_tcp import transport as tcp_transport
+
+        def side(folder, **settings):
+            made_side = tcp_transport.Tcp({"AAMIO_TCP_" + key.upper(): value for key, value in settings.items()})
+            folder.mkdir(parents=True, exist_ok=True)
+            made_side.start(str(folder))
+            made.append(made_side)
+            return made_side
+
+        def until(condition, seconds=15):
+            deadline = time.monotonic() + seconds
+            while not condition():
+                assert time.monotonic() < deadline, case
+                time.sleep(0.05)
+
+        if case == "waiting to connect again":
+            stopping = side(tmp_path / "f", peers="tcp:127.0.0.1:%d" % free_port(), name="stoppingside1")
+            time.sleep(1.5)
+        else:
+            cert, key, pin = certificate(tmp_path / "cert")
+            port = free_port()
+            listener = side(tmp_path / "p", listen="127.0.0.1:%d" % port, cert=str(cert), key=str(key))
+            until(lambda: listener.listening)
+            if case == "a tls connection in":
+                sock = ssl.create_default_context(cafile=str(cert)).wrap_socket(
+                    socket.create_connection(("127.0.0.1", port), timeout=5), server_hostname="127.0.0.1")
+                held.append(sock)
+                sock.sendall(b"AAMIO-TCP/1 @incomingside1\n")
+                assert greeted(sock)
+                until(lambda: "incomingside1" in listener.named)
+                stopping = listener
+            else:
+                stopping = side(tmp_path / "f", peers="tcp:127.0.0.1:%d" % port, tls="1", pin=pin, name="outgoingside1")
+                until(lambda: any(link.conn is not None for link in stopping.links.values()))
+        left = stopped_in_process(stopping)
+        made.remove(stopping)
+        assert left == [], [task.get_coro() for task in left]
+    finally:
+        for sock in held:
+            sock.close()
+        for other in made:
+            stopped_in_process(other)
+        sys.path.remove(str(TCP))

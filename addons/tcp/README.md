@@ -166,5 +166,11 @@ other on 127.0.0.1, spoken to as the core speaks to them, and a message each
 way through the core's carrier, readable and sealed, with its receipt. It also
 tries a relay that stops passing bytes without closing anything, a name taken
 over, a name not allowed, the limits, TLS with a pin, a wrong pin and no pin
-against a certificate of the test's own, an HTTP proxy with `CONNECT`, and the
-settings. Between two machines over the internet it is not tried yet.
+against a certificate of the test's own, an HTTP proxy with `CONNECT`, the
+settings, and a stop that leaves no task of its own behind.
+
+On 26 November 2026 it was tried between two machines over the internet: a
+Windows machine behind NAT connected out to an Ubuntu 18.04 machine with a
+public address, with TLS and a pin, and a message went each way with its
+receipt, one of them 19,800 characters in several frames. A proxy is tried on
+127.0.0.1 only.

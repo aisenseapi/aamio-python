@@ -34,3 +34,7 @@ for somebody using it.
 - Connecting through a proxy has one deadline for the connection, the request
   and the whole answer, so a proxy that answers a byte at a time cannot hold
   the transport past it.
+- A stop ends every connection and every task the transport started, so
+  Python says nothing on standard error of a task left pending. The test
+  between two machines over the internet on 26 November 2026 found it saying
+  so at every stop.
