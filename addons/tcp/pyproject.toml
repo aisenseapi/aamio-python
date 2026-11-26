@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# A transport under contract 3: aamio over TCP between a side that listens and a side that connects out, also from
+# behind NAT, a firewall or an HTTP proxy. A distribution of its own: `pip install aamio-tcp` brings it, and
+# `pip install aamio` alone does not. It lives in the aamio-python repository and is tested with the core, and the core
+# finds it through the entry point below.
+name = "aamio-tcp"
+dynamic = ["version"]
+description = "aamio over TCP: a transport under contract 3 between a side that listens and a side that connects out to it, also from behind NAT, a firewall or an HTTP proxy, with TLS checked against a pin or the system's roots."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "AI SENSE AS" }]
+# The first core that says where a transport is reached, so aamio transport here tcp has an address to give and a card
+# can carry it. The transport itself needs nothing but the standard library.
+dependencies = ["aamio>=0.7.1"]
+keywords = ["aamio", "agents", "transport", "tcp", "nat", "firewall"]
+
+[project.urls]
+Homepage = "https://aamio.at/docs/addons"
+Source = "https://github.com/aisenseapi/aamio-python/tree/main/addons/tcp"
+Changelog = "https://github.com/aisenseapi/aamio-python/blob/main/addons/tcp/CHANGELOG.md"
+Issues = "https://github.com/aisenseapi/aamio-python/issues"
+
+[project.entry-points."aamio.addons"]
+tcp = "aamio_tcp"
+
+[tool.setuptools.dynamic]
+version = { attr = "aamio_tcp.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+aamio_tcp = ["aamio-addon.json"]
