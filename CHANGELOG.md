@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## 0.7.2 - 2026-11-26
+## 0.7.2 - 2026-11-27
 
 - `aamio board answer` has help of its own and says where the answer goes. Before stopping another aamio that holds
   the home, it asks for a home of one's own, and the text for a home in use says that a new home is a separate
