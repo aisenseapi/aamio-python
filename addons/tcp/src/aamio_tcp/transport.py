@@ -145,14 +145,23 @@ def address_of(host, port):
 
 
 def names_of(text, what):
+    """The names in a setting, comma separated, each with or without @; none when it is left out or empty.
+
+    An entry that is no name stops the transport with SettingError, also an empty one between commas. Left out with a
+    note, as until the review of 26 November 2026, a list whose every entry had a typo became no list, and no list
+    lets every name in. The entry is said by its place, not its text: a name is how a side is let in.
+    """
+    if text is None or not text.strip():
+        return []
     found = []
-    for part in (text or "").split(","):
-        part = part.strip().lstrip("@")
-        if not part:
-            continue
+    for place, token in enumerate(text.split(","), 1):
+        part = token.strip()
+        if part.startswith("@"):
+            part = part[1:]
         if NAME_RE.fullmatch(part) is None:
-            note("%r in %s is no name of 8 to 32 of a-z and 0-9, and is left out" % (part, what))
-        elif part not in found:
+            raise SettingError("entry %d of %s is no name of 8 to 32 of a-z and 0-9: %s is names, comma separated, "
+                               "or left out" % (place, what, what))
+        if part not in found:
             found.append(part)
     return found
 
@@ -179,17 +188,51 @@ class Proxy:
         return "the proxy %s:%d" % (self.host, self.port)
 
 
+def left_of(deadline, proxy):
+    """Seconds left before the deadline, or TimeoutError once there are none."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("%s did not answer CONNECT in time" % proxy)
+    return left
+
+
+def connect_within(proxy, deadline):
+    """A connection to the proxy, its addresses tried in turn, all of them within the one deadline."""
+    error = OSError("%s has no address" % proxy)
+    for family, kind, protocol, _, address in socket.getaddrinfo(proxy.host, proxy.port, type=socket.SOCK_STREAM):
+        left = left_of(deadline, proxy)
+        sock = socket.socket(family, kind, protocol)
+        try:
+            sock.settimeout(left)
+            sock.connect(address)
+            return sock
+        except OSError as caught:
+            sock.close()
+            error = caught
+    raise error
+
+
 def tunnel(proxy, host, port, seconds):
-    """A socket to host:port through the proxy, after its 200 to CONNECT, or OSError. Runs outside the event loop."""
-    sock = socket.create_connection((proxy.host, proxy.port), timeout=seconds)
+    """A socket to host:port through the proxy, after its 200 to CONNECT, or OSError, within seconds in all.
+
+    Runs on a thread outside the event loop, which nothing cancels: the caller that stops waiting leaves it running. A
+    timeout on the socket counts each call on its own, so a proxy that sent a byte now and then kept it going as long as
+    it liked, and every attempt to connect again took another thread (T2 of the review of 26 November 2026). One
+    deadline now holds for the connection, the request and every read of the answer. Looking up the proxy's name is
+    the system's, and outside it.
+    """
+    deadline = time.monotonic() + seconds
+    sock = connect_within(proxy, deadline)
     try:
         target = "%s:%d" % ("[%s]" % host if ":" in host else host, port)
         request = "CONNECT %s HTTP/1.1\r\nHost: %s\r\n" % (target, target)
         if proxy.auth is not None:
             request += "Proxy-Authorization: Basic %s\r\n" % proxy.auth
+        sock.settimeout(left_of(deadline, proxy))
         sock.sendall((request + "\r\n").encode("ascii"))
         answer = b""
         while b"\r\n\r\n" not in answer:
+            sock.settimeout(left_of(deadline, proxy))
             chunk = sock.recv(1024)
             if not chunk:
                 raise OSError("%s closed the connection before it answered CONNECT" % proxy)

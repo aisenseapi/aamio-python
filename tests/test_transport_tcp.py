@@ -499,7 +499,7 @@ def test_a_new_connection_with_a_name_in_use_takes_it_and_the_old_one_is_closed(
 
 def test_a_name_the_listener_does_not_allow_is_closed_without_a_greeting(tmp_path):
     port = free_port()
-    p = started(tmp_path / "p", listen="127.0.0.1:%d" % port, allow="@allowedname1, Not-A-Name")
+    p = started(tmp_path / "p", listen="127.0.0.1:%d" % port, allow="@allowedname1, secondname01")
     try:
         with raw(port, "othername001") as sock:
             assert not greeted(sock)
@@ -623,6 +623,12 @@ def test_a_side_behind_an_http_proxy_connects_with_connect_and_its_password_is_n
     ({"AAMIO_TCP_PROXY": "http://user:s3cret@127.0.0.1:99999"}, "not from 1 to 65535"),
     ({"AAMIO_TCP_NAME": "Short"}, "AAMIO_TCP_NAME is 8 to 32"),
     ({"AAMIO_TCP_KEEPALIVE": "0"}, "AAMIO_TCP_KEEPALIVE is a whole number"),
+    # A list of names that lost them all to typos let every name in, where it was meant to let few (T1 of the review of
+    # 26 November 2026). Now any entry that is no name stops it, also an empty one.
+    ({"AAMIO_TCP_ALLOW": "AllowedName1"}, "entry 1 of AAMIO_TCP_ALLOW is no name"),
+    ({"AAMIO_TCP_ALLOW": "@allowedname1, Not-A-Name"}, "entry 2 of AAMIO_TCP_ALLOW is no name"),
+    ({"AAMIO_TCP_ALLOW": ",,"}, "entry 1 of AAMIO_TCP_ALLOW is no name"),
+    ({"AAMIO_TCP_ALLOW": "allowedname1,"}, "entry 2 of AAMIO_TCP_ALLOW is no name"),
 ])
 def test_a_setting_it_cannot_start_with_ends_it_with_1_and_says_which(tmp_path, settings, said):
     env = {key: value for key, value in os.environ.items() if not key.startswith("AAMIO_TCP_")}
@@ -635,13 +641,12 @@ def test_a_setting_it_cannot_start_with_ends_it_with_1_and_says_which(tmp_path, 
 
 def test_entries_it_cannot_read_are_said_and_left_out_and_it_starts(tmp_path):
     env = {key: value for key, value in os.environ.items() if not key.startswith("AAMIO_TCP_")}
-    env.update(PYTHONPATH=str(TCP), AAMIO_TCP_PEERS="nope, tcp:127.0.0.1:0, tcp:127.0.0.1:7443", AAMIO_TCP_HERE="lan:1.2.3.4:5",
-               AAMIO_TCP_ALLOW="@UPPER, fine000001")
+    env.update(PYTHONPATH=str(TCP), AAMIO_TCP_PEERS="nope, tcp:127.0.0.1:0, tcp:127.0.0.1:7443", AAMIO_TCP_HERE="lan:1.2.3.4:5")
     result = subprocess.run([sys.executable, "-m", "aamio_tcp.transport"], input="", env=env, capture_output=True,
                             text=True, timeout=30, cwd=str(tmp_path))
     assert result.returncode == 0, result.stderr
     assert "'nope' in AAMIO_TCP_PEERS" in result.stderr and "'tcp:127.0.0.1:0' in AAMIO_TCP_PEERS" in result.stderr
-    assert "'lan:1.2.3.4:5' in AAMIO_TCP_HERE" in result.stderr and "'UPPER' in AAMIO_TCP_ALLOW" in result.stderr
+    assert "'lan:1.2.3.4:5' in AAMIO_TCP_HERE" in result.stderr
     sys.path.insert(0, str(TCP))
     try:
         from aamio_tcp import transport as tcp_transport
@@ -649,6 +654,73 @@ def test_entries_it_cannot_read_are_said_and_left_out_and_it_starts(tmp_path):
         assert tcp_transport.endpoint_of("tcp:[2001:DB8::5]:7443") == ("2001:db8::5", 7443)
         assert tcp_transport.address_of("2001:db8::5", 7443) == "tcp:[2001:db8::5]:7443"
     finally:
+        sys.path.remove(str(TCP))
+
+
+def test_names_are_none_when_left_out_and_an_entry_that_is_no_name_is_said_by_its_place_not_its_text():
+    sys.path.insert(0, str(TCP))
+    try:
+        from aamio_tcp import transport as tcp_transport
+        for left_out in (None, "", "   "):
+            assert tcp_transport.names_of(left_out, "AAMIO_TCP_ALLOW") == []
+        assert tcp_transport.names_of("@allowedname1, allowedname1 ,secondname01", "AAMIO_TCP_ALLOW") == ["allowedname1", "secondname01"]
+        for wrong in ("TypoName0001", "allowedname1,@@allowedname2", "allowedname1, , secondname01"):
+            with pytest.raises(tcp_transport.SettingError) as said:
+                tcp_transport.names_of(wrong, "AAMIO_TCP_ALLOW")
+            assert "TypoName0001" not in str(said.value) and "@@" not in str(said.value)
+    finally:
+        sys.path.remove(str(TCP))
+
+
+class DripProxy:
+    """A proxy that takes CONNECT and then answers a byte at a time, never ending its headers, until it is closed."""
+
+    def __init__(self, every):
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.bind(("127.0.0.1", 0))
+        self.server.listen(1)
+        self.port, self.every = self.server.getsockname()[1], every
+        self.closed = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        try:
+            conn, _ = self.server.accept()
+        except OSError:
+            return
+        with conn:
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = conn.recv(1024)
+                if not chunk:
+                    return
+                head += chunk
+            try:
+                while True:
+                    conn.sendall(b"H")
+                    time.sleep(self.every)
+            except OSError:
+                self.closed.set()
+
+    def close(self):
+        self.server.close()
+
+
+def test_a_proxy_that_answers_a_byte_at_a_time_is_given_up_at_the_deadline_and_its_connection_closed():
+    # T2 of the review of 26 November 2026: with a timeout on each read, a byte every 40 ms kept the thread for as long
+    # as the proxy liked, here five minutes until the 8 KB limit, long after the caller had stopped waiting.
+    sys.path.insert(0, str(TCP))
+    drip = DripProxy(0.04)
+    try:
+        from aamio_tcp import transport as tcp_transport
+        began = time.monotonic()
+        with pytest.raises(TimeoutError):
+            tcp_transport.tunnel(tcp_transport.Proxy("http://127.0.0.1:%d" % drip.port), "127.0.0.1", 9, 0.3)
+        took = time.monotonic() - began
+        assert took < 1.5, took
+        assert drip.closed.wait(5), "the connection to the proxy was left open"
+    finally:
+        drip.close()
         sys.path.remove(str(TCP))
 
 

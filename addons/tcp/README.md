@@ -80,7 +80,10 @@ is the pin doing its work.
 standard error, which the core logs. The core passes `HTTPS_PROXY` to every
 transport, but aamio-tcp uses only `AAMIO_TCP_PROXY`, so no frame goes through
 a proxy nobody chose for it. Many proxies only connect to port 443: then the
-listener listens on 443, with TLS.
+listener listens on 443, with TLS. Connecting through the proxy has 10
+seconds in all, for the connection, the request and the whole answer, so a
+proxy that answers a byte at a time is given up on like one that does not
+answer.
 
 ## Settings
 
@@ -101,8 +104,11 @@ The manifest declares these variables, and the core passes them on:
 
 A setting the transport cannot start with, as a port out of range or a pin
 that is not 64 hex digits, ends it with a line on standard error that names
-the variable. An entry in `AAMIO_TCP_PEERS`, `AAMIO_TCP_HERE` or
-`AAMIO_TCP_ALLOW` that cannot be read is said and left out.
+the variable. An entry in `AAMIO_TCP_PEERS` or `AAMIO_TCP_HERE` that cannot
+be read is said and left out. In `AAMIO_TCP_ALLOW` an entry that is no name
+ends the transport instead, also an empty one between commas, and the line
+says its place in the list but not its text: a list that lost its every name
+to typos would let every name in.
 
 ## On the wire
 

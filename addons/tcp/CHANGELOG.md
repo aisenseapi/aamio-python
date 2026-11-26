@@ -29,3 +29,8 @@ for somebody using it.
 - The manifest lists every variable the transport reads, and
   `network_internet` as its permission.
 - A proxy's password is never said on standard error.
+- An entry in `AAMIO_TCP_ALLOW` that is no name ends the transport, with the
+  entry's place in the list, so a list with typos never lets every name in.
+- Connecting through a proxy has one deadline for the connection, the request
+  and the whole answer, so a proxy that answers a byte at a time cannot hold
+  the transport past it.
