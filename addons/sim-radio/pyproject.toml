@@ -3,19 +3,29 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# A transport under contract 3 for tests: a simulated radio over UDP on
-# 127.0.0.1. It lives in the aamio-python repository and is tested with the
-# core. It is not published; it is what the tests and the cross-runtime
-# exchange run over.
+# A transport under contract 3 for trying things where nothing is certain: a simulated radio over UDP on 127.0.0.1. A
+# distribution of its own: `pip install aamio-sim-radio` brings it, and `pip install aamio` alone does not. It lives in
+# the aamio-python repository, where the tests and the exchange between the runtimes run over it, and the core finds it
+# through the entry point below.
 name = "aamio-sim-radio"
 dynamic = ["version"]
-description = "A simulated radio for aamio: a transport under contract 3 over UDP on 127.0.0.1, with small frames, a slow rate, and frames that are lost, doubled or put out of order. For tests; nothing leaves this machine."
+description = "A simulated radio for aamio: a transport under contract 3 over UDP on 127.0.0.1, with small frames, a slow rate, and frames that are lost, doubled or put out of order. Nothing leaves this machine."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "AI SENSE AS" }]
-dependencies = []
-keywords = ["aamio", "agents", "transport", "test"]
+# The first core that knows contract 3. The transport itself needs nothing but the standard library, and is unchanged
+# since 0.7.0.
+dependencies = ["aamio>=0.7.0"]
+keywords = ["aamio", "agents", "transport", "radio", "simulation", "test"]
+
+# The links name the tag of this version: the add-on is released from 0.7.1 with only addons/sim-radio changed, and
+# reaches GitHub's main with the next release of the core.
+[project.urls]
+Homepage = "https://aamio.at/docs/addons"
+Source = "https://github.com/aisenseapi/aamio-python/tree/aamio-sim-radio-v0.1.0/addons/sim-radio"
+Changelog = "https://github.com/aisenseapi/aamio-python/blob/aamio-sim-radio-v0.1.0/addons/sim-radio/CHANGELOG.md"
+Issues = "https://github.com/aisenseapi/aamio-python/issues"
 
 [project.entry-points."aamio.addons"]
 sim-radio = "aamio_sim_radio"
