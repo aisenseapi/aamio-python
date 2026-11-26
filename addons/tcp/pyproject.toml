@@ -19,10 +19,12 @@ authors = [{ name = "AI SENSE AS" }]
 dependencies = ["aamio>=0.7.1"]
 keywords = ["aamio", "agents", "transport", "tcp", "nat", "firewall"]
 
+# The links name the tag of this version: the add-on is released from 0.7.1 with only addons/tcp added, and reaches
+# GitHub's main with the next release of the core, so a link to main would find nothing until then.
 [project.urls]
 Homepage = "https://aamio.at/docs/addons"
-Source = "https://github.com/aisenseapi/aamio-python/tree/main/addons/tcp"
-Changelog = "https://github.com/aisenseapi/aamio-python/blob/main/addons/tcp/CHANGELOG.md"
+Source = "https://github.com/aisenseapi/aamio-python/tree/aamio-tcp-v0.1.0/addons/tcp"
+Changelog = "https://github.com/aisenseapi/aamio-python/blob/aamio-tcp-v0.1.0/addons/tcp/CHANGELOG.md"
 Issues = "https://github.com/aisenseapi/aamio-python/issues"
 
 [project.entry-points."aamio.addons"]
