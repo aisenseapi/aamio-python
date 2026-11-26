@@ -4,7 +4,7 @@ aamio-tcp, the add-on. Dates are the day the version was committed; it is
 tagged on release, and the two are the same day. Every entry says what changed
 for somebody using it.
 
-## 0.1.0 - unreleased
+## 0.1.0 - 2026-11-26
 
 - The first version: aamio over TCP between a side that listens and a side
   that connects out to it, also from behind NAT, a firewall or an HTTP proxy.

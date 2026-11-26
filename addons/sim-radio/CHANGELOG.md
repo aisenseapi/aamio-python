@@ -4,7 +4,7 @@ aamio-sim-radio, the add-on. Dates are the day the version was committed; it is
 tagged on release, and the two are the same day. Every entry says what changed
 for somebody using it.
 
-## 0.1.0 - unreleased
+## 0.1.0 - 2026-11-26
 
 - The first published version of the simulated radio the aamio runtimes have
   run their tests over since 15 November 2026: a transport under contract 3
