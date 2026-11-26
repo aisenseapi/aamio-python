@@ -291,6 +291,17 @@ def test_enable_lets_it_run_and_disable_takes_it_out(site, monkeypatch, tmp_path
     assert code == 0 and "demo was not enabled" in json.loads(out)["note"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a file's mode is POSIX's; on Windows the home is kept private by its own rules")
+def test_the_list_of_enabled_add_ons_is_private_from_its_first_byte(site, monkeypatch, tmp_path):
+    # Written with the default mode, addons.json could be read by every user of the machine until the next command made
+    # it private and said an older version had written it (found on Linux on 26 November 2026).
+    site("demo-pkg", "demo_pkg")
+    code, _, _ = main(["addon", "enable", "demo"], monkeypatch)
+    assert code == 0
+    mode = os.stat(tmp_path / "home" / "addons.json").st_mode & 0o777
+    assert mode == 0o600, oct(mode)
+
+
 def test_the_choice_is_the_home_s(site, monkeypatch, tmp_path):
     site("demo-pkg", "demo_pkg")
 

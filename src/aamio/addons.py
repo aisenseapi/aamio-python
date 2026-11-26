@@ -135,7 +135,10 @@ def _write_enabled(given, names):
     path = enabled_file(given)
     tmp = "%s.%d.tmp" % (path, os.getpid())
     try:
-        with open(tmp, "w", encoding="utf-8") as handle:
+        # Private from its first byte, as every other file in the home: written with the default mode, it was readable by
+        # every user of the machine until the next command made it private and blamed an older version for it (found
+        # on Linux on 26 November 2026).
+        with storage.open_private(tmp) as handle:
             json.dump({"enabled": names}, handle, indent=2)
             handle.write("\n")
     except OSError as error:
