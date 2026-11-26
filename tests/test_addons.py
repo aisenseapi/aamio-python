@@ -992,21 +992,42 @@ def test_an_add_on_with_no_directory_of_its_own_is_an_answer(process_site, monke
         runtime.close()
 
 
-def test_a_list_that_cannot_be_written_says_so_and_changes_nothing(process_site, monkeypatch, tmp_path):
+@pytest.mark.parametrize("when", ["made", "written"])
+def test_a_list_that_cannot_be_written_says_so_and_changes_nothing(process_site, monkeypatch, tmp_path, when):
+    # The disk is full when the file of this process's own is made, or when the list is written into it. The failure is
+    # put where the list is written, storage.open_private: put on open, as it was until the check of 26 November 2026,
+    # it no longer reached the write, and the test guarded nothing. What it guards has not changed.
     ran, _ = process_site()
-    real = open
+    real = addons.storage.open_private
 
-    def no_room(path, mode="r", *rest, **more):
-        if "w" in mode and str(path).endswith(".tmp"):
+    class Full:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.handle.close()
+            return False
+
+        def write(self, text):
             raise OSError(28, "No space left on device")
-        return real(path, mode, *rest, **more)
 
-    monkeypatch.setattr(addons, "open", no_room, raising=False)
+    def no_room(path, *rest, **more):
+        if not (os.path.basename(str(path)).startswith("addons.json.") and str(path).endswith(".tmp")):
+            return real(path, *rest, **more)
+        if when == "made":
+            raise OSError(28, "No space left on device")
+        return Full(real(path, *rest, **more))
+
+    monkeypatch.setattr(addons.storage, "open_private", no_room)
     code, out, err = main(["addon", "enable", "demo2"], monkeypatch)
     assert code == 2 and out == "" and "addons.json could not be written: ENOSPC. Nothing changed; check the disk and the home's permissions, and try again." in err
     assert not (tmp_path / "home" / "addons.json").exists(), "nothing was recorded"
+    assert not list((tmp_path / "home").glob("addons.json.*.tmp")), "and no part of the list is left in the home"
     assert ran.read_text(encoding="utf-8") == "probe probe\n", "though the probe had answered"
-    monkeypatch.delattr(addons, "open")
+    monkeypatch.setattr(addons.storage, "open_private", real)
     assert main(["addon", "enable", "demo2"], monkeypatch)[0] == 0 and enabled_in(tmp_path) == {"enabled": ["demo2-pkg"]}
 
 
