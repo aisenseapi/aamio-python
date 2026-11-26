@@ -1,0 +1,13 @@
+{
+  "aamio_addon": 3,
+  "name": "tcp",
+  "version": "0.1.0",
+  "description": "aamio over TCP between two machines: one listens on a port, and the other connects out to it, also from behind NAT, a firewall or an HTTP proxy, and keeps the connection so it can be reached over it. Each frame has two bytes of length, and both sides keep the connection alive. With TLS the certificate is checked against a pin or the system's roots. The core seals and verifies; the networks and a proxy in between see that frames go, how big they are and when.",
+  "transport": {
+    "medium": "tcp",
+    "start": {"python": "aamio_tcp.transport"},
+    "platforms": ["linux", "darwin", "win32"],
+    "permissions": ["network_internet"]
+  },
+  "environment": ["AAMIO_TCP_LISTEN", "AAMIO_TCP_HERE", "AAMIO_TCP_CERT", "AAMIO_TCP_KEY", "AAMIO_TCP_PEERS", "AAMIO_TCP_TLS", "AAMIO_TCP_PIN", "AAMIO_TCP_PROXY", "AAMIO_TCP_NAME", "AAMIO_TCP_KEEPALIVE", "AAMIO_TCP_ALLOW"]
+}
