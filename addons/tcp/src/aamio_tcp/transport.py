@@ -353,8 +353,9 @@ class Conn:
         except (OSError, ValueError, ConnectionError) as error:
             self.close(str(error) or type(error).__name__)
 
-    def close(self, why):
-        """On the event loop: closed once, the frames still waiting dropped (sent was said; the core's receipts decide)."""
+    def close(self, why, abort=False):
+        """On the event loop: closed once, the frames still waiting dropped (sent was said; the core's receipts decide).
+        Aborted when the transport stops: TLS would otherwise wait for the other side to answer its close."""
         if self.dead:
             return
         with self.lock:
@@ -362,8 +363,11 @@ class Conn:
             self.waiting.clear()
         self.wake.set()
         try:
-            self.writer.close()
-        except (OSError, RuntimeError):
+            if abort:
+                self.writer.transport.abort()
+            else:
+                self.writer.close()
+        except (OSError, RuntimeError, AttributeError):
             pass
         self.owner.forget(self, why)
 
@@ -475,6 +479,7 @@ class Tcp:
         self.listening = False
         self.loop = None
         self.server = None
+        self.ended = None
         self.name = None
 
     # ---------------------------------------------------------------- what it says of itself
@@ -551,6 +556,20 @@ class Tcp:
         if self.listen_at is not None:
             await self._listen()
         await self.stopped.wait()
+        await self._end_tasks()
+        if self.ended is not None:
+            self.ended.set()
+
+    async def _end_tasks(self):
+        """Cancel every task the loop still holds, a connection's reading and writing or a wait before connecting again,
+        and wait at most a second for each to end. A task left pending is destroyed as Python shuts down, and Python
+        says so on standard error, which the core logs: between two machines on 26 November 2026 it did at every stop."""
+        me = asyncio.current_task()
+        rest = [task for task in asyncio.all_tasks() if task is not me and not task.done()]
+        for task in rest:
+            task.cancel()
+        if rest:
+            await asyncio.wait(rest, timeout=1.0)
 
     async def _listen(self):
         """Open the listener, say ready, and take connections; while it cannot be opened, say down once and try again."""
@@ -607,6 +626,8 @@ class Tcp:
                 old.close("a new connection took the name @%s" % name)
             await asyncio.gather(conn.read_loop(), conn.write_loop())
         finally:
+            if self.stopping and not writer.transport.is_closing():
+                writer.transport.abort()  # one still saying its first line when the transport stops
             with self.guard:
                 self.inbound_count -= 1
                 left = self.inbound_from.get(ip, 1) - 1
@@ -704,15 +725,18 @@ class Tcp:
             note("the connection %s %s ended: %s" % ("from" if conn.inbound else "to", conn.key, why))
 
     async def _shutdown(self, done):
+        """Close every connection and the listener, and let _main end the tasks left; done is set once they have ended."""
         with self.guard:
             conns = list(self.named.values()) + [link.conn for link in self.links.values() if link.conn is not None]
         for conn in conns:
-            conn.close("the transport stops")
+            conn.close("the transport stops", abort=True)
         if self.server is not None:
             self.server.close()
+        self.ended = done
         if getattr(self, "stopped", None) is not None:
             self.stopped.set()
-        done.set()
+        else:
+            done.set()
 
     # ---------------------------------------------------------------- sending
 
