@@ -14,8 +14,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "AI SENSE AS" }]
-# The first core that knows contract 3. The transport itself needs nothing but the standard library, and is unchanged
-# since 0.7.0.
+# The first core that knows contract 3. The transport itself needs nothing but the standard library.
 dependencies = ["aamio>=0.7.0"]
 keywords = ["aamio", "agents", "transport", "radio", "simulation", "test"]
 
