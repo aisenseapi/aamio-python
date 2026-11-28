@@ -1687,20 +1687,60 @@ class Runtime:
             # Not past a mark, as the home's other files are: the key holds
             # the seed and nothing else, in all three runtimes.
             with open(path, "r", encoding="utf-8") as handle:
-                text = handle.read().strip()
+                text = handle.read()
         except FileNotFoundError:
-            text = ""
+            return self._create_keys(path)
         except (OSError, ValueError) as error:
             raise CodedRuntimeError("key_unreadable", self._unreadable("key", error.__class__.__name__)) from None
-        if text:
-            # A new key over it would be a new identity, and the old one gone
-            # for good. Partners know this runtime by that key.
-            if re.fullmatch(r"[0-9a-f]{64}", text) is None:
-                raise CodedRuntimeError("key_unreadable", self._unreadable("key", "not a 64 character hex seed"))
-            return Keys(bytes.fromhex(text))
+        return self._keys_from(text)
+
+    def _keys_from(self, text):
+        """The keys of a key file's text, or key_unreadable.
+
+        A new key over a file that is there would be a new identity, and the
+        old one gone for good: partners know this runtime by that key, and what
+        was sealed to it opens with it alone. An empty file, or one of blanks,
+        was taken for no file and written over without a word (the health and
+        security check of 28 November 2026). Only a file that is not there gets
+        a key now, as in the Node runtime.
+        """
+        text = text.strip()
+        if not text:
+            raise CodedRuntimeError("key_unreadable", self._unreadable("key", "it is empty"))
+        if re.fullmatch(r"[0-9a-f]{64}", text) is None:
+            raise CodedRuntimeError("key_unreadable", self._unreadable("key", "not a 64 character hex seed"))
+        return Keys(bytes.fromhex(text))
+
+    def _create_keys(self, path):
+        """A key for a home that has none, in a file no other process made in the meantime."""
         keys = Keys.generate()
-        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as handle:
-            handle.write(keys.seed.hex() + "\n")
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            # Another process made it between the look and now: that key is
+            # this home's, if it is one, and it is never written over.
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    text = handle.read()
+            except (OSError, ValueError) as error:
+                raise CodedRuntimeError("key_unreadable", self._unreadable("key", error.__class__.__name__)) from None
+            return self._keys_from(text)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(keys.seed.hex() + "\n")
+                handle.flush()
+                # The key is the identity: it is on the disk before anything
+                # is signed with it.
+                os.fsync(handle.fileno())
+        except BaseException:
+            # A file this runtime made and could not fill goes again: nothing
+            # was signed with that key, and an empty file is refused.
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise
+        storage.sync_dir(os.path.dirname(path))
         return keys
 
     def save_state(self):

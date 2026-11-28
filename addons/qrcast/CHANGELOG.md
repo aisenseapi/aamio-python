@@ -4,6 +4,14 @@ aamio-qrcast, the add-on. Dates are the day the version was committed; it is
 tagged on release, and the two are the same day. Every entry says what changed
 for somebody using it.
 
+## 0.3.0 - 2026-11-28
+
+- Needs Python 3.11 and Pillow 13.0 or newer. Pillow 12.3 and older carry security advisories in decoders this add-on
+  uses, GIF and JPEG among them, and Pillow 13.0, the first without them, needs Python 3.11. Python 3.10 reached the end
+  of its life in October 2026. On Python 3.10, pip keeps qrcast 0.2.1.
+- A picture is opened by the decoder of the format its first bytes name, PNG, JPEG, GIF or WebP, and by no other.
+- The limit of 10 MiB holds when the reader is called as a library too, not only from the command line.
+
 ## 0.2.1 - 2026-11-27
 
 - The examples, the help and the manifest name the documentation address `00:00:5E:00:53:01` for Bluetooth

@@ -13,6 +13,11 @@ from . import service
 
 FORMATS = ("png", "jpeg", "gif", "webp")
 
+# Pillow's name for each format: a picture is opened by the one decoder its
+# first bytes name and by no other (the health and security check of 28
+# November 2026).
+PILLOW_FORMATS = {"png": "PNG", "jpeg": "JPEG", "gif": "GIF", "webp": "WEBP"}
+
 
 class Unreadable(Exception):
     def __init__(self, reason, fix):
@@ -71,10 +76,15 @@ def read(data):
         from PIL import Image
     except ImportError:
         raise Unreadable("no_reader", "Pillow, which opens the picture on this machine, is not installed: pip install aamio-qrcast brings it. Or read with engine aisense, which sends the picture to aisenseapi.com.") from None
-    if kind_of(data[:16]) is None:
+    # The limit holds here too, for a call into this module as well as for the
+    # command line, which reads no more than the limit and one byte.
+    if len(data) > service.MAX_IMAGE_BYTES:
+        raise Unreadable("too_big", "The picture is %d bytes, and at most 10 MiB are read. Send a smaller picture of the code." % len(data))
+    kind = kind_of(data[:16])
+    if kind is None:
         raise Unreadable("not_a_picture", "This is not a PNG, JPEG, GIF or WebP picture.")
     try:
-        with Image.open(io.BytesIO(data)) as image:
+        with Image.open(io.BytesIO(data), formats=(PILLOW_FORMATS[kind],)) as image:
             width, height = image.size
             if width * height > service.MAX_PIXELS:
                 raise Unreadable("too_big", "The picture is %d x %d pixels, and at most 25 megapixels are read. Send a smaller picture of the code." % (width, height))

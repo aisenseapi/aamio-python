@@ -245,18 +245,17 @@ def test_the_user_agent_says_which_version_it_is():
     from aamio.client import AamioClient
 
     seen = {}
-    real = urllib.request.urlopen
 
-    def capture(request, timeout=None):
-        seen["ua"] = request.get_header("User-agent")
-        raise OSError("no network in a test")
+    class Capture:
+        # Every request goes through the client's own opener, which follows no
+        # redirect (the health and security check of 28 November 2026).
+        def open(self, request, timeout=None):
+            seen["ua"] = request.get_header("User-agent")
+            raise OSError("no network in a test")
 
-    urllib.request.urlopen = capture
-
-    try:
-        status, body = AamioClient().http("GET", "https://aamio.test/health")
-    finally:
-        urllib.request.urlopen = real
+    client = AamioClient()
+    client._opener = Capture()
+    status, body = client.http("GET", "https://aamio.test/health")
 
     assert status == 0, "the probe should never reach a network"
     assert seen["ua"] == "aamio/" + aamio.__version__

@@ -4,6 +4,17 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.7.3 - 2026-11-28
+
+- No request follows a redirect. A 301, 302, 303, 307 or 308 is said as the status it is, and nothing goes to where it
+  points. Until now the headers went along: `X-Read`, which reads a thread, and `X-Scope`, to another port, another
+  host, or from https to http. aamio.at answers with no redirect, so one comes from something in between, a proxy or a
+  host that moved (the health and security check of 28 November).
+- A key file that is empty, or holds only blanks, is refused with `key_unreadable` and kept as it is. It was taken for
+  no key file, and a new identity was written over it without a word: partners no longer knew the runtime, and what was
+  sealed to the old key could not be opened. Only a home with no key file gets a key, and a key another process made in
+  the meantime is used, never written over.
+
 ## 0.7.2 - 2026-11-27
 
 - `aamio board answer` has help of its own and says where the answer goes. Before stopping another aamio that holds

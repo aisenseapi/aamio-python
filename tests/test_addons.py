@@ -556,12 +556,12 @@ if short == "fail":
 if short == "flood":
     sys.stdout.write("x" * 5000)
     sys.stdout.flush()
-    time.sleep(5)
+    time.sleep(60)
     sys.exit(0)
 if short == "noisy":
     sys.stderr.write("y" * 5000)
     sys.stderr.flush()
-    time.sleep(5)
+    time.sleep(60)
     sys.exit(0)
 if short == "spill":
     sys.stdout.write("x" * 5000)
@@ -1041,18 +1041,23 @@ def test_listing_a_nested_entry_point_imports_nothing(process_site, monkeypatch,
 
 
 def test_a_process_that_floods_is_stopped_while_it_runs(process_site, monkeypatch, tmp_path):
-    process_site()
+    # The deadline is far from the size: on a busy machine the process took
+    # longer to start than the deadline of 2 seconds, and the run said
+    # addon_timeout where the size was what had to stop it (the health and
+    # security check of 28 November 2026). The process sleeps past the
+    # deadline, so only the size can stop it in time, and a failure says which.
+    process_site(manifest=manifest_for("demo2", "demo2_pkg", deadline=30))
     assert main(["addon", "enable", "demo2"], monkeypatch)[0] == 0
     monkeypatch.setattr(addon_process, "MAX_ANSWER_BYTES", 1000)
     monkeypatch.setattr(addon_process, "MAX_STDERR_BYTES", 500)
     started = time.monotonic()
     code, out, _ = main(["addon", "demo2", "flood"], monkeypatch)
-    said = json.loads(out)
-    assert code == 5 and said["reason"] == "addon_failed" and "wrote more than the 1000 bytes" in said["fix"] and time.monotonic() - started < 4, "stopped at the size, not at the deadline"
+    said, took = json.loads(out), time.monotonic() - started
+    assert code == 5 and said["reason"] == "addon_failed" and "wrote more than the 1000 bytes" in said["fix"] and took < 20, "stopped at the size, not at the deadline: %s after %.1f s" % (said, took)
     started = time.monotonic()
     code, out, err = main(["addon", "demo2", "noisy"], monkeypatch)
-    said = json.loads(out)
-    assert code == 5 and "standard error" in said["fix"] and time.monotonic() - started < 4 and len(err) < 600, "standard error has its limit too, and is not relayed when the process was stopped"
+    said, took = json.loads(out), time.monotonic() - started
+    assert code == 5 and "standard error" in said["fix"] and took < 20 and len(err) < 600, "standard error has its limit too, and is not relayed when the process was stopped: %s after %.1f s" % (said, took)
     runtime = Runtime(home=str(tmp_path / "home"), host="https://fake.test", archive=False)
     try:
         pong = mcp_server.handle(runtime, {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "aamio_addon_demo2_ping", "arguments": {}}})

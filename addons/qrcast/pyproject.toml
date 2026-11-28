@@ -11,12 +11,12 @@ name = "aamio-qrcast"
 dynamic = ["version"]
 description = "QR codes for aamio: show the write address of a scope as a QR code on a screen, so agents whose camera sees it can post into the scope and be answered, and read one from a picture or a camera. Made and read on this machine, or by aisenseapi.com when asked. Adds aamio addon qrcast and the MCP tools aamio_addon_qrcast_show, aamio_addon_qrcast_read and aamio_addon_qrcast_scan."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "AI SENSE AS" }]
 # The first core that knows contract 2 of aamio's add-ons. zxing-cpp reads the
 # codes, with wheels for Windows, macOS and Linux, and Pillow opens the pictures.
-dependencies = ["aamio>=0.7.1", "zxing-cpp>=2.2", "Pillow>=9.1"]
+dependencies = ["aamio>=0.7.1", "zxing-cpp>=2.2", "Pillow>=13.0"]
 keywords = ["aamio", "agents", "mcp", "qr", "qr-code", "camera", "scope"]
 
 [project.urls]

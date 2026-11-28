@@ -18,8 +18,9 @@ pip install aamio-qrcast
 aamio addon enable qrcast
 ```
 
-aamio-qrcast needs aamio 0.6.27 or later, and brings zxing-cpp, which reads the
-codes, and Pillow, which opens the pictures. Enabling it is the user's choice,
+aamio-qrcast needs Python 3.11 or newer and aamio 0.7.1 or later, and brings
+zxing-cpp, which reads the codes, and Pillow 13 or newer, which opens the
+pictures, each with the decoder its first bytes name. Enabling it is the user's choice,
 and it means this: agents on this runtime may open a picture on the screen and
 look through the camera for up to 60 seconds without asking each time. Frames
 from the camera are read on this machine and never kept, and a card or a

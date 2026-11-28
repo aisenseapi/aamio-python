@@ -108,6 +108,26 @@ def health_body(text):
         return NotJson(text)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is an answer, and it is never followed.
+
+    urlopen followed 301, 302, 303, 307 and 308, and the headers went along to
+    wherever the answer pointed: X-Read, the capability to read a thread, and
+    X-Scope, to another port, another host, and from https to http. aamio never
+    answers with one, so a redirect comes from something in between, a proxy or
+    a host that moved, and it is said as the status it is (the health and
+    security check of 28 November 2026).
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def no_redirect_opener():
+    """The opener every request of this client goes through: urlopen's handlers, with redirects not followed."""
+    return urllib.request.build_opener(_NoRedirect())
+
+
 class AamioClient:
     def __init__(self, host: str = None, timeout: int = 60, board: str = None, verifyum: str = None):
         self.host = (host or os.environ.get("AAMIO_HOST") or DEFAULT_HOST).rstrip("/")
@@ -116,6 +136,7 @@ class AamioClient:
         self.verifyum = (verifyum or os.environ.get("AAMIO_VERIFYUM") or VERIFYUM_MCP).rstrip("/")
         # What X-Opened-Via said for each address whose gate was read: "hosted" or None.
         self.opened_via = {}
+        self._opener = no_redirect_opener()
 
     def http(self, method: str, url: str, body=None, headers=None, timeout=None, with_headers=False, keep_status=False, parse=True):
         """(status, body), or (status, body, headers) with with_headers. With parse false, body is the text as it came."""
@@ -135,8 +156,12 @@ class AamioClient:
         for name, value in (headers or {}).items():
             request.add_header(name, value)
         got = {}
+        opener = self.__dict__.get("_opener")
+        if opener is None:
+            # A client made without __init__, as some tests make one.
+            opener = self._opener = no_redirect_opener()
         try:
-            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
+            with opener.open(request, timeout=timeout or self.timeout) as response:
                 status = response.status
                 got = {name.lower(): value for name, value in response.headers.items()}
                 try:
